@@ -1,0 +1,21 @@
+{
+    "C_Cpp.intelliSenseEngine": "default",
+    "idf.portWin": "COM3",
+    "idf.adapterTargetName": "esp32p4",
+    "idf.openOcdConfigs": [
+        "board/esp32p4-ftdi.cfg"
+    ],
+    "idf.flashType": "UART",
+    "idf.espIdfPathWin": "c:\\Users\\john\\Development\\esp\\fork\\esp-idf",
+    "idf.pythonBinPathWin": "c:\\Users\\john\\Development\\esp_tools\\python_env\\idf5.5_py3.11_env\\Scripts\\python.exe",
+    "idf.toolsPathWin": "c:\\Users\\john\\Development\\esp_tools",
+    "idf.customExtraPaths": "c:\\Users\\john\\Development\\esp_tools\\tools\\xtensa-esp-elf-gdb\\15.2_20241112\\xtensa-esp-elf-gdb\\bin;c:\\Users\\john\\Development\\esp_tools\\tools\\riscv32-esp-elf-gdb\\15.2_20241112\\riscv32-esp-elf-gdb\\bin;c:\\Users\\john\\Development\\esp_tools\\tools\\xtensa-esp-elf\\esp-14.2.0_20241119\\xtensa-esp-elf\\bin;c:\\Users\\john\\Development\\esp_tools\\tools\\riscv32-esp-elf\\esp-14.2.0_20241119\\riscv32-esp-elf\\bin;c:\\Users\\john\\Development\\esp_tools\\tools\\esp32ulp-elf\\2.38_20240113\\esp32ulp-elf\\bin;c:\\Users\\john\\Development\\esp_tools\\tools\\cmake\\3.30.2\\bin;c:\\Users\\john\\Development\\esp_tools\\tools\\openocd-esp32\\v0.12.0-esp32-20241016\\openocd-esp32\\bin;c:\\Users\\john\\Development\\esp_tools\\tools\\ninja\\1.12.1;c:\\Users\\john\\Development\\esp_tools\\tools\\idf-exe\\1.0.3;c:\\Users\\john\\Development\\esp_tools\\tools\\ccache\\4.10.2\\ccache-4.10.2-windows-x86_64;c:\\Users\\john\\Development\\esp_tools\\tools\\dfu-util\\0.11\\dfu-util-0.11-win64;c:\\Users\\john\\Development\\esp_tools\\tools\\esp-rom-elfs\\20241011",
+    "idf.customExtraVars": {
+        "OPENOCD_SCRIPTS": "c:\\Users\\john\\Development\\esp_tools\\tools\\openocd-esp32\\v0.12.0-esp32-20241016/openocd-esp32/share/openocd/scripts",
+        "IDF_CCACHE_ENABLE": "1",
+        "ESP_ROM_ELF_DIR": "c:\\Users\\john\\Development\\esp_tools\\tools\\esp-rom-elfs\\20241011/"
+    },
+    "idf.gitPathWin": "c:\\Users\\john\\Development\\esp_tools\\tools\\idf-git\\2.39.2\\cmd\\git.exe",
+    "C_Cpp.default.compilerPath": "c:\\Users\\john\\Development\\esp_tools\\tools\\cmake\\3.30.2\\bin\\cmake",
+    "cmake.cmakePath": "c:\\Users\\john\\Development\\esp_tools\\tools\\cmake\\3.30.2\\bin\\cmake"
+}

@@ -1,0 +1,60 @@
+menu "AVB Example Configuration"
+
+    orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
+
+    config EXAMPLE_AVB_ENTITY_NAME
+        string "Entity Name"
+        default "AVB Example Entity"
+        help
+            Set the name of the AVB entity. This name will be used to identify this device
+            in the AVB network.
+
+    config EXAMPLE_AVB_ENTITY_MODEL_ID
+        int "Entity Model ID"
+        default 0
+        range 0 1000000
+        help
+            Set the model ID for this AVB entity. This ID should uniquely identify the model/type
+            of AVB device within your vendor's product line.
+
+    config EXAMPLE_AVB_TALKER
+        bool "Function as AVB Talker"
+        default true
+        help
+            Function as AVB Talker.
+
+    config EXAMPLE_AVB_LISTENER
+        bool "Function as AVB Listener"
+        default true
+        help
+            Function as AVB Listener.
+
+    if EXAMPLE_AVB_LISTENER
+
+        config EXAMPLE_AVB_LISTENER_AUTO_CONNECT
+            bool "Auto Connect"
+            default false
+            help
+                Automatically connect to an AVB Talker with the same entity model ID.
+
+    endif
+
+    config EXAMPLE_AVB_ATDECC
+        bool "Allow remote control via ATDECC"
+        default true
+        help
+            Allow an AVB Controller to control this device via ATDECC protocol.
+
+    config EXAMPLE_AVB_PULSE_GPIO
+        int "GPIO for pulse"
+        default 20
+        help
+            GPIO to use for PTP pulse.
+
+    config EXAMPLE_AVB_PULSE_WIDTH_NS
+        int "Pulse width"
+        default 250000000
+        help
+            Pulse width for PTP pulse.
+
+endmenu
