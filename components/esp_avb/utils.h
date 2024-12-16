@@ -13,6 +13,19 @@
 #define PRINT_SUMMARY 0
 #define PRINT_VERBOSE 1
 
+/* Error and OK definitions */
+
+#define ERROR ESP_FAIL
+#define OK ESP_OK
+
+#define UNUSED (void)
+
+/* Time constants */
+#define MSEC_PER_SEC 1000
+#define NSEC_PER_USEC 1000
+#define NSEC_PER_MSEC 1000000ll
+#define NSEC_PER_SEC 1000000000ll
+
 // bitswap helpers
 #define bitswap_64(x)   ((uint64_t)                 \
      ((((x) & 0xff00000000000000ull) >> 56) |       \
@@ -34,18 +47,12 @@
     ((((x) & 0xff00) >> 8) |                        \
      (((x) & 0x00ff) << 8)))
 
-// Commonly used mac addresses
-static const uint8_t bcast_mac_addr[6] = { 0x91, 0xe0, 0xf0, 0x01, 0x00, 0x00 }; // adp
-static const uint8_t maap_mcast_mac_addr[6] = { 0x91, 0xe0, 0xf0, 0x00, 0xff, 0x00 }; // maap
-static const uint8_t spantree_mac_addr[6] = { 0x01, 0x80, 0xc2, 0x00, 0x00, 0x21 }; // 
-static const uint8_t lldp_mcast_mac_addr[6] = { 0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e }; // msrp,mvrp
-
 // Ethertypes
 typedef enum {
-	ethertype_msrp = 0x22ea,
-	ethertype_avtp = 0x22f0,
-	ethertype_mvrp = 0x88f5,
-	ethertype_gptp = 0x88f7
+	ethertype_msrp = htons(0x22ea),
+	ethertype_avtp = htons(0x22f0),
+	ethertype_mvrp = htons(0x88f5),
+	ethertype_gptp = htons(0x88f7)
 } ethertype_t;
 
 // Useful when doing things like printing frames
@@ -128,5 +135,6 @@ int8_t msec_to_log_period(uint16_t msec_period);
 uint16_t log_period_to_msec(int8_t log_period);
 double scaled_to_ppm(int32_t scaled_value);
 int32_t ppm_to_scaled(double ppm_value);
+int64_t timespec_to_ms(const struct timespec *ts);
 
 #endif /* ESP_AVB_SIMPLE_TALKER_INCLUDE_UTILS_H_ */

@@ -327,3 +327,8 @@ int32_t ppm_to_scaled(double ppm_value) {
     // Convert from PPM to 2^41 scaled value
     return (int32_t)((ppm_value / 1e6) * pow(2, 41));
 }
+
+int64_t timespec_to_ms(const struct timespec *ts)
+{
+  return ts->tv_sec * MSEC_PER_SEC + (ts->tv_nsec / NSEC_PER_MSEC);
+}

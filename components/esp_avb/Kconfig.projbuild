@@ -33,7 +33,7 @@ menu "AVB Configuration"
 
         config ESP_AVB_STACKSIZE
             int "AVB stack size"
-            default 4096 # DEFAULT_TASK_STACKSIZE
+            default 6144 # DEFAULT_TASK_STACKSIZE
             help
                 Set the stack size for the AVB task.
 

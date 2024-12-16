@@ -1,4 +1,4 @@
-#include "atdecc.h"
+#include "avb.h"
 
 // Define logging tag
 static const char *TAG = "DECC";
@@ -717,17 +717,17 @@ static uint8_t frame_template_acmp_get_rx_state_command[] = {};
 static uint8_t frame_template_acmp_get_rx_state_response[] = {};
 
 // Append adpdu to a frame based on message type and set the payload_size
-void append_adpdu(adp_message_type_t type, eth_frame_t *frame) {
+void append_adpdu(adp_msg_type_t type, eth_frame_t *frame) {
     switch (type) {
-        case adp_message_type_entity_available:
+        case adp_msg_type_entity_available:
             memcpy(frame->payload, frame_template_adp_entity_available, sizeof(frame_template_adp_entity_available));
             frame->payload_size = sizeof(frame_template_adp_entity_available);
             break;
-        case adp_message_type_entity_departing:
+        case adp_msg_type_entity_departing:
             memcpy(frame->payload, frame_template_adp_entity_departing, sizeof(frame_template_adp_entity_departing));
             frame->payload_size = sizeof(frame_template_adp_entity_departing);
             break;
-        case adp_message_type_entity_discover:
+        case adp_msg_type_entity_discover:
             memcpy(frame->payload, frame_template_adp_entity_discover, sizeof(frame_template_adp_entity_discover));
             frame->payload_size = sizeof(frame_template_adp_entity_discover);
             break;
@@ -737,32 +737,32 @@ void append_adpdu(adp_message_type_t type, eth_frame_t *frame) {
 }
 
 // Append aecpdu to a frame based on message type and set the payload_size
-void append_aecpdu(aecp_message_type_t type, eth_frame_t *frame) {
+void append_aecpdu(aecp_msg_type_t type, eth_frame_t *frame) {
     static uint8_t *frame_template;
     static ssize_t frame_size = 0;
     static uint16_t command_code;
     memcpy(&command_code, frame->payload + 21, (2)); // 14 bits but left 2 bits are likely 0
     command_code = ntohs(command_code); // flip endianness
     switch (type) {
-        case aecp_message_type_aem_command:
+        case aecp_msg_type_aem_command:
             switch (command_code) {
-                case aecp_command_code_acquire_entity:
+                case aecp_cmd_code_acquire_entity:
                     frame_template = frame_template_aecp_command_acquire_entity;
                     frame_size = sizeof(frame_template_aecp_command_acquire_entity);
                     break;
-                case aecp_command_code_lock_entity:
+                case aecp_cmd_code_lock_entity:
                     frame_template = frame_template_aecp_command_lock_entity;
                     frame_size = sizeof(frame_template_aecp_command_lock_entity);
                     break;
-                case aecp_command_code_entity_available:
+                case aecp_cmd_code_entity_available:
                     frame_template = frame_template_aecp_command_entity_available;
                     frame_size = sizeof(frame_template_aecp_command_entity_available);
                     break;
-                case aecp_command_code_controller_available:
+                case aecp_cmd_code_controller_available:
                     frame_template = frame_template_aecp_command_controller_available;
                     frame_size = sizeof(frame_template_aecp_command_controller_available);
                     break;
-                case aecp_command_code_read_descriptor:
+                case aecp_cmd_code_read_descriptor:
                     frame_template = frame_template_aecp_command_read_descriptor_entity;
                     frame_size = sizeof(frame_template_aecp_command_read_descriptor_entity);
                     break;
@@ -770,25 +770,25 @@ void append_aecpdu(aecp_message_type_t type, eth_frame_t *frame) {
                     ESP_LOGE(TAG, "Can't create AECP command, with unknown command code: 0x%x", command_code);
             }
             break;
-        case aecp_message_type_aem_response:
+        case aecp_msg_type_aem_response:
             switch(command_code) {
-                case aecp_command_code_acquire_entity:
+                case aecp_cmd_code_acquire_entity:
                     frame_template = frame_template_aecp_response_acquire_entity;
                     frame_size = sizeof(frame_template_aecp_response_acquire_entity);
                     break;
-                case aecp_command_code_lock_entity:
+                case aecp_cmd_code_lock_entity:
                     frame_template = frame_template_aecp_response_lock_entity;
                     frame_size = sizeof(frame_template_aecp_response_lock_entity);
                     break;
-                case aecp_command_code_entity_available:
+                case aecp_cmd_code_entity_available:
                     frame_template = frame_template_aecp_response_entity_available;
                     frame_size = sizeof(frame_template_aecp_response_entity_available);
                     break;
-                case aecp_command_code_controller_available:
+                case aecp_cmd_code_controller_available:
                     frame_template = frame_template_aecp_response_controller_available;
                     frame_size = sizeof(frame_template_aecp_response_controller_available);
                     break;
-                case aecp_command_code_read_descriptor:
+                case aecp_cmd_code_read_descriptor:
                     frame_template = frame_template_aecp_response_read_descriptor_entity;
                     frame_size = sizeof(frame_template_aecp_response_read_descriptor_entity);
                     break;
@@ -806,55 +806,55 @@ void append_aecpdu(aecp_message_type_t type, eth_frame_t *frame) {
 }
 
 // Append acmpdu to a frame based on message type and set the payload_size
-void append_acmpdu(acmp_message_type_t type, eth_frame_t *frame) {
+void append_acmpdu(acmp_msg_type_t type, eth_frame_t *frame) {
     static uint8_t *frame_template = {};
     static ssize_t frame_size = 0;
     switch (type) {
-        case acmp_message_type_connect_tx_command:
+        case acmp_msg_type_connect_tx_command:
             frame_template = frame_template_acmp_connect_tx_command;
             frame_size = sizeof(frame_template_acmp_connect_tx_command);
             break;
-        case acmp_message_type_connect_tx_response:
+        case acmp_msg_type_connect_tx_response:
             frame_template = frame_template_acmp_connect_tx_response;
             frame_size = sizeof(frame_template_acmp_connect_tx_response);
             break;
-        case acmp_message_type_disconnect_tx_command:
+        case acmp_msg_type_disconnect_tx_command:
             frame_template = frame_template_acmp_disconnect_tx_command;
             frame_size = sizeof(frame_template_acmp_disconnect_tx_command);
             break;
-        case acmp_message_type_disconnect_tx_response:
+        case acmp_msg_type_disconnect_tx_response:
             frame_template = frame_template_acmp_disconnect_tx_response;
             frame_size = sizeof(frame_template_acmp_disconnect_tx_response);
             break;
-	    case acmp_message_type_get_tx_state_command:
+	    case acmp_msg_type_get_tx_state_command:
             frame_template = frame_template_acmp_get_tx_state_command;
             frame_size = sizeof(frame_template_acmp_get_tx_state_command);
             break;
-	    case acmp_message_type_get_tx_state_response:
+	    case acmp_msg_type_get_tx_state_response:
             frame_template = frame_template_acmp_get_tx_state_response;
             frame_size = sizeof(frame_template_acmp_get_tx_state_response);
             break;
-	    case acmp_message_type_connect_rx_command:
+	    case acmp_msg_type_connect_rx_command:
             frame_template = frame_template_acmp_connect_rx_command;
             frame_size = sizeof(frame_template_acmp_connect_rx_command);
             break;
-        case acmp_message_type_connect_rx_response:
+        case acmp_msg_type_connect_rx_response:
             frame_template = frame_template_acmp_connect_rx_response;
             frame_size = sizeof(frame_template_acmp_connect_rx_response);
             break;
-        case acmp_message_type_disconnect_rx_command:
+        case acmp_msg_type_disconnect_rx_command:
             frame_template = frame_template_acmp_disconnect_rx_command;
             frame_size = sizeof(frame_template_acmp_disconnect_rx_command);
             break;
-	    case acmp_message_type_disconnect_rx_response:
+	    case acmp_msg_type_disconnect_rx_response:
             frame_template = frame_template_acmp_disconnect_rx_response;
             frame_size = sizeof(frame_template_acmp_disconnect_rx_response);
             break;
-	    case acmp_message_type_get_rx_state_command:
+	    case acmp_msg_type_get_rx_state_command:
             frame_template = frame_template_acmp_get_rx_state_command;
             frame_size = sizeof(frame_template_acmp_get_rx_state_command);
             break;
-	    case acmp_message_type_get_rx_state_response:
+	    case acmp_msg_type_get_rx_state_response:
             frame_template = frame_template_acmp_get_rx_state_response;
             frame_size = sizeof(frame_template_acmp_get_rx_state_response);
             break;
@@ -867,133 +867,7 @@ void append_acmpdu(acmp_message_type_t type, eth_frame_t *frame) {
     }
 }
 
-// Detect which kind of ATDECC frame it is; assumes Ethertype is AVTP
-avb_frame_type_t detect_atdecc_frame_type(eth_frame_t *frame, ssize_t size) {
-    avb_frame_type_t frame_type = avb_frame_unknown;
-    if (size <= ETH_HEADER_LEN) {
-        ESP_LOGI(TAG, "Can't detect frame, too small: %d bytes", size);
-    }
-    else {
-        uint8_t subtype;
-        uint8_t message_type;
-        memcpy(&subtype, frame->payload, (1));
-        memcpy(&message_type, frame->payload + 1, (1)); // 4 bits
-        message_type = message_type & 0x0f; // mask out the left 4 bits
-        switch(subtype) {
-            case avtp_subtype_adp:
-                switch (message_type) {
-                    case adp_message_type_entity_available:
-                        frame_type = avb_frame_adp_entity_available;
-                        break;
-                    case adp_message_type_entity_departing:
-                        frame_type = avb_frame_adp_entity_departing;
-                        break;
-                    case adp_message_type_entity_discover:
-                        frame_type = avb_frame_adp_entity_discover;
-                        break;
-                    default:
-                        ESP_LOGI(TAG, "Can't detect ADP frame with unknown message type: 0x%x", message_type);
-                }
-                break;
-            case avtp_subtype_aecp:
-                uint16_t command_code;
-                memcpy(&command_code, frame->payload + 21, (2)); // 14 bits but left 2 bits are likely 0
-                command_code = ntohs(command_code); // flip endianness
-                switch (message_type) {
-                    case aecp_message_type_aem_command:
-                        switch (command_code) {
-                            case aecp_command_code_acquire_entity:
-                                frame_type = avb_frame_aecp_command_acquire_entity;
-                                break;
-                            case aecp_command_code_lock_entity:
-                                frame_type = avb_frame_aecp_command_lock_entity;
-                                break;
-                            case aecp_command_code_entity_available:
-                                frame_type = avb_frame_aecp_command_entity_available;
-                                break;
-                            case aecp_command_code_controller_available:
-                                frame_type = avb_frame_aecp_command_controller_available;
-                                break;
-                            case aecp_command_code_read_descriptor:
-                                frame_type = avb_frame_aecp_command_read_descriptor;
-                                break;
-                            default:
-                                ESP_LOGI(TAG, "Can't detect aecp command frame with unknown command type: 0x%x", command_code);
-                        }
-                        break;
-                    case aecp_message_type_aem_response:
-                        switch (command_code) {
-                            case aecp_command_code_acquire_entity:
-                                frame_type = avb_frame_aecp_response_acquire_entity;
-                                break;
-                            case aecp_command_code_lock_entity:
-                                frame_type = avb_frame_aecp_response_lock_entity;
-                                break;
-                            case aecp_command_code_entity_available:
-                                frame_type = avb_frame_aecp_response_entity_available;
-                                break;
-                            case aecp_command_code_controller_available:
-                                frame_type = avb_frame_aecp_response_controller_available;
-                                break;
-                            case aecp_command_code_read_descriptor:
-                                frame_type = avb_frame_aecp_response_read_entity;
-                                break;
-                            default:
-                                ESP_LOGI(TAG, "Can't detect aecp response frame with unknown command type: 0x%x", command_code);
-                        }
-                        break;
-                    default:
-                        ESP_LOGI(TAG, "Can't detect aecp frame with unknown message type: 0x%x", message_type);
-                }
-                break;
-            case avtp_subtype_acmp:
-                switch (message_type) {
-                    case acmp_message_type_connect_tx_command:
-                        frame_type = avb_frame_acmp_connect_tx_command;
-                        break;
-                    case acmp_message_type_connect_tx_response:
-                        frame_type = avb_frame_acmp_connect_tx_response;
-                        break;
-                    case acmp_message_type_disconnect_tx_command:
-                        frame_type = avb_frame_acmp_disconnect_tx_command;
-                        break;
-                    case acmp_message_type_disconnect_tx_response:
-                        frame_type = avb_frame_acmp_disconnect_tx_response;
-                        break;
-                    case acmp_message_type_get_tx_state_command:
-                        frame_type = avb_frame_acmp_get_tx_state_command;
-                        break;
-                    case acmp_message_type_get_tx_state_response:
-                        frame_type = avb_frame_acmp_get_tx_state_response;
-                        break;
-                    case acmp_message_type_connect_rx_command:
-                        frame_type = avb_frame_acmp_connect_rx_command;
-                        break;
-                    case acmp_message_type_connect_rx_response:
-                        frame_type = avb_frame_acmp_connect_rx_response;
-                        break;
-                    case acmp_message_type_disconnect_rx_command:
-                        frame_type = avb_frame_acmp_disconnect_rx_command;
-                        break;
-                    case acmp_message_type_disconnect_rx_response:
-                        frame_type = avb_frame_acmp_disconnect_rx_response;
-                        break;
-                    case acmp_message_type_get_rx_state_command:
-                        frame_type = avb_frame_acmp_get_rx_state_command;
-                        break;
-                    case acmp_message_type_get_rx_state_response:
-                        frame_type = avb_frame_acmp_get_rx_state_response;
-                        break;
-                    default:
-                        ESP_LOGI(TAG, "Can't detect ACMP frame with unknown message type: 0x%x", message_type);
-                }
-                break;
-            default:
-                ESP_LOGI(TAG, "Can't detect AVTP frame with unknown subtype: 0x%x", subtype);
-        }
-    }
-    return frame_type;
-}
+
 
 // Print out the frame details
 void print_atdecc_frame(avb_frame_type_t type, eth_frame_t *frame, int format) {
@@ -1084,45 +958,45 @@ void print_atdecc_frame(avb_frame_type_t type, eth_frame_t *frame, int format) {
 }
 
 // Get the name of the ADP message type
-const char* get_adp_message_type_name(adp_message_type_t message_type) 
+const char* get_adp_message_type_name(adp_msg_type_t message_type) 
 {
     switch (message_type) {
-        case adp_message_type_entity_available: return "ADP Entity Available";
-        case adp_message_type_entity_departing: return "ADP Entity Departing";
-        case adp_message_type_entity_discover: return "ADP Entity Discover";
+        case adp_msg_type_entity_available: return "ADP Entity Available";
+        case adp_msg_type_entity_departing: return "ADP Entity Departing";
+        case adp_msg_type_entity_discover: return "ADP Entity Discover";
         default: return "Unknown";
     }
 }
 
 // Get the name of the AECP command code
-const char* get_aecp_command_code_name(aecp_command_code_t command_code) 
+const char* get_aecp_command_code_name(aecp_cmd_code_t command_code) 
 {
     switch (command_code) {
-        case aecp_command_code_acquire_entity: return "AECP Acquire Entity";
-        case aecp_command_code_lock_entity: return "AECP Lock Entity";
-        case aecp_command_code_entity_available: return "AECP Entity Available";
-        case aecp_command_code_controller_available: return "AECP Controller Available";
-        case aecp_command_code_read_descriptor: return "AECP Read Descriptor";
+        case aecp_cmd_code_acquire_entity: return "AECP Acquire Entity";
+        case aecp_cmd_code_lock_entity: return "AECP Lock Entity";
+        case aecp_cmd_code_entity_available: return "AECP Entity Available";
+        case aecp_cmd_code_controller_available: return "AECP Controller Available";
+        case aecp_cmd_code_read_descriptor: return "AECP Read Descriptor";
         default: return "Unknown";
     }
 }
 
 // Get the name of the ACMP message type
-const char* get_acmp_message_type_name(acmp_message_type_t message_type) 
+const char* get_acmp_message_type_name(acmp_msg_type_t message_type) 
 {
     switch (message_type) {
-        case acmp_message_type_connect_tx_command: return "ACMP Connect TX Command";
-        case acmp_message_type_connect_tx_response: return "ACMP Connect TX Response";
-        case acmp_message_type_disconnect_tx_command: return "ACMP Disconnect TX Command";
-        case acmp_message_type_disconnect_tx_response: return "ACMP Disconnect TX Response";
-        case acmp_message_type_get_tx_state_command: return "ACMP Get TX State Command";
-        case acmp_message_type_get_tx_state_response: return "ACMP Get TX State Response";
-        case acmp_message_type_connect_rx_command: return "ACMP Connect RX Command";
-        case acmp_message_type_connect_rx_response: return "ACMP Connect RX Response";
-        case acmp_message_type_disconnect_rx_command: return "ACMP Disconnect RX Command";
-        case acmp_message_type_disconnect_rx_response: return "ACMP Disconnect RX Response";
-        case acmp_message_type_get_rx_state_command: return "ACMP Get RX State Command";
-        case acmp_message_type_get_rx_state_response: return "ACMP Get RX State Response";
+        case acmp_msg_type_connect_tx_command: return "ACMP Connect TX Command";
+        case acmp_msg_type_connect_tx_response: return "ACMP Connect TX Response";
+        case acmp_msg_type_disconnect_tx_command: return "ACMP Disconnect TX Command";
+        case acmp_msg_type_disconnect_tx_response: return "ACMP Disconnect TX Response";
+        case acmp_msg_type_get_tx_state_command: return "ACMP Get TX State Command";
+        case acmp_msg_type_get_tx_state_response: return "ACMP Get TX State Response";
+        case acmp_msg_type_connect_rx_command: return "ACMP Connect RX Command";
+        case acmp_msg_type_connect_rx_response: return "ACMP Connect RX Response";
+        case acmp_msg_type_disconnect_rx_command: return "ACMP Disconnect RX Command";
+        case acmp_msg_type_disconnect_rx_response: return "ACMP Disconnect RX Response";
+        case acmp_msg_type_get_rx_state_command: return "ACMP Get RX State Command";
+        case acmp_msg_type_get_rx_state_response: return "ACMP Get RX State Response";
         default: return "Unknown";
     }
 }

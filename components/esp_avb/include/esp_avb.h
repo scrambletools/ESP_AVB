@@ -14,7 +14,9 @@
  * Included Files
  ****************************************************************************/
 
-#include <stdint.h>
+#include <stdbool.h>
+#include <time.h>
+//#include <stdint.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -56,9 +58,9 @@ extern "C"
 
 int avb_start(const char *interface);
 
-int avb_status(int pid, struct avb_status_s *status);
+int avb_status(struct avb_status_s *status);
 
-int avb_stop(int pid);
+int avb_stop();
 
 #undef EXTERN
 #ifdef __cplusplus

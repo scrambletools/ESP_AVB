@@ -1,4 +1,4 @@
-#include "avtp.h"
+#include "avb.h"
 
 // Define logging tag
 static const char *TAG = "AVTP";
@@ -128,15 +128,15 @@ void append_avtpdu(avtp_subtype_t type, eth_frame_t *frame) {
             memcpy(&message_type, frame->payload + 1, (1)); // 4 bits
             message_type = message_type & 0x0f; // mask out the left 4 bits
             switch(message_type) {
-                case maap_message_type_probe:
+                case maap_msg_type_probe:
                     memcpy(frame->payload, frame_template_maap_probe, sizeof(frame_template_maap_probe));
                     frame->payload_size = sizeof(frame_template_maap_probe);
                     break;
-                case maap_message_type_defend:
+                case maap_msg_type_defend:
                     memcpy(frame->payload, frame_template_maap_defend, sizeof(frame_template_maap_defend));
                     frame->payload_size = sizeof(frame_template_maap_defend);
                     break;
-                case maap_message_type_announce:
+                case maap_msg_type_announce:
                     memcpy(frame->payload, frame_template_maap_announce, sizeof(frame_template_maap_announce));
                     frame->payload_size = sizeof(frame_template_maap_announce);
                     break;
@@ -150,17 +150,17 @@ void append_avtpdu(avtp_subtype_t type, eth_frame_t *frame) {
 }
 
 // Append msrpdu to a frame based on attribute type and set the payload_size
-void append_msrpdu(msrp_attribute_type_t type, eth_frame_t *frame) {
+void append_msrpdu(msrp_attr_type_t type, eth_frame_t *frame) {
     switch (type) {
-        case msrp_attribute_type_talker_advertise:
+        case msrp_attr_type_talker_advertise:
             memcpy(frame->payload, frame_template_msrp_talker_advertise, sizeof(frame_template_msrp_talker_advertise));
             frame->payload_size = sizeof(frame_template_msrp_talker_advertise);
             break;
-        case msrp_attribute_type_listener:
+        case msrp_attr_type_listener:
             memcpy(frame->payload, frame_template_msrp_listener, sizeof(frame_template_msrp_listener));
             frame->payload_size = sizeof(frame_template_msrp_listener);
             break;
-        case msrp_attribute_type_domain:
+        case msrp_attr_type_domain:
             memcpy(frame->payload, frame_template_msrp_domain, sizeof(frame_template_msrp_domain));
             frame->payload_size = sizeof(frame_template_msrp_domain);
             break;
@@ -170,9 +170,9 @@ void append_msrpdu(msrp_attribute_type_t type, eth_frame_t *frame) {
 }
 
 // Append mvrpdu to a frame based on attribute type and set the payload_size
-void append_mvrpdu(msrp_attribute_type_t type, eth_frame_t *frame) {
+void append_mvrpdu(mvrp_attr_type_t type, eth_frame_t *frame) {
     switch (type) {
-        case mvrp_attribute_type_vlan_identifier:
+        case mvrp_attr_type_vlan_identifier:
             memcpy(frame->payload, frame_template_mvrp_vlan_identifier, sizeof(frame_template_mvrp_vlan_identifier));
             frame->payload_size = sizeof(frame_template_mvrp_vlan_identifier);
             break;
@@ -217,16 +217,16 @@ avb_frame_type_t detect_avtp_frame_type(ethertype_t *type, eth_frame_t *frame, s
                 break;
             case ethertype_msrp:
                 switch (attribute_type) {
-                    case msrp_attribute_type_talker_advertise:
+                    case msrp_attr_type_talker_advertise:
                         frame_type = avb_frame_msrp_talker_advertise;
                         break;
-                    case msrp_attribute_type_talker_failed:
+                    case msrp_attr_type_talker_failed:
                         frame_type = avb_frame_msrp_talker_failed;
                         break;
-                    case msrp_attribute_type_listener:
+                    case msrp_attr_type_listener:
                         frame_type = avb_frame_msrp_listener;
                         break;
-                    case msrp_attribute_type_domain:
+                    case msrp_attr_type_domain:
                         frame_type = avb_frame_msrp_domain;
                         break;
                     default:
@@ -234,7 +234,7 @@ avb_frame_type_t detect_avtp_frame_type(ethertype_t *type, eth_frame_t *frame, s
                 }
                 break;
             case ethertype_mvrp:
-                if (attribute_type == mvrp_attribute_type_vlan_identifier) {
+                if (attribute_type == mvrp_attr_type_vlan_identifier) {
                     frame_type = avb_frame_mvrp_vlan_identifier;
                 }
                 else {

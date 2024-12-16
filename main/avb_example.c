@@ -19,7 +19,7 @@
 #include <driver/gpio.h>
 #include <ptpd.h>
 #include <esp_eth_time.h>
-//#include "esp_avb.h"
+#include "esp_avb.h"
 
 static const char *TAG = "avb_example";
 
@@ -101,6 +101,9 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
+    /* Start the AVB task */
+    avb_start("ETH_0");
+
     /* Register callback function which will toggle output pin */
     esp_eth_clock_register_target_cb(CLOCK_PTP_SYSTEM, ts_callback);
 
@@ -119,6 +122,18 @@ void app_main(void)
     bool clock_source_valid = false;
     bool clock_source_valid_last = false;
     int32_t clock_source_valid_cnt = 0;
+
+    /* Task handles for memory consumption monitoring */
+    static const uint period = 10000; // wait between checks in ms
+    static const uint threshold = 1000; // size of high watermark
+    char t0_name[] = "main_task";  // usually under 16 chars
+    char t1_name[] = "AVB";
+    char t2_name[] = "PTPD";
+    TaskHandle_t t0 = xTaskGetHandle( t0_name );
+    TaskHandle_t t1 = xTaskGetHandle( t1_name );
+    TaskHandle_t t2 = xTaskGetHandle( t2_name );
+
+    /* Main loop */
     while (1) {
         struct ptpd_status_s ptp_status;
         // if valid PTP status
@@ -155,5 +170,13 @@ void app_main(void)
             esp_eth_clock_set_target_time(CLOCK_PTP_SYSTEM, &s_next_time);
         }
         clock_source_valid_last = clock_source_valid;
+
+        // Check memory consumption of tasks periodically, report any tasks with high watermark under threshold
+        if (uxTaskGetStackHighWaterMark(t0) < threshold)
+            ESP_LOGI(TAG, "TASK %s high water mark = %d", t0_name, uxTaskGetStackHighWaterMark(t0));
+        if (uxTaskGetStackHighWaterMark(t1) < threshold)
+            ESP_LOGI(TAG, "TASK %s high water mark = %d", t1_name, uxTaskGetStackHighWaterMark(t1));
+        if (uxTaskGetStackHighWaterMark(t1) < threshold)
+            ESP_LOGI(TAG, "TASK %s high water mark = %d", t2_name, uxTaskGetStackHighWaterMark(t2));
     }
 }
