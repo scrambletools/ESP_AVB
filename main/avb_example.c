@@ -124,7 +124,7 @@ void app_main(void)
     int32_t clock_source_valid_cnt = 0;
 
     /* Task handles for memory consumption monitoring */
-    static const uint period = 10000; // wait between checks in ms
+    static const uint period = 1000; // wait between checks in ms
     static const uint threshold = 1000; // size of high watermark
     char t0_name[] = "main_task";  // usually under 16 chars
     char t1_name[] = "AVB";

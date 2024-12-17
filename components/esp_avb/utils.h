@@ -49,10 +49,10 @@
 
 // Ethertypes
 typedef enum {
-	ethertype_msrp = htons(0x22ea),
-	ethertype_avtp = htons(0x22f0),
-	ethertype_mvrp = htons(0x88f5),
-	ethertype_gptp = htons(0x88f7)
+	ethertype_msrp = 0x22ea,
+	ethertype_avtp = 0x22f0,
+	ethertype_mvrp = 0x88f5,
+	ethertype_gptp = 0x88f7
 } ethertype_t;
 
 // Useful when doing things like printing frames

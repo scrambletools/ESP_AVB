@@ -98,7 +98,7 @@ int avb_net_recv(struct avb_state_s *state, int l2if, void *msg, uint16_t msg_le
   // check if read was successful, ts exists and ts_info is valid
   if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP) {
     *ts = *(struct timespec *)ts_info->data;
-    ESP_LOGD("avb_net_recv", "ts is %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
+    ESP_LOGI("avb_net_recv", "ts is %lld.%09ld", (long long)ts->tv_sec, ts->tv_nsec);
   }
 
   memcpy(msg, &eth_frame[ETH_HEADER_LEN], ret);

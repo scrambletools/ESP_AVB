@@ -48,6 +48,15 @@
 /* Number of protocols (AVTP, MSRP, MVRP) */
 #define AVB_NUM_PROTOCOLS 3
 
+/* Number of talkers */
+#define AVB_NUM_TALKERS 10
+
+/* Number of listeners */
+#define AVB_NUM_LISTENERS 10
+
+/* Number of connections */
+#define AVB_NUM_CONNECTIONS 2
+
 /* Protocol identifiers */
 #define AVTP 0
 #define MSRP 1
@@ -123,37 +132,43 @@ typedef uint8_t eth_addr_t[ETH_ADDR_LEN];
  * All multi-byte fields are big-endian.
  */
 
-/* MSRP domain message */
-typedef struct {
-  uint8_t protocol_ver; // protocol version
-  uint8_t attr1_type; // attribute type
-  uint8_t attr1_len; // attribute length
-  uint8_t attr1_list_len[2]; // attribute list length
-  uint8_t attr1_vector_header[2]; // vector header
-  uint8_t attr1_sr_class_id; // sr class ID
-  uint8_t attr1_sr_class_priority; // sr class priority
-  uint8_t attr1_sr_class_vid[2]; // sr class VID
-  uint8_t attr1_event; // attribute event
-  uint8_t attr1_end_mark_list[2]; // end mark for list
-  uint8_t attr2_type; // attribute type
-  uint8_t attr2_len; // attribute length
-  uint8_t attr2_list_len[2]; // attribute list length
-  uint8_t attr2_vector_header[2]; // vector header
-  uint8_t attr2_sr_class_id; // sr class ID
-  uint8_t attr2_sr_class_priority; // sr class priority
-  uint8_t attr2_sr_class_vid[2]; // sr class VID
-  uint8_t attr2_event; // attribute event
-  uint8_t attr2_end_mark_list[2]; // end mark for list
-  uint8_t end_mark_pdu[2]; // end mark for pdu
-} msrp_domain_message_s; // 29 bytes
+/* MRP three packed event (IEEE 802.1Q-2018 Clause 10.8.2.10)
+ * (event1 * 36) + (event2 * 6) + event3 = 3pe value
+ */
+typedef uint8_t mrp_3pe_event_t;
 
-/* MSRP talker advertise message */
-typedef struct { // in comments: numbers in brackets are bit lengths
-  uint8_t protocol_ver; // protocol version
+/* MRP four packed event (IEEE 802.1Q-2018 Clause 10.8.2.11)
+ * (event1 * 64) + (event2 * 16) + (event3 * 4) + event4 = 4pe value
+ */
+typedef struct {
+  uint8_t event1 : 2; // 1st event
+  uint8_t event2 : 2; // 2nd event
+  uint8_t event3 : 2; // 3rd event
+  uint8_t event4 : 2; // 4th event
+} mrp_4pe_event_s; // 1 byte
+
+/* Attribute header */
+typedef struct {
   uint8_t attr_type; // attribute type
   uint8_t attr_len; // attribute length
   uint8_t attr_list_len[2]; // attribute list length
-  uint8_t vector_header[2]; // vector header
+  uint8_t vechead_leaveall : 3; // 0 or 1, if 0 then num_vals is non-zero
+  uint8_t vechead_padding : 5; // padding (ignored part of num_vals)
+  uint8_t vechead_num_vals; // # of events (div by 3, round up for # of 3pes)
+} mrp_attr_header_s; // 6 bytes
+
+/* MSRP domain message (1 attribute) */
+typedef struct {
+  mrp_attr_header_s header; // attribute header
+  uint8_t sr_class_id; // sr class ID
+  uint8_t sr_class_priority; // sr class priority
+  uint8_t sr_class_vid[2]; // sr class VID
+  mrp_3pe_event_t attr_event[20]; // allow up to 20 events, ignore the rest
+} msrp_domain_message_s; // 25 bytes limit
+
+/* MSRP talker advertise message */
+typedef struct { // in comments: numbers in brackets are bit lengths
+  mrp_attr_header_s header; // attribute header
   uint8_t stream_id[8]; // stream ID
   uint8_t stream_dest_addr[6]; // stream destination address
   uint8_t vlan_id[2]; // vlan ID
@@ -163,46 +178,75 @@ typedef struct { // in comments: numbers in brackets are bit lengths
   uint8_t rank : 4; // 4 bits (0-15)
   uint8_t reserved : 1; // 1 bit (0-1)
   uint8_t accumulated_latency[2]; // accumulated latency
-  uint8_t end_mark_list[2]; // end mark for list
-  uint8_t end_mark_pdu[2]; // end mark for pdu
-} msrp_talker_adv_message_s; // 34 bytes
+  mrp_3pe_event_t attr_event[20]; // allow up to 20 events, ignore the rest
+} msrp_talker_adv_message_s; // 44 bytes limit
 
-/* MSRP listener ready message */
-typedef struct {
-  uint8_t protocol_ver; // protocol version
-  uint8_t attr_type; // attribute type
-  uint8_t attr_len; // attribute length
-  uint8_t attr_list_len[2]; // attribute list length
-  uint8_t vector_header[2]; // vector header
+/* MSRP talker failed message */
+typedef struct { // in comments: numbers in brackets are bit lengths
+  mrp_attr_header_s header; // attribute header
   uint8_t stream_id[8]; // stream ID
-  uint8_t end_mark_list[2]; // end mark for list
-  uint8_t end_mark_pdu[2]; // end mark for pdu
-} msrp_listener_ready_message_s; // 19 bytes
+  uint8_t stream_dest_addr[6]; // stream destination address
+  uint8_t vlan_id[2]; // vlan ID
+  uint8_t tspec_max_frame_size[2]; // tspec max frame size
+  uint8_t tspec_max_frame_interval[2]; // tspec max frame interval
+  uint8_t priority : 3; // 3 bits (0-7)
+  uint8_t rank : 4; // 4 bits (0-15)
+  uint8_t reserved : 1; // 1 bit (0-1)
+  uint8_t accumulated_latency[2]; // accumulated latency
+  uint8_t failure_bridge_id[8]; // failure bridge ID
+  uint8_t failure_code; // failure code
+  mrp_3pe_event_t attr_event[20]; // allow up to 20 events, ignore the rest
+} msrp_talker_failed_message_s; // 53 bytes limit
 
-/* MSRP message buffer */
+/* MSRP listener message */
+typedef struct {
+  mrp_attr_header_s header; // attribute header
+  uint8_t           stream_id[8]; // stream ID
+  mrp_4pe_event_s   attr_event[20]; // allow up to 20 events, ignore the rest
+} msrp_listener_message_s; // 29 bytes limit
+
+/* MSRP attribute union */
 typedef union {
+  mrp_attr_header_s             header;
   msrp_domain_message_s         domain;
   msrp_talker_adv_message_s     talker_adv;
-  msrp_listener_ready_message_s listener_ready;
-  uint8_t                       raw[34];
-} msrp_msgbuf_u;
+  msrp_talker_failed_message_s  talker_failed;
+  msrp_listener_message_s       listener;
+  uint8_t                       raw[53];
+} msrp_attribute_u; // 53 bytes limit
 
-/* MSRP attribute types and their values */
+/* MSRP message buffer */
+typedef struct {
+  uint8_t            protocol_ver; // protocol version
+  uint8_t            messages_raw[200]; // variable length depending on attributes
+} msrp_msgbuf_s; // 266 bytes limit
+
+/* MSRP attribute types in enumerated order */
 typedef enum {
-  msrp_attr_type_talker_advertise = 0x01,
-  msrp_attr_type_talker_failed = 0x02,
-  msrp_attr_type_listener = 0x03,
-  msrp_attr_type_domain = 0x04
+  msrp_attr_type_none,
+  msrp_attr_type_talker_advertise,
+  msrp_attr_type_talker_failed,
+  msrp_attr_type_listener,
+  msrp_attr_type_domain
 } msrp_attr_type_t;
 
-/* MSRP reservation declaration types in enumerated order */
+/* MRP attribute events in enumerated order */
 typedef enum {
-  msrp_decl_type_talker_advertise,
-  msrp_decl_type_talker_failed,
-  msrp_decl_type_listener_asking_failed,
-  msrp_decl_type_listener_ready,
-  msrp_decl_type_listener_ready_failed
-} msrp_decl_type_t;
+  mrp_attr_event_new,
+  mrp_attr_event_join_in,
+  mrp_attr_event_in,
+  mrp_attr_event_join_mt,
+  mrp_attr_event_mt,
+  mrp_attr_event_lv
+} mrp_attr_event_t;
+
+/* MSRP listener events in enumerated order */
+typedef enum {
+  msrp_listener_event_ignore,
+  msrp_listener_event_asking_failed,
+  msrp_listener_event_ready,
+  msrp_listener_event_ready_failed
+} msrp_listener_event_t;
 
 /* MSRP reservation failure codes in enumerated order */
 typedef enum {
@@ -236,20 +280,11 @@ typedef enum {
 
 /* MVRP VLAN identifier message */
 typedef struct {
-  uint8_t protocol_ver; // protocol version
-  uint8_t attr_type; // attribute type
-  uint8_t attr_len; // attribute length
-  uint8_t vector_header[2]; // vector header
-  uint8_t vlan_id[2]; // vlan ID
-  uint8_t attr_event; // attribute event
-  uint8_t end_mark_list[2]; // end mark for list
-  uint8_t end_mark_pdu[2]; // end mark for pdu
-} mvrp_vlan_identifier_message_s; // 12 bytes
-
-typedef union {
-  mvrp_vlan_identifier_message_s vlan_identifier;
-  uint8_t                        raw[12];
-} mvrp_msgbuf_u;
+  uint8_t           protocol_ver; // protocol version
+  mrp_attr_header_s header; // attribute header
+  uint8_t           vlan_id[2]; // vlan ID
+  mrp_3pe_event_t   attr_event[20]; // allow up to 20 events, ignore the rest
+} mvrp_vlan_id_message_s; // 23 bytes limit
 
 /* MVRP attribute types and their values */
 typedef enum {
@@ -262,7 +297,7 @@ typedef enum {
  * All multi-byte fields are big-endian.
  */
 
-/* AAF Message */
+/* AAF PCM Message */
 typedef struct { // in comments: numbers in brackets are bit lengths
   uint8_t subtype; // AVTP message subtype
   uint8_t sv_ver_mr_rsv_tv; // stream_id valid[1], version[3], media clock restart [1], reserved[2], avtp_ts valid[1]
@@ -285,11 +320,49 @@ typedef struct {
   uint8_t sv_ver_msgtype; // stream_id valid[1], version[3], message type[4]
   uint8_t maapver_controldatalen; // maap version[5], control data length[11]
   uint8_t stream_id[8]; // stream ID
-  uint8_t req_start_addr[6]; // requested start address
+  eth_addr_t req_start_addr; // requested start address
   uint8_t req_count[2]; // requested count
-  uint8_t confl_start_addr[6]; // conflict start address
+  eth_addr_t confl_start_addr; // conflict start address
   uint8_t confl_count[2]; // conflict count
 } maap_message_s;
+
+/* Talker */
+typedef struct {
+  uint8_t stream_id[8]; // stream ID
+  eth_addr_t stream_dest_addr; // stream destination address
+  uint8_t vlan_id[2]; // vlan ID
+  uint8_t tspec_max_frame_size[2]; // tspec max frame size
+  uint8_t tspec_max_frame_interval[2]; // tspec max frame interval
+  int64_t accumulated_latency; // as stated by the talker
+  uint8_t entity_id[8]; // entity ID
+  uint8_t model_id[8]; // model ID
+  uint8_t failure_code; // failure code
+  bool streaming; // streaming status
+  bool ready; // general status
+} avb_talker_s;
+
+/* Listener */
+typedef struct {
+  uint8_t stream_id[8]; // stream ID
+  uint8_t vlan_id[2]; // vlan ID
+  uint8_t entity_id[8]; // entity ID
+  uint8_t model_id[8]; // model ID
+  uint8_t last_event; // last listener event
+  bool ready; // status
+} avb_listener_s;
+
+/* Connection */
+typedef struct {
+  bool as_talker; // we are talker or listener
+  uint8_t stream_id[8]; // stream ID
+  uint8_t vlan_id[2]; // vlan ID
+  uint8_t entity_id[8]; // other entity ID
+  uint8_t model_id[8]; // other model ID
+  struct timespec started; // last start timestamp
+  int64_t accumulated_latency; // observed latency
+  int64_t accumulated_jitter; // observed jitter
+  bool active; // status
+} avb_connection_s;
 
 /* AVTP subtypes and their values */
 typedef enum {
@@ -381,7 +454,7 @@ typedef struct {
   uint8_t listener_entity_id[8]; // listener entity ID
   uint8_t talker_uid[2]; // talker UID
   uint8_t listener_uid[2]; // listener UID
-  uint8_t stream_dest_addr[6]; // stream destination address
+  eth_addr_t stream_dest_addr; // stream destination address
   uint8_t connection_count[2]; // connection count
   uint8_t seq_id[2]; // sequence ID
   uint8_t flags[2]; // flags
@@ -448,10 +521,10 @@ typedef enum {
 
 /* Generic message buffer */
 typedef union {
-  avtp_msgbuf_u avtp;
-  msrp_msgbuf_u msrp;
-  mvrp_msgbuf_u mvrp;
-  uint8_t       raw[128];
+  avtp_msgbuf_u          avtp;
+  msrp_msgbuf_s          msrp;
+  mvrp_vlan_id_message_s mvrp;
+  uint8_t                raw[128];
 } avb_msgbuf_u;
 
 /* Carrier structure for querying AVB status */
@@ -474,6 +547,15 @@ struct avb_state_s {
 
   /* Our own entity */
   avb_entity_s own_entity;
+
+  /* Talkers */
+  avb_talker_s talkers[AVB_NUM_TALKERS];
+
+  /* Listeners */
+  avb_listener_s listeners[AVB_NUM_LISTENERS];
+
+  /* Connections */
+  avb_connection_s connections[AVB_NUM_CONNECTIONS];
 
   /* Latest received packet and its timestamp (CLOCK_REALTIME) 
    * 3 elements, 1 for each protocol (AVTP, MSRP, MVRP)
