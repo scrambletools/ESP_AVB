@@ -1,65 +1,13 @@
-#include "utils.h"
+/*
+ * Copyright 2024 Scramble Tools
+ * License: MIT
+ *
+ * ESP_AVB Component
+ *
+ * This component provides an implementation of an AVB talker and listener.
+ */
 
-// Define logging tag
-static const char *TAG = "UTILS";
-
-// Get the name of the Ethertype
-const char* get_ethertype_name(ethertype_t ethertype) 
-{
-    switch (ethertype) {
-        case ethertype_gptp: return "gPTP";
-        case ethertype_avtp: return "AVTP";
-        case ethertype_msrp: return "MSRP";
-        case ethertype_mvrp: return "MVRP";
-        default: return "Unknown";
-    }
-}
-
-// Get the name of the frame type
-const char* get_frame_type_name(avb_frame_type_t type) 
-{
-    switch (type) {
-        case avb_frame_gptp_announce: return "gPTP Announce";
-        case avb_frame_gptp_sync: return "gPTP Sync";
-        case avb_frame_gptp_follow_up: return "gPTP Follow Up";
-        case avb_frame_gptp_pdelay_request: return "gPTP pDelay Request";
-        case avb_frame_gptp_pdelay_response: return "gPTP pDelay Response";
-        case avb_frame_gptp_pdelay_response_follow_up: return "gPTP pDelay Response Follow Up";
-        case avb_frame_adp_entity_available: return "ADP Entity Available";
-        case avb_frame_adp_entity_departing: return "AD Entity Departing";
-        case avb_frame_adp_entity_discover: return "ADP Entity Discover";
-        case avb_frame_aecp_command_acquire_entity: return "AECP Command Acquire Entity";
-        case avb_frame_aecp_response_acquire_entity: return "AECP Response Acquire Entity";
-	    case avb_frame_aecp_command_lock_entity: return "AECP Command Lock Entity";
-        case avb_frame_aecp_response_lock_entity: return "AECP Response Lock Entity";
-	    case avb_frame_aecp_command_entity_available: return "AECP Command Entity Available";
-	    case avb_frame_aecp_response_entity_available: return "AECP Response Entity Available";
-	    case avb_frame_aecp_command_controller_available: return "AECP Command Controller Available";
-        case avb_frame_aecp_response_controller_available: return "AECP Response Controller Available";
-        case avb_frame_aecp_command_read_descriptor: return "AECP Command Read Descriptor";
-        case avb_frame_aecp_response_read_entity: return "AECP Response Read Entity";
-        case avb_frame_acmp_connect_tx_command: return "ACMP Connect TX Command";
-	    case avb_frame_acmp_connect_tx_response: return "ACMP Connect TX Response";
-	    case avb_frame_acmp_disconnect_tx_command: return "ACMP Disconnect TX Command";
-        case avb_frame_acmp_disconnect_tx_response: return "ACMP Disconnect TX Response";
-	    case avb_frame_acmp_get_tx_state_command: return "ACMP Get TX State Command";
-	    case avb_frame_acmp_get_tx_state_response: return "ACMP Get TX State Response";
-	    case avb_frame_acmp_connect_rx_command: return "ACMP Connect RX Command";
-        case avb_frame_acmp_connect_rx_response: return "ACMP Connect RX Response";
-        case avb_frame_acmp_disconnect_rx_command: return "ACMP Disconnect RX Command";
-	    case avb_frame_acmp_disconnect_rx_response: return "ACMP Disconnect RX Response";
-	    case avb_frame_acmp_get_rx_state_command: return "ACMP Get RX State Command";
-	    case avb_frame_acmp_get_rx_state_response: return "ACMP Get RX State Response";
-        case avb_frame_avtp_stream: return "AVTP Stream";
-        case avb_frame_maap_announce: return "MAAP Announce";
-        case avb_frame_msrp_talker_advertise: return "MSRP Talker Advertise";
-        case avb_frame_msrp_talker_failed: return "MSRP Talker Failed";
-        case avb_frame_msrp_listener: return "MSRP Listener";
-        case avb_frame_msrp_domain: return "MSRP Domain";
-        case avb_frame_mvrp_vlan_identifier: return "MVRP VLAN Identifier";
-        default: return "Unknown";
-    }
-}
+#include "avbutils.h"
 
 // Convert octet buffer to uint64_t, uint32_t, uint16_t or uint8_t; assumes big-endian buffer
 // size is buffer size in bytes: 8 (default) >= size >= 0
@@ -331,4 +279,16 @@ int32_t ppm_to_scaled(double ppm_value) {
 int64_t timespec_to_ms(const struct timespec *ts)
 {
   return ts->tv_sec * MSEC_PER_SEC + (ts->tv_nsec / NSEC_PER_MSEC);
+}
+
+/* Convert three integers to a 3PE value */
+uint8_t int_to_3pe(int value1, int value2, int value3) {
+    return (value1 * 36) + (value2 * 6) + value3;
+}
+
+/* Convert a 3PE value to three integers */
+void three_pe_to_int(uint8_t value, int *value1, int *value2, int *value3) {
+    *value1 = value / 36;
+    *value2 = (value % 36) / 6;
+    *value3 = value % 6;
 }

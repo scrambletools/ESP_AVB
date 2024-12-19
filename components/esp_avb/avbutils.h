@@ -1,5 +1,14 @@
-#ifndef ESP_AVB_SIMPLE_TALKER_INCLUDE_UTILS_H_
-#define ESP_AVB_SIMPLE_TALKER_INCLUDE_UTILS_H_
+/*
+ * Copyright 2024 Scramble Tools
+ * License: MIT
+ *
+ * ESP_AVB Component
+ *
+ * This component provides an implementation of an AVB talker and listener.
+ */
+
+#ifndef ESP_AVB_AVBUTILS_H_
+#define ESP_AVB_AVBUTILS_H_
 
 #include <esp_log.h>
 #include <esp_eth.h>
@@ -9,12 +18,13 @@
 #include <string.h>
 #include <math.h>
 
-#define AVTP_MAX_PAYLOAD_LENGTH 1486
-#define PRINT_SUMMARY 0
-#define PRINT_VERBOSE 1
+#define avbinfo(format, ...) ESP_LOGI("AVB", format, ##__VA_ARGS__)
+#define avbwarn(format, ...) ESP_LOGW("AVB", format, ##__VA_ARGS__)
+#define avberr(format, ...) ESP_LOGE("AVB", format, ##__VA_ARGS__)
+
+#define ETH_MAX_PAYLOAD_LENGTH 1486
 
 /* Error and OK definitions */
-
 #define ERROR ESP_FAIL
 #define OK ESP_OK
 
@@ -47,70 +57,7 @@
     ((((x) & 0xff00) >> 8) |                        \
      (((x) & 0x00ff) << 8)))
 
-// Ethertypes
-typedef enum {
-	ethertype_msrp = 0x22ea,
-	ethertype_avtp = 0x22f0,
-	ethertype_mvrp = 0x88f5,
-	ethertype_gptp = 0x88f7
-} ethertype_t;
-
-// Useful when doing things like printing frames
-typedef enum {
-	avb_frame_gptp_announce,
-	avb_frame_gptp_sync,
-	avb_frame_gptp_follow_up,
-	avb_frame_gptp_pdelay_request,
-	avb_frame_gptp_pdelay_response,
-	avb_frame_gptp_pdelay_response_follow_up,
-	avb_frame_adp_entity_available,
-	avb_frame_adp_entity_departing,
-	avb_frame_adp_entity_discover,
-	avb_frame_aecp_command_acquire_entity,
-	avb_frame_aecp_response_acquire_entity,
-	avb_frame_aecp_command_lock_entity,
-	avb_frame_aecp_response_lock_entity,
-	avb_frame_aecp_command_entity_available,
-	avb_frame_aecp_response_entity_available,
-	avb_frame_aecp_command_controller_available,
-	avb_frame_aecp_response_controller_available,
-	avb_frame_aecp_command_read_descriptor, // currently not distinguishing between descriptor types
-	avb_frame_aecp_response_read_entity, // responses are specific to descriptor type; currently only entity supported
-	avb_frame_acmp_connect_tx_command,
-	avb_frame_acmp_connect_tx_response,
-	avb_frame_acmp_disconnect_tx_command,
-  avb_frame_acmp_disconnect_tx_response,
-	avb_frame_acmp_get_tx_state_command,
-	avb_frame_acmp_get_tx_state_response,
-	avb_frame_acmp_connect_rx_command,
-  avb_frame_acmp_connect_rx_response,
-  avb_frame_acmp_disconnect_rx_command,
-	avb_frame_acmp_disconnect_rx_response,
-	avb_frame_acmp_get_rx_state_command,
-	avb_frame_acmp_get_rx_state_response,
-	avb_frame_avtp_stream,
-	avb_frame_maap_announce,
-	avb_frame_msrp_talker_advertise,
-	avb_frame_msrp_talker_failed,
-	avb_frame_msrp_listener,
-	avb_frame_msrp_domain,
-	avb_frame_mvrp_vlan_identifier,
-	avb_frame_unknown
-} avb_frame_type_t;
-
-// Basic ethernet frame
-typedef struct {
-    struct eth_hdr header;
-    uint8_t payload[AVTP_MAX_PAYLOAD_LENGTH];
-		ssize_t payload_size;
-		avb_frame_type_t frame_type;
-		struct timeval time_sent;
-		struct timeval time_received;
-} eth_frame_t;
-
 // Functions
-const char* get_ethertype_name(ethertype_t ethertype);
-const char* get_frame_type_name(avb_frame_type_t type);
 uint64_t octets_to_uint(const uint8_t *buffer, size_t size);
 void octets_to_timeval(const uint8_t *buffer, struct timeval *tv);
 void reverse_octets(uint8_t *buffer, size_t size);
@@ -136,5 +83,7 @@ uint16_t log_period_to_msec(int8_t log_period);
 double scaled_to_ppm(int32_t scaled_value);
 int32_t ppm_to_scaled(double ppm_value);
 int64_t timespec_to_ms(const struct timespec *ts);
+uint8_t int_to_3pe(int value1, int value2, int value3);
+void three_pe_to_int(uint8_t value, int *value1, int *value2, int *value3);
 
-#endif /* ESP_AVB_SIMPLE_TALKER_INCLUDE_UTILS_H_ */
+#endif /* ESP_AVB_AVBUTILS_H_ */

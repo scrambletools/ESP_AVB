@@ -7,34 +7,10 @@
  * This component provides an implementation of an AVB talker and listener.
  */
 
-/****************************************************************************
- * Included Files
- ****************************************************************************/
-
-#include "esp_avb.h"
+#include "esp_avb.h" // External API
 #include "avb.h" // Internal API
 
-/****************************************************************************
- * Pre-processor Definitions
- ****************************************************************************/
-
-#define clock_timespec_subtract(ts1, ts2, ts3) timespecsub(ts1, ts2, ts3)
-#define clock_timespec_add(ts1, ts2, ts3) timespecadd(ts1, ts2, ts3)
-
-/****************************************************************************
- * Private Data
- ****************************************************************************/
-
-/* AVB debug messages are enabled by either CONFIG_DEBUG_NET_INFO
- * or separately by CONFIG_ESP_AVB_DEBUG. This simplifies
- * debugging without having excessive amount of logging from net.
- */
-
-static const char *TAG = "AVB";
-#define avbinfo(format, ...) ESP_LOGI(TAG, format, ##__VA_ARGS__)
-#define avbwarn(format, ...) ESP_LOGW(TAG, format, ##__VA_ARGS__)
-#define avberr(format, ...) ESP_LOGE(TAG, format, ##__VA_ARGS__)
-
+/* Global state */
 struct avb_state_s *s_state;
 
 /****************************************************************************
@@ -44,68 +20,16 @@ struct avb_state_s *s_state;
 /* Initialize AVB state and create L2TAP FD - FIXME 3 FDs needed */
 static int avb_initialize_state(struct avb_state_s *state,
                                 const char *interface) {
-  /* Create a handle to the Ethernet driver */
-  esp_eth_handle_t eth_handle;
+  int ret = 0;
 
-  // Create 3 L2TAP interfaces (FDs) for AVTP, MSRP, and MVRP
-  for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
-
-    int fd = open("/dev/net/tap", 0);
-    avbinfo("fd: %d", fd);
-    state->l2if[i] = fd;
-    if (state->l2if[i] < 0) {
-      avberr("Failed to create tx l2if: %d\n", errno);
-      return ERROR;
-    }
-    // Set Ethernet interface on which to get raw frames
-    if (ioctl(state->l2if[i], L2TAP_S_INTF_DEVICE, interface) < 0) {
-      avberr("failed to set network interface at fd %d: errno %d\n", fd, errno);
-      return ERROR;
-    }
-
-    // Set the ethertype based on the protocol index
-    uint16_t ethertype;
-    switch(i) {
-      case AVTP:
-        ethertype = ethertype_avtp;
-        break;
-      case MSRP:
-        ethertype = ethertype_msrp;
-        break;
-      case MVRP:
-        ethertype = ethertype_mvrp;
-        break;
-      default:
-        avberr("Invalid protocol index\n");
-        return ERROR;
-    }
-
-    // Set the Ethertype filter (frames with this type will be available through the state->tx_l2if)
-    uint16_t ethertype_filter = ETHERTYPE_AVTP; // TODO: Change to MSRP or MVRP
-    if (ioctl(state->l2if[i], L2TAP_S_RCV_FILTER, &ethertype) < 0) {
-      avberr("failed to set Ethertype filter for fd %d: errno %d\n", fd, errno);
-      return ERROR;
-    }
-    // Enable time stamping in driver
-    if (ioctl(state->l2if[i], L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) < 0) {
-      avberr("failed to get l2if eth_handle for fd %d: errno %d\n", fd, errno);
-      return ERROR;
-    }
-    // esp_eth_clock_cfg_t clk_cfg = {
-    //   .eth_hndl = eth_handle,
-    // };
-    // esp_eth_clock_init(CLOCK_AVB_SYSTEM, &clk_cfg);
-
-    // Enable time stamping in L2TAP
-    if(ioctl(state->l2if[i], L2TAP_S_TIMESTAMP_EN) < 0) {
-      avberr("failed to enable time stamping in L2TAP fd %d: errno %d\n", fd, errno);
-      return ERROR;
-    }
-    avbinfo("Successfully initialized L2TAP fd %d for ethertype %d", fd, ethertype);
+  // Initialize the network interface
+  ret = avb_net_init(state, interface);
+  if (ret < 0) {
+    avberr("Failed to initialize network interface");
+    return ERROR;
   }
 
-  // get HW address
-  esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, &state->internal_mac_addr);
+  // Set any other state variables: TBD
 
   // Set stop to false
   state->stop = false;
@@ -126,109 +50,36 @@ static int avb_destroy_state(struct avb_state_s *state) {
   return OK;
 }
 
-/* Send MSRP Domain message */
-static int avb_send_msrp_domain(struct avb_state_s *state) {
-  msrp_domain_message_s msg;
-  struct timespec ts;
-  int ret;
-
-  memset(&msg, 0, sizeof(msg));
-  
-  //ret = avb_net_send(state, state->l2if[MSRP], &msg, sizeof(msg), &ts);
-  if (ret < 0) {
-      avberr("send failed: %d", errno);
-    }
-  else {
-      avbinfo("Sent MSRP Domain message");
-    }
-  return ret;
-}
-
-/* Check if we need to send periodic messages */
+/* Send periodic messages */
 static int avb_periodic_send(struct avb_state_s *state) {
   struct timespec time_now;
   struct timespec delta;
 
   clock_gettime(CLOCK_MONOTONIC, &time_now);
 
-  clock_timespec_subtract(&time_now,
-    &state->last_transmitted_msrp_domain, &delta);
+  clock_timespec_subtract(&time_now, &state->last_transmitted_mvrp_vlan_id, &delta);
+  if (timespec_to_ms(&delta) > MVRP_VLAN_ID_INTERVAL_MSEC) {
+    state->last_transmitted_mvrp_vlan_id = time_now;
+    avb_send_mvrp_vlan_id(state);
+  }
+
+  clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_domain, &delta);
   if (timespec_to_ms(&delta) > MSRP_DOMAIN_INTERVAL_MSEC) {
-      state->last_transmitted_msrp_domain = time_now;
-      avb_send_msrp_domain(state);
-    }
+    state->last_transmitted_msrp_domain = time_now;
+    avb_send_msrp_domain(state);
+  }
 
-  // TODO: Add other periodic messages
-  return OK;
-}
+  clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
+  if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
+    state->last_transmitted_msrp_talker_adv = time_now;
+    avb_send_msrp_talker_adv(state, msrp_attr_event_new);
+  }
 
-/* Process received AVTP AAF PCM message */
-static int avb_process_aaf(struct avb_state_s *state,
-                            aaf_pcm_message_s *msg) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received AVTP MAAP message */
-static int avb_process_maap(struct avb_state_s *state,
-                            maap_message_s *msg) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received ATDECC ADP message */
-static int avb_process_adp(struct avb_state_s *state,
-                            adp_message_s *msg) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received ATDECC AECP message */
-static int avb_process_aecp(struct avb_state_s *state,
-                            aecp_message_s *msg) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received ATDECC ACMP message */
-static int avb_process_acmp(struct avb_state_s *state,
-                            acmp_message_s *msg) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received MSRP domain message */
-static int avb_process_msrp_domain(struct avb_state_s *state,
-                                    msrp_msgbuf_s *msg,
-                                    int offset,
-                                    size_t length) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received MSRP talker advertise message */
-static int avb_process_msrp_talker(struct avb_state_s *state,
-                                    msrp_msgbuf_s *msg,
-                                    int offset,
-                                    size_t length,
-                                    bool is_failed) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received MSRP listener ready message */
-static int avb_process_msrp_listener(struct avb_state_s *state,
-                                    msrp_msgbuf_s *msg,
-                                    int offset,
-                                    size_t length) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received MVRP VLAN identifier message */
-static int avb_process_mvrp_vlan_id(struct avb_state_s *state,
-                                    mvrp_vlan_id_message_s *msg) {
-  // TODO: Implement processing
+  clock_timespec_subtract(&time_now, &state->last_transmitted_adp_entity_avail, &delta);
+  if (timespec_to_ms(&delta) > ADP_ENTITY_AVAIL_INTERVAL_MSEC) {
+    state->last_transmitted_adp_entity_avail = time_now;
+    avb_send_adp_entity_available(state);
+  }
   return OK;
 }
 
@@ -279,10 +130,10 @@ static int avb_process_rx_message(struct avb_state_s *state,
       msrp_msgbuf_s *msg = (msrp_msgbuf_s *)&state->rxbuf[protocol_idx].msrp;
       
       // Get the first attribute type
-      mrp_attr_header_s header;
+      msrp_attr_header_s header;
       int offset = 0;
       int count = 0;
-      memcpy(&header, &msg->messages_raw[offset], sizeof(mrp_attr_header_s));
+      memcpy(&header, &msg->messages_raw[offset], sizeof(msrp_attr_header_s));
 
       // Process all attributes in the message
       while (header.attr_type != msrp_attr_type_none && offset < sizeof(msrp_msgbuf_s)) {
@@ -310,12 +161,11 @@ static int avb_process_rx_message(struct avb_state_s *state,
         }
         // Get the next attribute offset
         offset += attr_size;
-        avbinfo("offset: %d", offset);
         // Get the next attribute header
-        memcpy(&header, &msg->messages_raw[offset], sizeof(mrp_attr_header_s));
+        memcpy(&header, &msg->messages_raw[offset], sizeof(msrp_attr_header_s));
         count++;
       }
-      avbinfo("Processed %d attributes in MSRP message", count);
+      //avbinfo("Processed %d attributes in MSRP message", count);
       break;
     }
     case MVRP: {
@@ -410,7 +260,7 @@ static void avb_task(void *task_param) {
     }
 
     // Send periodic messages such as announcing entity available, etc
-    //avb_periodic_send(state);
+    avb_periodic_send(state);
 
     // do any validation checking for timed out connections, etc
     // TBD
@@ -447,7 +297,7 @@ int avb_start(const char *interface)
               (void *)interface, 20, NULL);
     return OK;
   }
-  ESP_LOGE(TAG, "Another instance of AVB is already running");
+  avberr("Another instance of AVB is already running");
   return ERROR;
 }
 
