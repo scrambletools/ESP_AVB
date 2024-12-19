@@ -383,19 +383,70 @@ typedef enum {
 
 /* ATDECC types*/
 
-#define ATDECC_TEMPLATE_MAX_SIZE 500
+/* AVB Entity Capabilities */
+typedef struct {
+  uint8_t reserved[2];
+  uint8_t padding : 5;
+  uint8_t gptp_supported : 1;
+  uint8_t class_b : 1;
+  uint8_t class_a : 1;
+  uint8_t vendor_unique : 1;
+  uint8_t assoc_id_valid : 1;
+  uint8_t assoc_id_supported : 1;
+  uint8_t legacy_avc : 1;
+  uint8_t aem : 1;
+  uint8_t gateway_entity : 1;
+  uint8_t address_access : 1;
+  uint8_t efu_mode : 1;
+} avb_entity_cap_s; // 4 bytes
+
+/* AVB Talker Capabilities */
+typedef struct {
+  uint8_t video_source : 1;
+  uint8_t audio_source : 1;
+  uint8_t midi_source : 1;
+  uint8_t smpte_source : 1;
+  uint8_t media_clock_source : 1;
+  uint8_t control_source : 1;
+  uint8_t other_source : 1;
+  uint8_t padding : 1;
+  uint8_t reserved : 7;
+  uint8_t implemented : 1;
+} avb_talker_cap_s; // 2 bytes
+
+/* AVB Listener Capabilities */
+typedef struct {
+  uint8_t video_sink : 1;
+  uint8_t audio_sink : 1;
+  uint8_t midi_sink : 1;
+  uint8_t smpte_sink : 1;
+  uint8_t media_clock_sink : 1;
+  uint8_t control_sink : 1;
+  uint8_t other_sink : 1;
+  uint8_t padding : 1;
+  uint8_t reserved : 7;
+  uint8_t implemented : 1;
+} avb_listener_cap_s; // 2 bytes
+
+/* AVB Controller Capabilities */
+typedef struct {
+  uint8_t reserved[3];
+  uint8_t padding : 6;
+  uint8_t layer3_proxy : 1;
+  uint8_t implemented : 1;
+} avb_controller_cap_s; // 4 bytes
 
 /* AVB Entity Summary */
 typedef struct {
-  uint8_t entity_id[8];
-  uint8_t entity_model_id[8];
-  uint8_t entity_capabilities[4];
-  uint8_t talker_stream_sources[2];
-  uint8_t talker_capabilities[2];
-  uint8_t listener_stream_sinks[2];
-  uint8_t listener_capabilities[2];
-  uint8_t controller_capabilities[4];
-  uint8_t available_index[4];
+  uint8_t              entity_id[8];
+  uint8_t              entity_model_id[8];
+  avb_entity_cap_s     entity_capabilities;
+  uint8_t              talker_stream_sources[2];
+  avb_talker_cap_s     talker_capabilities;
+  uint8_t              listener_stream_sinks[2];
+  avb_listener_cap_s   listener_capabilities;
+  avb_controller_cap_s controller_capabilities;
+  uint8_t              available_index[4];
 } avb_entity_summary_s; // 36 bytes
 
 /* AVB Entity Detail */
@@ -414,7 +465,7 @@ typedef struct {
 /* AVB Entity */
 typedef struct {
   avb_entity_summary_s summary;
-  avb_entity_detail_s detail;
+  avb_entity_detail_s  detail;
 } avb_entity_s;
 
 /* ADP message */
