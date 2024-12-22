@@ -3,6 +3,12 @@
  AVB Implementation using ESP-IDF
 
 
+ Testing notes:
+ M4: EID = ...448000         M1: EID = ...888000
+ M4: MAC = ...f5:44          M1: MAC = ...c7:88
+ M4: GM = ...10002           M1: GM = ...30002
+
+
 Summary of the AVB talker (T), listener (L), controller (C) and bridge (B) interaction:
 [Sequence of frame transmissions by each device type]
 

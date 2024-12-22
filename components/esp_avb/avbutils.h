@@ -61,6 +61,7 @@
 uint64_t octets_to_uint(const uint8_t *buffer, size_t size);
 void octets_to_timeval(const uint8_t *buffer, struct timeval *tv);
 void reverse_octets(uint8_t *buffer, size_t size);
+void octets_to_hex_string(const uint8_t* buffer, size_t size, char* hex_string, unsigned char delimiter);
 void octets_to_binary_string(const uint8_t *buffer, size_t size, char *bit_string);
 void int_to_octets(void *value, uint8_t *buffer, size_t size);
 void int_to_binary_string(uint64_t value, int num_bits, char *bit_string, bool reverse_order);
@@ -71,7 +72,6 @@ uint64_t reverse_endianness(uint64_t value, int num_bits);
 uint64_t reverse_endianness_64(uint64_t value);
 uint32_t reverse_endianness_32(uint32_t value);
 uint16_t reverse_endianness_16(uint16_t value);
-char* mac_address_to_string(uint8_t *address);
 void timeval_to_octets(struct timeval *tv, uint8_t *buffer_sec, uint8_t *buffer_nsec);
 void timeval_add(struct timeval *result, struct timeval *a, struct timeval *b);
 void timeval_subtract(struct timeval *result, struct timeval *a, struct timeval *b);

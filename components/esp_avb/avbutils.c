@@ -9,6 +9,23 @@
 
 #include "avbutils.h"
 
+void octets_to_hex_string(const uint8_t* buffer, size_t size, char* hex_string, unsigned char delimiter) {
+    if (!buffer || size == 0) {
+        return;
+    }
+    if (!delimiter || delimiter == '\0') {
+        delimiter = ' ';
+    }
+    hex_string[0] = '\0'; // Initialize as an empty string
+    for (size_t i = 0; i < size; i++) {
+       char hexBuffer[4]; // 2 for hex, 1 for delimiter, 1 for null terminator
+       char delimStr[2] = {delimiter, '\0'}; // Create proper string for delimiter
+       snprintf(hexBuffer, sizeof(hexBuffer), "%02X%s", (unsigned char)buffer[i], 
+               (i < size - 1) ? delimStr : "");
+       strcat(hex_string, hexBuffer);
+   }
+}
+
 // Convert octet buffer to uint64_t, uint32_t, uint16_t or uint8_t; assumes big-endian buffer
 // size is buffer size in bytes: 8 (default) >= size >= 0
 uint64_t octets_to_uint(const uint8_t *buffer, size_t size) {
@@ -152,14 +169,6 @@ uint32_t reverse_endianness_32(uint32_t value) {
 // Helper function for 16-bit integers using the general function
 uint16_t reverse_endianness_16(uint16_t value) {
     return (uint16_t)reverse_endianness((uint64_t)value, 16);
-}
-
-// String representation of mac address
-char* mac_address_to_string(uint8_t *address) {
-    char* string = (char*)malloc(18 * sizeof(char));
-    sprintf(string, "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x",
-        address[0], address[1], address[2], address[3], address[4], address[5]);
-    return string;
 }
 
 // Convert timeval to octets; assumes big-endian buffers of size 6 and 4

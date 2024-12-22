@@ -39,6 +39,7 @@
 #include <esp_eth_time.h>
 #include <ptpd.h>
 #include "avbutils.h"
+#include "config.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -61,31 +62,20 @@
 #define MSRP 1
 #define MVRP 2
 
-/* AVTP Message types */
-#define AVTP_MSGTYPE_ANNOUNCE 0x00
-#define AVTP_MSGTYPE_SYNC 0x01
-
-/* MSRP Message types */
-#define MSRP_MSGTYPE_SYNC 0x00
-#define MSRP_MSGTYPE_ANNOUNCE 0x01
-#define MSRP_MSGTYPE_FOLLOW_UP 0x02
-
-/* MVRP Message types */
-#define MVRP_MSGTYPE_SYNC 0x00
-#define MVRP_MSGTYPE_ANNOUNCE 0x01
-#define MVRP_MSGTYPE_FOLLOW_UP 0x02
-
 /* Periodic message intervals */
 #define MSRP_DOMAIN_INTERVAL_MSEC 9000
-#define MVRP_VLAN_ID_INTERVAL_MSEC 2000
+#define MVRP_VLAN_ID_INTERVAL_MSEC 10000
 #define MSRP_TALKER_ADV_INTERVAL_MSEC 3000
 #define MSRP_LISTENER_READY_INTERVAL_MSEC 3000
-#define ADP_ENTITY_AVAIL_INTERVAL_MSEC 10000
+#define ADP_ENTITY_AVAIL_INTERVAL_MSEC 5000
+#define MAAP_ANNOUNCE_INTERVAL_MSEC 10000
+#define PTP_STATUS_UPDATE_INTERVAL_MSEC 3000
 
 // Commonly used mac addresses
-#define BCAST_MAC_ADDR (uint8_t[6]){ 0x91, 0xe0, 0xf0, 0x01, 0x00, 0x00 } // adp
+#define BCAST_MAC_ADDR      (uint8_t[6]){ 0x91, 0xe0, 0xf0, 0x01, 0x00, 0x00 } // adp
 #define MAAP_MCAST_MAC_ADDR (uint8_t[6]){ 0x91, 0xe0, 0xf0, 0x00, 0xff, 0x00 } // maap
-#define SPANTREE_MAC_ADDR (uint8_t[6]){ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x21 } // mvrp
+#define MAAP_START_MAC_ADDR (uint8_t[6]){ 0x91, 0xe0, 0xf0, 0x00, 0xf2, 0x00 } // maap, can change
+#define SPANTREE_MAC_ADDR   (uint8_t[6]){ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x21 } // mvrp
 #define LLDP_MCAST_MAC_ADDR (uint8_t[6]){ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e } // msrp
 
 /* Empty ID */
@@ -109,19 +99,7 @@
 
 typedef uint8_t eth_addr_t[ETH_ADDR_LEN];
 
-// Ethertypes (convert to big-endian before writing to Ethernet header)
-typedef enum {
-	ethertype_msrp = 0x22ea,
-	ethertype_avtp = 0x22f0,
-	ethertype_mvrp = 0x88f5,
-	ethertype_gptp = 0x88f7
-} ethertype_t;
-
-/* MSRP types */
-
-/* The following data structures are defined in IEEE 802.1Q
- * All multi-byte fields are big-endian.
- */
+/* MRP types */
 
 /* MRP three packed event (IEEE 802.1Q-2018 Clause 10.8.2.10)
  * (event1 * 36) + (event2 * 6) + event3 = 3pe value
@@ -130,32 +108,59 @@ typedef uint8_t mrp_3pe_event_t;
 
 /* MRP four packed event (IEEE 802.1Q-2018 Clause 10.8.2.11)
  * (event1 * 64) + (event2 * 16) + (event3 * 4) + event4 = 4pe value
+ * The formula is not needed, as the struct below is sufficient.
  */
 typedef struct {
-  uint8_t event1 : 2; // 1st event
-  uint8_t event2 : 2; // 2nd event
-  uint8_t event3 : 2; // 3rd event
   uint8_t event4 : 2; // 4th event
+  uint8_t event3 : 2; // 3rd event
+  uint8_t event2 : 2; // 2nd event
+  uint8_t event1 : 2; // 1st event
 } mrp_4pe_event_s; // 1 byte
+
+/* Union of 3PE and 4PE events */
+typedef union {
+  mrp_3pe_event_t event;
+  mrp_4pe_event_s declaration;
+} mrp_event_u;
+
+/* MVRP types */
+
+/* The data structures in this section are defined in IEEE 802.1Q-2018
+ * All multi-byte fields are big-endian.
+ */
+
+/* MVRP attribute header */
+typedef struct {
+  uint8_t attr_type; // attribute type
+  uint8_t attr_len; // attribute length
+  uint8_t vechead_padding : 5; // padding (ignored part of num_vals)
+  uint8_t vechead_leaveall : 3; // 0 or 1, if 0 then num_vals is non-zero
+  uint8_t vechead_num_vals; // # of events (div by 3, round up for # of 3pes)
+} mvrp_attr_header_s; // 6 bytes
+
+/* MVRP VLAN identifier message */
+typedef struct {
+  uint8_t            protocol_ver; // protocol version
+  mvrp_attr_header_s header; // attribute header
+  uint8_t            vlan_id[2]; // vlan ID
+  mrp_3pe_event_t    attr_event[20]; // allow up to 20 events, ignore the rest
+} mvrp_vlan_id_message_s; // 23 bytes limit
+
+/* MSRP types */
+
+/* The data structures in this section are defined in IEEE 802.1Q-2018
+ * All multi-byte fields are big-endian.
+ */
 
 /* MSRP attribute header */
 typedef struct {
   uint8_t attr_type; // attribute type
   uint8_t attr_len; // attribute length
   uint8_t attr_list_len[2]; // attribute list length
-  uint8_t vechead_leaveall : 3; // 0 or 1, if 0 then num_vals is non-zero
   uint8_t vechead_padding : 5; // padding (ignored part of num_vals)
+  uint8_t vechead_leaveall : 3; // 0 or 1, if 0 then num_vals is non-zero
   uint8_t vechead_num_vals; // # of events (div by 3, round up for # of 3pes)
 } msrp_attr_header_s; // 6 bytes
-
-/* MVRP attribute header */
-typedef struct {
-  uint8_t attr_type; // attribute type
-  uint8_t attr_len; // attribute length
-  uint8_t vechead_leaveall : 3; // 0 or 1, if 0 then num_vals is non-zero
-  uint8_t vechead_padding : 5; // padding (ignored part of num_vals)
-  uint8_t vechead_num_vals; // # of events (div by 3, round up for # of 3pes)
-} mvrp_attr_header_s; // 6 bytes
 
 /* MSRP domain message */
 typedef struct {
@@ -174,11 +179,11 @@ typedef struct { // in comments: numbers in brackets are bit lengths
   uint8_t            vlan_id[2]; // vlan ID
   uint8_t            tspec_max_frame_size[2]; // tspec max frame size
   uint8_t            tspec_max_frame_interval[2]; // tspec max frame interval
-  uint8_t            priority : 3; // 3 bits (0-7)
-  uint8_t            rank : 4; // 4 bits (0-15)
-  uint8_t            reserved : 1; // 1 bit (0-1)
+  uint8_t            reserved : 4;
+  uint8_t            rank : 1;
+  uint8_t            priority : 3;
   uint8_t            accumulated_latency[2]; // accumulated latency
-  mrp_3pe_event_t    attr_event[20]; // allow up to 20 events, ignore the rest
+  mrp_3pe_event_t    event_data[20]; // up to 20 events, ignore the rest
 } msrp_talker_adv_message_s; // 44 bytes limit
 
 /* MSRP talker failed message */
@@ -189,20 +194,20 @@ typedef struct { // in comments: numbers in brackets are bit lengths
   uint8_t            vlan_id[2]; // vlan ID
   uint8_t            tspec_max_frame_size[2]; // tspec max frame size
   uint8_t            tspec_max_frame_interval[2]; // tspec max frame interval
-  uint8_t            priority : 3; // 3 bits (0-7)
-  uint8_t            rank : 4; // 4 bits (0-15)
-  uint8_t            reserved : 1; // 1 bit (0-1)
+  uint8_t            reserved : 4;
+  uint8_t            rank : 1; 
+  uint8_t            priority : 3; 
   uint8_t            accumulated_latency[2]; // accumulated latency
   uint8_t            failure_bridge_id[8]; // failure bridge ID
   uint8_t            failure_code; // failure code
-  mrp_3pe_event_t    attr_event[20]; // allow up to 20 events, ignore the rest
+  mrp_3pe_event_t    event_data[20]; // up to 20 events, ignore the rest
 } msrp_talker_failed_message_s; // 53 bytes limit
 
 /* MSRP listener message */
 typedef struct {
   msrp_attr_header_s header; // attribute header
   uint8_t            stream_id[8]; // stream ID
-  mrp_4pe_event_s    attr_event[20]; // allow up to 20 events, ignore the rest
+  mrp_event_u        event_decl_data[20]; // up to 20 event/decl, ignore the rest
 } msrp_listener_message_s; // 29 bytes limit
 
 /* MSRP attribute union */
@@ -221,80 +226,9 @@ typedef struct {
   uint8_t messages_raw[200]; // variable length depending on attributes
 } msrp_msgbuf_s; // 266 bytes limit
 
-/* MSRP attribute types in enumerated order */
-typedef enum {
-  msrp_attr_type_none,
-  msrp_attr_type_talker_advertise,
-  msrp_attr_type_talker_failed,
-  msrp_attr_type_listener,
-  msrp_attr_type_domain
-} msrp_attr_type_t;
-
-/* MRP attribute events in enumerated order */
-typedef enum {
-  msrp_attr_event_new,
-  msrp_attr_event_join_in,
-  msrp_attr_event_in,
-  msrp_attr_event_join_mt,
-  msrp_attr_event_mt,
-  msrp_attr_event_lv,
-  msrp_attr_event_none // no event
-} msrp_attr_event_t;
-
-/* MSRP listener events in enumerated order */
-typedef enum {
-  msrp_listener_event_ignore,
-  msrp_listener_event_asking_failed,
-  msrp_listener_event_ready,
-  msrp_listener_event_ready_failed
-} msrp_listener_event_t;
-
-/* MSRP reservation failure codes in enumerated order */
-typedef enum {
-  no_failure,
-  insufficient_bandwidth,
-  insufficient_bridge_resources,
-  insufficient_bandwidth_for_traffic_class,
-  stream_id_in_use_by_another_talker,
-  stream_destination_address_already_in_use,
-  stream_preempted_by_higher_rank,
-  reported_latency_has_changed,
-  egress_port_is_not_avb_capable,
-  use_a_different_destination_address,
-  out_of_msrp_resources,
-  out_of_mmrp_resources,
-  cannot_store_destination_address,
-  requested_priority_is_not_an_sr_class_priority,
-  max_frame_size_is_too_large_for_media,
-  max_fan_in_ports_limit_has_been_reached,
-  changes_in_first_value_for_a_registered_stream_id,
-  vlan_is_blocked_on_this_egress_port__registration_forbidden,
-  vlan_tagging_is_disabled_on_this_egress_port__untagged_set,
-  sr_class_priority_mismatch
-} msrp_reservation_failure_code_t;
-
-/* MVRP types */
-
-/* The following data structures are defined in IEEE 802.1Q
- * All multi-byte fields are big-endian.
- */
-
-/* MVRP VLAN identifier message */
-typedef struct {
-  uint8_t            protocol_ver; // protocol version
-  mvrp_attr_header_s header; // attribute header
-  uint8_t            vlan_id[2]; // vlan ID
-  mrp_3pe_event_t    attr_event[20]; // allow up to 20 events, ignore the rest
-} mvrp_vlan_id_message_s; // 23 bytes limit
-
-/* MVRP attribute types and their values */
-typedef enum {
-  mvrp_attr_type_vlan_identifier = 0x01
-} mvrp_attr_type_t;
-
 /* AVTP types */
 
-/* The following data structures are defined in IEEE 1722-2016
+/* The data structures in this section are defined in IEEE 1722-2016
  * All multi-byte fields are big-endian.
  */
 
@@ -313,7 +247,7 @@ typedef struct { // in comments: numbers in brackets are bit lengths
   uint8_t rsv_sp_evt; // reserved[3], sparse timestamp[1], upper-level event[4]
   uint8_t reserved; // reserved
   uint8_t stream_data[80]; // variable length
-} aaf_pcm_message_s;
+} aaf_pcm_message_s; // 
 
 /* MAAP message */
 typedef struct {
@@ -365,75 +299,63 @@ typedef struct {
   bool            active; // status
 } avb_connection_s;
 
-/* AVTP subtypes and their values */
-typedef enum {
-  avtp_subtype_aaf  = 0x02,
-  avtp_subtype_adp  = 0xfa,
-  avtp_subtype_aecp = 0xfb,
-  avtp_subtype_acmp = 0xfc,
-  avtp_subtype_maap = 0xfe
-} avtp_subtype_t;
-
-/* MAAP message types and their values */
-typedef enum {
-  maap_msg_type_probe    = 0x01,
-  maap_msg_type_defend   = 0x02,
-  maap_msg_type_announce = 0x03
-} maap_msg_type_t;
-
 /* ATDECC types*/
+
+/* The data structures in this section are defined in IEEE 1722.1-2021
+ * All multi-byte fields are big-endian.
+ */
 
 /* AVB Entity Capabilities */
 typedef struct {
-  uint8_t reserved[2];
-  uint8_t padding : 5;
-  uint8_t gptp_supported : 1;
-  uint8_t class_b : 1;
-  uint8_t class_a : 1;
-  uint8_t vendor_unique : 1;
-  uint8_t assoc_id_valid : 1;
-  uint8_t assoc_id_supported : 1;
-  uint8_t legacy_avc : 1;
-  uint8_t aem : 1;
-  uint8_t gateway_entity : 1;
-  uint8_t address_access : 1;
-  uint8_t efu_mode : 1;
+  char reserved[2];
+  char class_a : 1;
+  char class_b : 1;
+  char gptp_supported : 1;
+  char padding : 5;
+  char efu_mode : 1;
+  char address_access : 1;
+  char gateway_entity : 1;
+  char aem : 1;
+  char legacy_avc : 1;
+  char assoc_id_supported : 1;
+  char assoc_id_valid : 1;
+  char vendor_unique : 1;
 } avb_entity_cap_s; // 4 bytes
 
 /* AVB Talker Capabilities */
 typedef struct {
-  uint8_t video_source : 1;
-  uint8_t audio_source : 1;
-  uint8_t midi_source : 1;
-  uint8_t smpte_source : 1;
-  uint8_t media_clock_source : 1;
-  uint8_t control_source : 1;
-  uint8_t other_source : 1;
   uint8_t padding : 1;
-  uint8_t reserved : 7;
+  uint8_t other_source : 1;
+  uint8_t control_source : 1;
+  uint8_t media_clock_source : 1;
+  uint8_t smpte_source : 1;
+  uint8_t midi_source : 1;
+  uint8_t audio_source : 1;
+  uint8_t video_source : 1;
   uint8_t implemented : 1;
+  uint8_t reserved : 7;
 } avb_talker_cap_s; // 2 bytes
 
 /* AVB Listener Capabilities */
 typedef struct {
-  uint8_t video_sink : 1;
-  uint8_t audio_sink : 1;
-  uint8_t midi_sink : 1;
-  uint8_t smpte_sink : 1;
-  uint8_t media_clock_sink : 1;
-  uint8_t control_sink : 1;
-  uint8_t other_sink : 1;
   uint8_t padding : 1;
-  uint8_t reserved : 7;
+  uint8_t other_sink : 1;
+  uint8_t control_sink : 1;
+  uint8_t media_clock_sink : 1;
+  uint8_t smpte_sink : 1;
+  uint8_t midi_sink : 1;
+  uint8_t audio_sink : 1;
+  uint8_t video_sink : 1;
   uint8_t implemented : 1;
+  uint8_t reserved : 7;
 } avb_listener_cap_s; // 2 bytes
 
 /* AVB Controller Capabilities */
 typedef struct {
   uint8_t reserved[3];
-  uint8_t padding : 6;
-  uint8_t layer3_proxy : 1;
   uint8_t implemented : 1;
+  uint8_t layer3_proxy : 1;
+  uint8_t padding : 6;
 } avb_controller_cap_s; // 4 bytes
 
 /* AVB Entity Summary */
@@ -531,20 +453,114 @@ typedef union {
   uint8_t           raw[500];
 } avtp_msgbuf_u;
 
-// ADP message types in enumerated order (1722.1 Clause 6.2)
+/* General */
+
+/* Generic AVB message buffer */
+typedef union {
+  avtp_msgbuf_u          avtp;
+  msrp_msgbuf_s          msrp;
+  mvrp_vlan_id_message_s mvrp;
+  uint8_t                raw[128];
+} avb_msgbuf_u;
+
+/* AVB Enums*/
+
+/* Ethertypes (convert to big-endian before writing to Ethernet header) */
+typedef enum {
+	ethertype_msrp = 0x22ea,
+	ethertype_avtp = 0x22f0,
+	ethertype_mvrp = 0x88f5,
+	ethertype_gptp = 0x88f7
+} ethertype_t;
+
+/* MVRP attribute types in enumerated order */
+typedef enum {
+  mvrp_attr_type_none,
+  mvrp_attr_type_vlan_identifier
+} mvrp_attr_type_t;
+
+/* MSRP attribute types in enumerated order */
+typedef enum {
+  msrp_attr_type_none,
+  msrp_attr_type_talker_advertise,
+  msrp_attr_type_talker_failed,
+  msrp_attr_type_listener,
+  msrp_attr_type_domain
+} msrp_attr_type_t;
+
+/* MSRP attribute events in enumerated order */
+typedef enum {
+  msrp_attr_event_new,
+  msrp_attr_event_join_in,
+  msrp_attr_event_in,
+  msrp_attr_event_join_mt,
+  msrp_attr_event_mt,
+  msrp_attr_event_lv,
+  msrp_attr_event_none // no event
+} msrp_attr_event_t;
+
+/* MSRP listener events in enumerated order */
+typedef enum {
+  msrp_listener_event_ignore,
+  msrp_listener_event_asking_failed,
+  msrp_listener_event_ready,
+  msrp_listener_event_ready_failed
+} msrp_listener_event_t;
+
+/* MSRP reservation failure codes in enumerated order */
+typedef enum {
+  no_failure,
+  insufficient_bandwidth,
+  insufficient_bridge_resources,
+  insufficient_bandwidth_for_traffic_class,
+  stream_id_in_use_by_another_talker,
+  stream_destination_address_already_in_use,
+  stream_preempted_by_higher_rank,
+  reported_latency_has_changed,
+  egress_port_is_not_avb_capable,
+  use_a_different_destination_address,
+  out_of_msrp_resources,
+  out_of_mmrp_resources,
+  cannot_store_destination_address,
+  requested_priority_is_not_an_sr_class_priority,
+  max_frame_size_is_too_large_for_media,
+  max_fan_in_ports_limit_has_been_reached,
+  changes_in_first_value_for_a_registered_stream_id,
+  vlan_is_blocked_on_this_egress_port__registration_forbidden,
+  vlan_tagging_is_disabled_on_this_egress_port__untagged_set,
+  sr_class_priority_mismatch
+} msrp_reservation_failure_code_t;
+
+/* ADP message types in enumerated order (1722.1 Clause 6.2) */
 typedef enum {
 	adp_msg_type_entity_available,
 	adp_msg_type_entity_departing,
 	adp_msg_type_entity_discover
 } adp_msg_type_t;
 
-// AECP message types (subset) in enumerated order (1722.1 Clause 9)
+/* AVTP subtypes and their values */
+typedef enum {
+  avtp_subtype_aaf  = 0x02,
+  avtp_subtype_adp  = 0xfa,
+  avtp_subtype_aecp = 0xfb,
+  avtp_subtype_acmp = 0xfc,
+  avtp_subtype_maap = 0xfe
+} avtp_subtype_t;
+
+/* MAAP message types and their values */
+typedef enum {
+  maap_msg_type_probe    = 0x01,
+  maap_msg_type_defend   = 0x02,
+  maap_msg_type_announce = 0x03
+} maap_msg_type_t;
+
+/* AECP message types (subset) in enumerated order (1722.1 Clause 9) */
 typedef enum {
 	aecp_msg_type_aem_command,
 	aecp_msg_type_aem_response
 } aecp_msg_type_t;
 
-// AECP command codes (subset) in enumerated order (1722.1 Clause 7.4)
+/* AECP command codes (subset) in enumerated order (1722.1 Clause 7.4) */
 typedef enum {
 	aecp_cmd_code_acquire_entity,
 	aecp_cmd_code_lock_entity,
@@ -553,12 +569,13 @@ typedef enum {
 	aecp_cmd_code_read_descriptor
 } aecp_cmd_code_t;
 
+/* AECP descriptor types in enumerated order */
 typedef enum {
   aecp_desc_type_entity,
   aecp_desc_type_configuration
 } aecp_desc_type_t;
 
-// ACMP message types (subset) in enumerated order (1722.1 Clause 8.2)
+/* ACMP message types (subset) in enumerated order (1722.1 Clause 8.2) */
 typedef enum {
 	acmp_msg_type_connect_tx_command,
 	acmp_msg_type_connect_tx_response,
@@ -574,30 +591,21 @@ typedef enum {
 	acmp_msg_type_get_rx_state_response
 } acmp_msg_type_t;
 
-/* General */
-
-/* Generic message buffer */
-typedef union {
-  avtp_msgbuf_u          avtp;
-  msrp_msgbuf_s          msrp;
-  mvrp_vlan_id_message_s mvrp;
-  uint8_t                raw[128];
-} avb_msgbuf_u;
+/* AVB status structures*/
 
 /* Carrier structure for querying AVB status */
-
 struct avb_statusreq_s {
   sem_t               *done;
   struct avb_status_s *dest;
 };
 
 /* Main AVB state storage */
-
 struct avb_state_s {
-  /* Request for AVB task to stop or report status */
 
+  /* Request for AVB task to stop or report status */
   bool stop;
   struct avb_statusreq_s status_req;
+  struct ptpd_status_s   ptp_status;
 
   uint8_t internal_mac_addr[ETH_ADDR_LEN];
   int l2if[AVB_NUM_PROTOCOLS]; // 3 L2TAP interfaces (FDs) for AVTP, MSRP, and MVRP
@@ -619,14 +627,19 @@ struct avb_state_s {
    */
   avb_msgbuf_u rxbuf[AVB_NUM_PROTOCOLS];
   struct timespec rxtime[AVB_NUM_PROTOCOLS];
+  eth_addr_t rxsrc[AVB_NUM_PROTOCOLS];
 
   /* Last time we sent a periodic message */
+  struct timespec last_transmitted_adp_entity_avail;
+  struct timespec last_transmitted_mvrp_vlan_id;
   struct timespec last_transmitted_msrp_domain;
   struct timespec last_transmitted_msrp_talker_adv;
   struct timespec last_transmitted_msrp_listener_ready;
-  struct timespec last_transmitted_mvrp_vlan_id;
-  struct timespec last_transmitted_adp_entity_avail;
+  struct timespec last_transmitted_maap_announce;
+  struct timespec last_ptp_status_update;
 };
+
+/* AVB Functions */
 
 /* Network functions */
 int avb_net_init(struct avb_state_s *state, const char *interface);
@@ -636,6 +649,12 @@ void avb_create_eth_frame(uint8_t *eth_frame,
                           ethertype_t ethertype, 
                           void *msg, 
                           uint16_t msg_len);
+int avb_net_send_to(struct avb_state_s *state, 
+                 ethertype_t ethertype, 
+                 void *msg, 
+                 uint16_t msg_len, 
+                 struct timespec *ts,
+                 eth_addr_t *dest_addr);
 int avb_net_send(struct avb_state_s *state, 
                  ethertype_t ethertype, 
                  void *msg, 
@@ -645,12 +664,22 @@ int avb_net_recv(struct avb_state_s *state,
                  int l2if, 
                  void *msg, 
                  uint16_t msg_len, 
-                 struct timespec *ts);
+                 struct timespec *ts,
+                 eth_addr_t *src_addr);
 
-/* AVTP functions */
+/* AVTP send functions */
 int avb_send_mvrp_vlan_id(struct avb_state_s *state);
 int avb_send_msrp_domain(struct avb_state_s *state);
 int avb_send_msrp_talker_adv(struct avb_state_s *state, msrp_attr_event_t event);
+int avb_send_msrp_talker_failed(struct avb_state_s *state, msrp_attr_event_t event);
+int avb_send_msrp_listener(struct avb_state_s *state, 
+                           msrp_attr_event_t attr_event, 
+                           msrp_listener_event_t listener_event);
+int avb_send_maap_announce(struct avb_state_s *state);
+int avb_send_aaf_pcm(struct avb_state_s *state);
+
+/* AVTP processing functions */
+int avb_process_mvrp_vlan_id(struct avb_state_s *state, mvrp_vlan_id_message_s *msg);
 int avb_process_msrp_domain(struct avb_state_s *state,
                             msrp_msgbuf_s *msg,
                             int offset,
@@ -664,15 +693,30 @@ int avb_process_msrp_listener(struct avb_state_s *state,
                               msrp_msgbuf_s *msg,
                               int offset,
                               size_t length);
-int avb_process_mvrp_vlan_id(struct avb_state_s *state, mvrp_vlan_id_message_s *msg);
-int avb_process_aaf(struct avb_state_s *state, aaf_pcm_message_s *msg);
 int avb_process_maap(struct avb_state_s *state, maap_message_s *msg);
+int avb_process_aaf(struct avb_state_s *state, aaf_pcm_message_s *msg);
 
-/* ATDECC functions */
+/* ATDECC send functions */
 int avb_send_adp_entity_available(struct avb_state_s *state);
-int avb_process_adp(struct avb_state_s *state, adp_message_s *msg);
-int avb_process_aecp(struct avb_state_s *state, aecp_message_s *msg);
-int avb_process_acmp(struct avb_state_s *state, acmp_message_s *msg);
+int avb_send_acmp_connect_rx_command(struct avb_state_s *state);
+int avb_send_acmp_connect_tx_command(struct avb_state_s *state);
+int avb_send_aecp_cmd_get_stream_info(struct avb_state_s *state);
+int avb_send_aecp_rsp_get_stream_info(struct avb_state_s *state); // could be notification
+int avb_send_aecp_cmd_get_counters(struct avb_state_s *state);
+int avb_send_aecp_rsp_get_counters(struct avb_state_s *state); // could be notification
+
+/* ATDECC processing functions */
+int avb_process_adp(struct avb_state_s *state, adp_message_s *msg); // handle all adp messages
+int avb_process_aecp(struct avb_state_s *state, aecp_message_s *msg); // route to specific func
+int avb_process_acmp(struct avb_state_s *state, acmp_message_s *msg); // route to specific func
+int avb_process_aecp_cmd_get_stream_info(struct avb_state_s *state);
+int avb_process_aecp_rsp_get_stream_info(struct avb_state_s *state);
+int avb_process_aecp_cmd_get_counters(struct avb_state_s *state);
+int avb_process_aecp_rsp_get_counters(struct avb_state_s *state);
+int avb_process_acmp_connect_rx_command(struct avb_state_s *state);
+int avb_process_acmp_connect_tx_command(struct avb_state_s *state);
+
+/* Helper functions */
 const char* get_adp_message_type_name(adp_msg_type_t message_type);
 const char* get_aecp_command_code_name(aecp_cmd_code_t command_code);
 const char* get_acmp_message_type_name(acmp_msg_type_t message_type);

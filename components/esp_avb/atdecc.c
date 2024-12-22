@@ -22,7 +22,7 @@ int avb_send_adp_entity_available(struct avb_state_s *state) {
   uint8_t validtime_controldatalen[2] = {0x40, 0x38};
   memcpy(msg.validtime_controldatalen, validtime_controldatalen, 2);
   memcpy(&msg.entity, &state->own_entity.summary, sizeof(avb_entity_summary_s));
-  memcpy(msg.gptp_gm_id, &EMPTY_ID, 8);
+  memcpy(msg.gptp_gm_id, state->ptp_status.clock_source_info.gm_id, 8);
   msg.gptp_domain_num = 0;
   memcpy(msg.association_id, &EMPTY_ID, 8);
 

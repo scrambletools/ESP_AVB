@@ -31,6 +31,12 @@ menu "AVB Configuration"
             help
                 Act as an AVB listener (stream sink)
 
+        config ESP_AVB_MODEL_ID
+            hex "AVB entity model ID"
+            default 0x0102030405060708
+            help
+                Set the stream ID for the AVB talker.
+
         config ESP_AVB_STACKSIZE
             int "AVB stack size"
             default 6144 # DEFAULT_TASK_STACKSIZE
