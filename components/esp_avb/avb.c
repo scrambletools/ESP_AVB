@@ -126,11 +126,11 @@ static int avb_periodic_send(struct avb_state_s *state) {
     avb_send_msrp_domain(state);
   }
 
-  clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
-  if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
-    state->last_transmitted_msrp_talker_adv = time_now;
-    avb_send_msrp_talker_adv(state, msrp_attr_event_new);
-  }
+  // clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
+  // if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
+  //   state->last_transmitted_msrp_talker_adv = time_now;
+  //   avb_send_msrp_talker_adv(state, msrp_attr_event_new);
+  // }
 
   clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener_ready, &delta);
   if (timespec_to_ms(&delta) > MSRP_LISTENER_READY_INTERVAL_MSEC) {
@@ -155,7 +155,6 @@ static int avb_process_rx_message(struct avb_state_s *state,
     avbwarn("Ignoring invalid message, length only %d bytes", (int)length);
         return OK;
   }
-  //clock_gettime(CLOCK_MONOTONIC, &state->last_received_multicast);
 
   eth_addr_t src_addr;
   memcpy(&src_addr, &state->rxsrc[protocol_idx], ETH_ADDR_LEN);
@@ -180,7 +179,7 @@ static int avb_process_rx_message(struct avb_state_s *state,
           break;
         case avtp_subtype_adp:
           avbinfo("Got an ADP message from %s", src_addr_str);
-          return avb_process_adp(state, &msg->adp);
+          return avb_process_adp(state, &msg->adp, &src_addr);
           break;
         case avtp_subtype_aecp:
           avbinfo("Got an AECP message from %s", src_addr_str);

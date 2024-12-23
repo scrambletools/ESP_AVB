@@ -30,12 +30,10 @@ int avb_send_mvrp_vlan_id(struct avb_state_s *state) {
   
   ret = avb_net_send(state, ethertype_mvrp, &msg, msg_len, &ts);
   if (ret < 0) {
-      avberr("send MVRP VLAN ID failed: %d", errno);
-    }
-  else {
-      avbinfo("Sent MVRP VLAN ID message");
-    }
-  return ret;
+    avberr("send MVRP VLAN ID failed: %d", errno);
+    return ret;
+  }
+  return OK;
 }
 
 /* Send MSRP domain message */

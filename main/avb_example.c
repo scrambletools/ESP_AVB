@@ -144,13 +144,17 @@ void app_main(void)
                 clock_source_valid_cnt = 0;
             }
         } else {
-            clock_source_valid_cnt = 0;
+            if (clock_source_valid_cnt > 0) {
+                clock_source_valid_cnt--;
+            }
+            //ESP_LOGE(TAG, "PTP status NOT VALID");
         }
         // consider the source valid only after n consequent intervals to be sure clock was synced
         if (clock_source_valid_cnt > 2) {
             clock_source_valid = true;
         } else {
             clock_source_valid = false;
+            
         }
         // source validity changed => resync the pulse for ptp slave OR when the first pass to PTP master
         // starts generating its pulses

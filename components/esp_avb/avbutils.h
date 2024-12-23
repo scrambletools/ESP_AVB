@@ -26,6 +26,7 @@
 
 /* Error and OK definitions */
 #define ERROR ESP_FAIL
+#define NOT_FOUND -1
 #define OK ESP_OK
 
 #define UNUSED (void)
