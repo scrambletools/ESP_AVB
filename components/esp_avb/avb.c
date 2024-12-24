@@ -214,11 +214,11 @@ static int avb_process_rx_message(struct avb_state_s *state,
             break;
           case msrp_attr_type_talker_advertise:
             avbinfo("Got an MSRP talker advertise message from %s", src_addr_str);
-            avb_process_msrp_talker(state, msg, offset, attr_size, false);
+            avb_process_msrp_talker(state, msg, offset, attr_size, false, &src_addr);
             break;
           case msrp_attr_type_talker_failed:
             avbinfo("Got an MSRP talker failed message from %s", src_addr_str);
-            avb_process_msrp_talker(state, msg, offset, attr_size, true);
+            avb_process_msrp_talker(state, msg, offset, attr_size, true, &src_addr);
             break;
           case msrp_attr_type_listener:
             avbinfo("Got an MSRP listener message from %s", src_addr_str);

@@ -75,34 +75,51 @@ int avb_send_msrp_domain(struct avb_state_s *state) {
 }
 
 /* Send MSRP talker advertise message with appropriate event */
-int avb_send_msrp_talker_adv(struct avb_state_s *state, msrp_attr_event_t event) {
-  msrp_talker_adv_message_s msg;
+int avb_send_msrp_talker(struct avb_state_s *state, 
+                         msrp_attr_event_t event, 
+                         bool is_failed) {
+  msrp_talker_message_u msg;
   struct timespec ts;
   int ret;
   int vlan_id = CONFIG_ESP_AVB_VLAN_ID;
+  int attr_list_len;
   uint8_t stream_id[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
   memset(&msg, 0, sizeof(msg));
 
   // Populate the message
-  msg.header.attr_type = msrp_attr_type_talker_advertise;
-  msg.header.attr_len = 25;
-  int attr_list_len = 29; // includes vechead, attr_event and vec end mark
+  if (!is_failed) {   
+    msg.header.attr_type = msrp_attr_type_talker_advertise;
+    msg.header.attr_len = 25;
+    attr_list_len = 29; // includes vechead, attr_event and vec end mark
+  }
+  else {
+    msg.header.attr_type = msrp_attr_type_talker_failed;
+    msg.header.attr_len = 34;
+    attr_list_len = 38; // includes vechead, attr_event and vec end mark
+  }
   int_to_octets(&attr_list_len, msg.header.attr_list_len, 2);
   msg.header.vechead_leaveall = 0;
   msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1;
-  memcpy(msg.stream_id, stream_id, 8);
-  memcpy(msg.stream_dest_addr, &MAAP_MCAST_MAC_ADDR, 6);
-  int_to_octets(&vlan_id, msg.vlan_id, 2);
+  memcpy(msg.talker.info.stream_id, stream_id, 8);
+  memcpy(msg.talker.info.stream_dest_addr, &MAAP_MCAST_MAC_ADDR, 6);
+  int_to_octets(&vlan_id, msg.talker.info.vlan_id, 2);
   int tspec_max_frame_size = 1024;
-  int_to_octets(&tspec_max_frame_size, msg.tspec_max_frame_size, 2);
+  int_to_octets(&tspec_max_frame_size, msg.talker.info.tspec_max_frame_size, 2);
   int tspec_max_frame_interval = 1000;
-  int_to_octets(&tspec_max_frame_interval, msg.tspec_max_frame_interval, 2);
-  msg.priority = 3; // class A
-  msg.rank = 1; // rank 1 for class A
+  int_to_octets(&tspec_max_frame_interval, msg.talker.info.tspec_max_frame_interval, 2);
+  msg.talker.info.priority = 3; // class A
+  msg.talker.info.rank = 1; // rank 1 for class A
   int accumulated_latency = 0;
-  int_to_octets(&accumulated_latency, msg.accumulated_latency, 2);
-  msg.event_data[0] = int_to_3pe(event, 0, 0);
+  int_to_octets(&accumulated_latency, msg.talker.info.accumulated_latency, 2);
+  if (is_failed) {
+    memcpy(msg.talker_failed.failure_bridge_id, &EMPTY_ID, UNIQUE_ID_LEN);
+    msg.talker_failed.failure_code = 0;
+    msg.talker_failed.event_data[0] = int_to_3pe(event, 0, 0);
+  }
+  else {
+    msg.talker.event_data[0] = int_to_3pe(event, 0, 0);
+  }
 
   // Create an MSRP message buffer
   msrp_msgbuf_s msrp_msg;
@@ -122,7 +139,9 @@ int avb_send_msrp_talker_adv(struct avb_state_s *state, msrp_attr_event_t event)
 }
 
 /* Send MSRP listener message with appropriate event */
-int avb_send_msrp_listener(struct avb_state_s *state, msrp_attr_event_t attr_event, msrp_listener_event_t listener_event) {
+int avb_send_msrp_listener(struct avb_state_s *state, 
+                           msrp_attr_event_t attr_event, 
+                           msrp_listener_event_t listener_event) {
   msrp_listener_message_s msg;
   struct timespec ts;
   int ret;
@@ -174,7 +193,12 @@ int avb_send_maap_announce(struct avb_state_s *state) {
   else {
       avbinfo("Sent MAAP Announce message");
     }
+  return OK;
+}
 
+/* Process received MVRP VLAN identifier message */
+int avb_process_mvrp_vlan_id(struct avb_state_s *state, mvrp_vlan_id_message_s *msg) {
+  // TODO: Implement processing
   return OK;
 }
 
@@ -189,11 +213,18 @@ int avb_process_msrp_domain(struct avb_state_s *state,
 
 /* Process received MSRP talker advertise message */
 int avb_process_msrp_talker(struct avb_state_s *state,
-                            msrp_msgbuf_s *msg,
+                            msrp_msgbuf_s *msg_data,
                             int offset,
                             size_t length,
-                            bool is_failed) {
-  // TODO: Implement processing
+                            bool is_failed, 
+                            eth_addr_t *src_addr) {
+
+  msrp_talker_message_u msg;
+  memset(&msg, 0, sizeof(msrp_talker_message_u));
+  memcpy(&msg, &msg_data->messages_raw[offset], sizeof(msrp_talker_message_u));
+
+  // If talker is known then update with talker info, else add to talker list
+  
   return OK;
 }
 
@@ -202,12 +233,6 @@ int avb_process_msrp_listener(struct avb_state_s *state,
                               msrp_msgbuf_s *msg,
                               int offset,
                               size_t length) {
-  // TODO: Implement processing
-  return OK;
-}
-
-/* Process received MVRP VLAN identifier message */
-int avb_process_mvrp_vlan_id(struct avb_state_s *state, mvrp_vlan_id_message_s *msg) {
   // TODO: Implement processing
   return OK;
 }

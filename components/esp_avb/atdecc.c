@@ -18,11 +18,11 @@ int avb_send_adp_entity_available(struct avb_state_s *state) {
   memset(&msg, 0, sizeof(msg));
 
   // Populate the message
-  msg.subtype = avtp_subtype_adp;
-  msg.msg_type = adp_msg_type_entity_available;
-  msg.version = 0;
-  msg.valid_time = 8; // 16 seconds
-  msg.control_data_len = body_size;
+  msg.header.subtype = avtp_subtype_adp;
+  msg.header.msg_type = adp_msg_type_entity_available;
+  msg.header.version = 0;
+  msg.header.status_valtime = 8; // valid time: 16 seconds
+  msg.header.control_data_len = body_size;
   memcpy(&msg.entity, &state->own_entity.summary, sizeof(avb_entity_summary_s));
   memcpy(msg.gptp_gm_id, state->ptp_status.clock_source_info.gm_id, 8);
   msg.gptp_domain_num = 0;
@@ -41,11 +41,62 @@ int avb_send_adp_entity_available(struct avb_state_s *state) {
   return ret;
 }
 
+/* Send AECP command controller available message */
+int avb_send_aecp_cmd_controller_available(struct avb_state_s *state) {
+  return OK;
+}
+
+/* Send AECP command get stream info message */
+int avb_send_aecp_cmd_get_stream_info(struct avb_state_s *state) {
+  return OK;
+}
+
+/* Send AECP command get counters message */
+int avb_send_aecp_cmd_get_counters(struct avb_state_s *state) {
+  return OK;
+}
+
+/* Send AECP response get stream info message */
+int avb_send_aecp_rsp_get_stream_info(struct avb_state_s *state) {
+  return OK;
+}
+
+/* Send AECP response get counters message */
+int avb_send_aecp_rsp_get_counters(struct avb_state_s *state) {
+  return OK;
+}
+
+/* Send ACMP connect rx command */
+int avb_send_acmp_connect_rx_command(struct avb_state_s *state) {
+  return OK;
+}
+
+/* Send ACMP connect tx command */
+int avb_send_acmp_connect_tx_command(struct avb_state_s *state) {
+  return OK;
+}
+
+/* Send ACMP disconnect rx command */
+int avb_send_acmp_disconnect_rx_command(struct avb_state_s *state) {
+  return OK;
+}
+
+/* Send ACMP disconnect tx command */
+int avb_send_acmp_disconnect_tx_command(struct avb_state_s *state) {
+  return OK;
+}
+
 /* Process received ATDECC ADP message */
 int avb_process_adp(struct avb_state_s *state, adp_message_s *msg, eth_addr_t *entity_addr) {
   
-  if (msg->subtype == adp_msg_type_entity_available) {
+  if (msg->header.subtype == adp_msg_type_entity_available) {
     
+    // TBD: if talker is known then update with talker info
+    // else add to talker list
+    // need avb_add_talker and update add_entity
+    // so they both update missing info if talker exists
+    // same for listener
+  
     // If the entity is an audio talker, then remember it
     if (msg->entity.talker_capabilities.implemented && msg->entity.talker_capabilities.audio_source) {
       avb_add_entity(state, &msg->entity, entity_addr, true);
@@ -61,10 +112,10 @@ int avb_process_adp(struct avb_state_s *state, adp_message_s *msg, eth_addr_t *e
 }
 
 /* Process received ATDECC AECP message */
-int avb_process_aecp(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp(struct avb_state_s *state, aecp_message_u *msg) {
   
-  if (msg->msg_type == aecp_msg_type_aem_command) {
-    switch (msg->command_type) {
+  if (msg->header.msg_type == aecp_msg_type_aem_command) {
+    switch (msg->common.command_type) {
       case aecp_cmd_code_acquire_entity:
         return avb_process_aecp_cmd_acquire_entity(state, msg);
       case aecp_cmd_code_lock_entity:
@@ -90,7 +141,7 @@ int avb_process_aecp(struct avb_state_s *state, aecp_message_s *msg) {
     }
   }
   else { /* AECP responses */
-    switch (msg->command_type) {
+    switch (msg->common.command_type) {
       case aecp_cmd_code_register_unsol_notif:
         return avb_process_aecp_rsp_register_unsol_notif(state, msg);
         break;
@@ -113,69 +164,73 @@ int avb_process_aecp(struct avb_state_s *state, aecp_message_s *msg) {
 }
 
 /* Process AECP command acquire entity */
-int avb_process_aecp_cmd_acquire_entity(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_cmd_acquire_entity(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP command lock entity */
-int avb_process_aecp_cmd_lock_entity(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_cmd_lock_entity(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP command entity available */
-int avb_process_aecp_cmd_entity_available(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_cmd_entity_available(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP command get configuration */
-int avb_process_aecp_cmd_get_configuration(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_cmd_get_configuration(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP command read descriptor */
-int avb_process_aecp_cmd_read_descriptor(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_cmd_read_descriptor(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP command get stream info */
-int avb_process_aecp_cmd_get_stream_info(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_cmd_get_stream_info(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP command get counters */
-int avb_process_aecp_cmd_get_counters(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_cmd_get_counters(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP response register unsol notif */
-int avb_process_aecp_rsp_register_unsol_notif(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_rsp_register_unsol_notif(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP response entity available */
-int avb_process_aecp_rsp_entity_available(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_rsp_entity_available(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process AECP response controller available */
-int avb_process_aecp_rsp_controller_available(struct avb_state_s *state, aecp_message_s *msg) {
+int avb_process_aecp_rsp_controller_available(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
-/* Process AECP response get stream info */
-int avb_process_aecp_rsp_get_stream_info(struct avb_state_s *state, aecp_message_s *msg) {
+/* Process AECP response get stream info 
+ * this may be sent by the talker as an unsolicited notification
+*/
+int avb_process_aecp_rsp_get_stream_info(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
-/* Process AECP response get counters */
-int avb_process_aecp_rsp_get_counters(struct avb_state_s *state, aecp_message_s *msg) {
+/* Process AECP response get counters 
+ * this may be sent by the talker as an unsolicited notification
+*/
+int avb_process_aecp_rsp_get_counters(struct avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
 /* Process received ATDECC ACMP message */
 int avb_process_acmp(struct avb_state_s *state, acmp_message_s *msg) {
 
-  if (msg->subtype == acmp_msg_type_connect_rx_command) {
+  if (msg->header.subtype == acmp_msg_type_connect_rx_command) {
 
     int ret;
     struct timespec ts;
