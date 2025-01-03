@@ -5,6 +5,8 @@
  * ESP_AVB Component
  *
  * This component provides an implementation of an AVB talker and listener.
+ * 
+ * This file provides utility functions for the AVB component.
  */
 
 #include "avbutils.h"

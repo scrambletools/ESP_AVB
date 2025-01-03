@@ -5,6 +5,8 @@
  * ESP_AVB Component
  *
  * This component provides an implementation of an AVB talker and listener.
+ * 
+ * This file provides the common definitions and types for AVB utilities.
  */
 
 #ifndef ESP_AVB_AVBUTILS_H_

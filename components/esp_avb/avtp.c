@@ -5,6 +5,8 @@
  * ESP_AVB Component
  *
  * This component provides an implementation of an AVB talker and listener.
+ * 
+ * This file provides the required features of the AVTP protocol including support for MSRP.
  */
 
 #include "avb.h"
@@ -25,9 +27,10 @@ int avb_send_mvrp_vlan_id(struct avb_state_s *state) {
   msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1;
   int_to_octets(&vlan_id, msg.vlan_id, 2);
-  msg.attr_event[0] = int_to_3pe(msrp_attr_event_new, 0, 0);
+  msg.attr_event[0] = int_to_3pe(msrp_attr_event_join_in, 0, 0);
   uint16_t msg_len = 8 + 2 + 2; // all of the above + end mark list and end mark msg
   
+  // send the message
   ret = avb_net_send(state, ethertype_mvrp, &msg, msg_len, &ts);
   if (ret < 0) {
     avberr("send MVRP VLAN ID failed: %d", errno);
@@ -52,9 +55,9 @@ int avb_send_msrp_domain(struct avb_state_s *state) {
   msg.header.vechead_leaveall = 0;
   msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1;
-  msg.sr_class_id = 6; // class B
-  msg.sr_class_priority = 3; // priority 2 for class B
-  int_to_octets(&vlan_id, msg.sr_class_vid, 2);
+  msg.sr_class_id = 6; // class A
+  msg.sr_class_priority = 3; // priority 3 for class A
+  int_to_octets(&vlan_id, msg.sr_class_vid, vlan_id);
   msg.attr_event[0] = int_to_3pe(msrp_attr_event_join_in, 0, 0);
 
   // Create an MSRP message buffer
@@ -64,6 +67,7 @@ int avb_send_msrp_domain(struct avb_state_s *state) {
   memcpy(msrp_msg.messages_raw, &msg, sizeof(msg));
   uint16_t msg_len = 5 + attr_list_len + 2; // header + attr_list_len + end mark
   
+  // send the message
   ret = avb_net_send(state, ethertype_msrp, &msrp_msg, msg_len, &ts);
   if (ret < 0) {
       avberr("send MSRP Domain failed: %d", errno);
@@ -83,7 +87,8 @@ int avb_send_msrp_talker(struct avb_state_s *state,
   int ret;
   int vlan_id = CONFIG_ESP_AVB_VLAN_ID;
   int attr_list_len;
-  uint8_t stream_id[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+  uint8_t stream_id[UNIQUE_ID_LEN];
+  stream_id_from_mac(&state->internal_mac_addr, stream_id, 1); // only one stream
   memset(&msg, 0, sizeof(msg));
 
   // Populate the message
@@ -99,7 +104,6 @@ int avb_send_msrp_talker(struct avb_state_s *state,
   }
   int_to_octets(&attr_list_len, msg.header.attr_list_len, 2);
   msg.header.vechead_leaveall = 0;
-  msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1;
   memcpy(msg.talker.info.stream_id, stream_id, 8);
   memcpy(msg.talker.info.stream_dest_addr, &MAAP_MCAST_MAC_ADDR, 6);
@@ -144,8 +148,8 @@ int avb_send_msrp_listener(struct avb_state_s *state,
                            msrp_listener_event_t listener_event) {
   msrp_listener_message_s msg;
   struct timespec ts;
-  int ret;
-  uint8_t stream_id[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+  int ret; 
+  uint8_t stream_id[8] = {0x14, 0x98, 0x77, 0x40, 0xc7, 0x88, 0x00, 0x00};
   memset(&msg, 0, sizeof(msg));
 
   // Populate the message
@@ -174,6 +178,16 @@ int avb_send_msrp_listener(struct avb_state_s *state,
   else {
       avbinfo("Sent MSRP Listener message");
     }
+
+  // create a test connection and send a connect tx command for listener testing
+  avb_connection_s test_connection; 
+  unique_id_t test_talker_id = {0x15, 0x98, 0x77, 0x40, 0xc7, 0x88, 0x80, 0x00};
+  memset(&test_connection, 0, sizeof(avb_connection_s));
+  memcpy(test_connection.controller_id, &state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
+  memcpy(test_connection.talker_id, &test_talker_id, UNIQUE_ID_LEN);
+  memcpy(test_connection.listener_id, &state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
+  avb_send_acmp_connect_tx_command(state, &test_connection);
+
   return ret;
 }
 
@@ -196,18 +210,12 @@ int avb_send_maap_announce(struct avb_state_s *state) {
   return OK;
 }
 
-/* Process received MVRP VLAN identifier message */
-int avb_process_mvrp_vlan_id(struct avb_state_s *state, mvrp_vlan_id_message_s *msg) {
-  // TODO: Implement processing
-  return OK;
-}
-
 /* Process received MSRP domain message */
 int avb_process_msrp_domain(struct avb_state_s *state,
                             msrp_msgbuf_s *msg,
                             int offset,
                             size_t length) {
-  // TODO: Implement processing
+  // not implemented
   return OK;
 }
 
@@ -223,8 +231,31 @@ int avb_process_msrp_talker(struct avb_state_s *state,
   memset(&msg, 0, sizeof(msrp_talker_message_u));
   memcpy(&msg, &msg_data->messages_raw[offset], sizeof(msrp_talker_message_u));
 
-  // If talker is known then update with talker info, else add to talker list
-  
+  // get the talker addr from the stream id
+  eth_addr_t talker_addr;
+  memcpy(&talker_addr, msg.talker.info.stream_id, ETH_ADDR_LEN);
+
+  // If the stream is known then update talker info, else ignore
+  int index = avb_find_entity_by_addr(state, &talker_addr, avb_entity_type_talker);
+  if (index >= 0) {
+    memcpy(&state->talkers[index].info, &msg.talker.info, sizeof(talker_adv_info_s));
+  }
+  else {
+    // create a new talker entity
+    avb_talker_s new_talker;
+    memset(&new_talker, 0, sizeof(avb_talker_s));
+    memcpy(&new_talker.info, &msg.talker.info, sizeof(talker_adv_info_s));
+    // if talker list is not full, add the talker to the list
+    if (state->num_talkers < AVB_MAX_NUM_TALKERS) {
+      memcpy(&state->talkers[state->num_talkers], &new_talker, sizeof(avb_talker_s));
+      state->num_talkers++;
+    }
+    // if talker list is full, replace the oldest talker
+    else {
+      memmove(&state->talkers[0], &state->talkers[1], (state->num_talkers - 1) * sizeof(avb_talker_s));
+      memcpy(&state->talkers[state->num_talkers - 1], &new_talker, sizeof(avb_talker_s));
+    }
+  }
   return OK;
 }
 
@@ -233,18 +264,25 @@ int avb_process_msrp_listener(struct avb_state_s *state,
                               msrp_msgbuf_s *msg,
                               int offset,
                               size_t length) {
-  // TODO: Implement processing
+  // not implemented
   return OK;
 }
 
 /* Process received AVTP AAF PCM message */
 int avb_process_aaf(struct avb_state_s *state, aaf_pcm_message_s *msg) {
-  // TODO: Implement processing
+  // not implemented
   return OK;
 }
 
 /* Process received AVTP MAAP message */
 int avb_process_maap(struct avb_state_s *state, maap_message_s *msg) {
-  // TODO: Implement processing
+  // not implemented
   return OK;
 }
+
+void stream_id_from_mac(eth_addr_t *mac_addr, uint8_t *stream_id, size_t uid) {
+  // copy the mac address octets to the stream id and fill the remaining octects with uid 
+  memcpy(stream_id, mac_addr, ETH_ADDR_LEN);
+  memset(stream_id + ETH_ADDR_LEN, uid, UNIQUE_ID_LEN - ETH_ADDR_LEN);
+}
+

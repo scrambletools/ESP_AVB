@@ -1,4 +1,6 @@
 dependencies:
+  idf: "^5.0"
+  espressif/es8311: "^1.0.0"
   ethernet_init:
     path: ${IDF_PATH}/examples/ethernet/basic/components/ethernet_init
   esp_eth_time:

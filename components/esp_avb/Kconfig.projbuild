@@ -33,7 +33,7 @@ menu "AVB Configuration"
 
         config ESP_AVB_MODEL_ID
             hex "AVB entity model ID"
-            default 0x0102030405060708
+            default 0x0000000000000000
             help
                 Set the stream ID for the AVB talker.
 

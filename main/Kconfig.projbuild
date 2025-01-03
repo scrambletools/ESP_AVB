@@ -1,7 +1,7 @@
 menu "AVB Example Configuration"
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
-
+    
     config EXAMPLE_AVB_ENTITY_NAME
         string "Entity Name"
         default "AVB Example Entity"
@@ -38,6 +38,50 @@ menu "AVB Example Configuration"
                 Automatically connect to an AVB Talker with the same entity model ID.
 
     endif
+
+    config EXAMPLE_AVB_SPEAKER_VOLUME
+        string "Speaker volume"
+        range 0 100
+        default 80
+        depends on EXAMPLE_AVB_LISTENER
+        help
+            Set the volume of the speaker.
+
+    choice EXAMPLE_SELECT_MIC_GAIN
+        prompt "Set MIC gain"
+        depends on EXAMPLE_AVB_TALKER
+        default MIC_GAIN_18DB
+        help
+            Select mic gain for echo mode
+
+        config MIC_GAIN_0DB
+            bool "0dB"
+        config MIC_GAIN_6DB
+            bool "6dB"
+        config MIC_GAIN_12DB
+            bool "12dB"
+        config MIC_GAIN_18DB
+            bool "18dB"
+        config MIC_GAIN_24DB
+            bool "24dB"
+        config MIC_GAIN_30DB
+            bool "30dB"
+        config MIC_GAIN_36DB
+            bool "36dB"
+        config MIC_GAIN_42DB
+            bool "42dB"
+    endchoice
+
+    config EXAMPLE_AVB_MIC_GAIN
+        int
+        default 0 if MIC_GAIN_0DB
+        default 1 if MIC_GAIN_6DB
+        default 2 if MIC_GAIN_12DB
+        default 3 if MIC_GAIN_18DB
+        default 4 if MIC_GAIN_24DB
+        default 5 if MIC_GAIN_30DB
+        default 6 if MIC_GAIN_36DB
+        default 7 if MIC_GAIN_42DB
 
     config EXAMPLE_AVB_ATDECC
         bool "Allow remote control via ATDECC"

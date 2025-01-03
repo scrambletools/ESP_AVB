@@ -5,6 +5,8 @@
  * ESP_AVB Component
  *
  * This component provides an implementation of an AVB talker and listener.
+ * 
+ * This file provides the public API for the ESP_AVB component.
  */
 
 #ifndef _ESP_AVB_H_
@@ -16,33 +18,32 @@
 
 #include <stdbool.h>
 #include <time.h>
-//#include <stdint.h>
-
-/****************************************************************************
- * Pre-processor Definitions
- ****************************************************************************/
+#include <driver/i2s_std.h>
 
 /****************************************************************************
  * Public Types
  ****************************************************************************/
 
-/* AVB status information structure */
+/* AVB configuration structure */
+struct avb_config_s {
+  const char *interface;
+  i2s_chan_handle_t i2s_tx_handle; // handle to i2s tx channel
+  i2s_chan_handle_t i2s_rx_handle; // handle to i2s rx channel
+  bool talker;
+  bool listener;
+  bool controller;
+};
 
-struct avb_status_s
-{
+/* AVB status information structure */
+struct avb_status_s {
   bool clock_source_valid;
 
-  struct
-  {
+  struct {
     uint8_t id[8];     /* Entity identity */
   } entity;
 
   struct timespec last_started; // when AVB was last started
 };
-
-/****************************************************************************
- * Public Data
- ****************************************************************************/
 
 /****************************************************************************
  * Public Function Prototypes
@@ -56,7 +57,7 @@ extern "C"
 #define EXTERN extern
 #endif
 
-int avb_start(const char *interface);
+int avb_start(struct avb_config_s *config);
 
 int avb_status(struct avb_status_s *status);
 

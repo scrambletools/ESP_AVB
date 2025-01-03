@@ -5,16 +5,11 @@
  * ESP_AVB Component
  *
  * This component provides an implementation of an AVB talker and listener.
+ * 
+ * This file provides the network interface for the ESP_AVB component.
  */
 
 #include "avb.h"
-
-// Managed mac addresses
-static uint8_t local_eth_mac_addr[ETH_ADDR_LEN] = { 0 };
-static uint8_t local_wifi_mac_addr[ETH_ADDR_LEN] = { 0 };
-static uint8_t controller_mac_addr[ETH_ADDR_LEN] = { 0 };
-static uint8_t listener_mac_addr[ETH_ADDR_LEN] = { 0 }; // remote device
-static uint8_t talker_mac_addr[ETH_ADDR_LEN] = { 0 }; // remote device
 
 /* Initialize the network interface */
 int avb_net_init(struct avb_state_s *state, const char *interface) {

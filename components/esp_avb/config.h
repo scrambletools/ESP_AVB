@@ -2,7 +2,7 @@
 #define ESP_AVB_CONFIG_H_
 
 // Extended configuration options for ESP_AVB
-#define CONFIG_ESP_AVB_ASSOCIATION_ID 0x0000000000000000 // uint64_t
+#define CONFIG_ESP_AVB_ASSOCIATION_ID 0xffffffffffffffff // uint64_t
 #define CONFIG_ESP_AVB_PORT_ID 0x0001 // uint16_t
 #define CONFIG_ESP_AVB_ENTITY_NAME "Simple Talker"
 #define CONFIG_ESP_AVB_VENDOR_NAME "ACME"
