@@ -21,7 +21,7 @@ menu "AVB Configuration"
 
         config ESP_AVB_TALKER
             bool "Enable AVB talker"
-            default y
+            default n
             help
                 Act as an AVB talker (stream source)
 
@@ -33,7 +33,7 @@ menu "AVB Configuration"
 
         config ESP_AVB_MODEL_ID
             hex "AVB entity model ID"
-            default 0x0000000000000000
+            default 0x0000007468696e67
             help
                 Set the stream ID for the AVB talker.
 

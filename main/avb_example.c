@@ -26,7 +26,7 @@
 
 /* Example configurations */
 #define EXAMPLE_RECV_BUF_SIZE   (2400)
-#define EXAMPLE_SAMPLE_RATE     (16000)
+#define EXAMPLE_SAMPLE_RATE     (48000)
 #define EXAMPLE_MCLK_MULTIPLE   (384) // If not using 24-bit data width, 256 should be enough
 #define EXAMPLE_MCLK_FREQ_HZ    (EXAMPLE_SAMPLE_RATE * EXAMPLE_MCLK_MULTIPLE)
 #if CONFIG_EXAMPLE_AVB_LISTENER
@@ -284,10 +284,10 @@ void app_main(void)
 
     /* Initialize i2s interface to codec */
     if (i2s_driver_init() != ESP_OK) {
-        ESP_LOGE(TAG, "i2s driver init failed");
+        ESP_LOGE(TAG, "I2S: driver init failed");
         abort();
     } else {
-        ESP_LOGI(TAG, "i2s driver init success");
+        ESP_LOGI(TAG, "I2S: driver init success");
     }
 
     /* Initialize i2c peripheral and config es8311 codec by i2c */
@@ -397,7 +397,7 @@ void app_main(void)
             esp_eth_clock_set_target_time(CLOCK_PTP_SYSTEM, &s_next_time);
         }
         else {
-            ESP_LOGW(TAG, "PTP clock not synced");
+            ESP_LOGW(TAG, "PTP clock not synced (count %ld)", clock_source_valid_cnt);
         }   
         clock_source_valid_last = clock_source_valid;
 

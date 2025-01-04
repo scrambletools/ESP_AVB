@@ -404,7 +404,7 @@ typedef struct {
 /* ATDECC header */
 typedef struct {  
   uint8_t subtype;                // AVTP message subtype
-  uint8_t msg_type: 4;            // ADP message type  
+  uint8_t msg_type: 4;            // ATDECC message type  
   uint8_t version: 3;             // AVTP version
   uint8_t sv: 1;                  // always 0 for ADP messages
   uint8_t control_data_len_h : 3; // 3 high order bits of control data length
@@ -1011,13 +1011,22 @@ struct avb_state_s {
 /* Stream Input params */
 struct stream_in_params_s {
   i2s_chan_handle_t i2s_tx_handle; // handle to i2s tx channel
-  int buffer_size; // buffer size
+  uint16_t buffer_size; // buffer size
+  uint16_t interval; // interval in microseconds
+  uint8_t l2if; // layer2 interface
+  unique_id_t stream_id; // stream ID
+  uint8_t bit_depth; // bit depth
+  uint8_t channels; // channels
+  uint8_t sample_rate; // sample rate
+  uint8_t format; // aaf format
 };
 
 /* Stream Output params */
 struct stream_out_params_s {
   i2s_chan_handle_t i2s_rx_handle; // handle to i2s rx channel
-  int buffer_size; // buffer size
+  uint16_t buffer_size; // buffer size
+  uint16_t interval; // interval in microseconds
+  uint8_t l2if; // layer2 interface
 };
 
 /* AVB Enums*/
@@ -1249,8 +1258,7 @@ int avb_net_send(struct avb_state_s *state,
                  void *msg, 
                  uint16_t msg_len, 
                  struct timespec *ts);
-int avb_net_recv(struct avb_state_s *state, 
-                 int l2if, 
+int avb_net_recv(int l2if, 
                  void *msg, 
                  uint16_t msg_len, 
                  struct timespec *ts,
@@ -1289,9 +1297,11 @@ int avb_send_aecp_rsp_get_stream_info(struct avb_state_s *state,
 int avb_send_aecp_rsp_get_counters(struct avb_state_s *state, 
                                    unique_id_t *target_id); // as unsolicited notification
 int avb_send_acmp_connect_rx_command(struct avb_state_s *state, 
-                                     avb_connection_s *connection); // acting as controller
+                                     unique_id_t *talker_id, 
+                                     unique_id_t *listener_id); // acting as controller
 int avb_send_acmp_connect_tx_command(struct avb_state_s *state, 
-                                     avb_connection_s *connection);
+                                     unique_id_t *controller_id, 
+                                     unique_id_t *talker_id);
 int avb_send_acmp_disconnect_rx_command(struct avb_state_s *state, 
                                         avb_connection_s *connection); // acting as controller
 int avb_send_acmp_disconnect_tx_command(struct avb_state_s *state, 
@@ -1391,6 +1401,12 @@ int avb_process_acmp_disconnect_rx_response(struct avb_state_s *state,
                                             acmp_message_s *msg);
 int avb_process_acmp_disconnect_tx_response(struct avb_state_s *state,
                                             acmp_message_s *msg);
+
+/* Stream functions */
+int avb_start_stream_in(struct avb_state_s *state, unique_id_t *stream_id);
+int avb_stop_stream_in(struct avb_state_s *state, unique_id_t *stream_id);
+int avb_start_stream_out(struct avb_state_s *state, unique_id_t *stream_id);
+int avb_stop_stream_out(struct avb_state_s *state, unique_id_t *stream_id);
 
 /* Helper functions */
 void stream_id_from_mac(eth_addr_t *mac_addr, 

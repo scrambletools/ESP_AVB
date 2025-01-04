@@ -72,9 +72,6 @@ int avb_send_msrp_domain(struct avb_state_s *state) {
   if (ret < 0) {
       avberr("send MSRP Domain failed: %d", errno);
     }
-  else {
-      avbinfo("Sent MSRP Domain message");
-    }
   return ret;
 }
 
@@ -134,11 +131,8 @@ int avb_send_msrp_talker(struct avb_state_s *state,
   
   ret = avb_net_send(state, ethertype_msrp, &msrp_msg, msg_len, &ts);
   if (ret < 0) {
-      avberr("send MSRP Talker Advertise failed: %d", errno);
-    }
-  else {
-      avbinfo("Sent MSRP Talker Advertise message");
-    }
+    avberr("send MSRP Talker Advertise failed: %d", errno);
+  }
   return ret;
 }
 
@@ -173,20 +167,12 @@ int avb_send_msrp_listener(struct avb_state_s *state,
   
   ret = avb_net_send(state, ethertype_msrp, &msrp_msg, msg_len, &ts);
   if (ret < 0) {
-      avberr("send MSRP Listener failed: %d", errno);
-    }
-  else {
-      avbinfo("Sent MSRP Listener message");
-    }
+    avberr("send MSRP Listener failed: %d", errno);
+  }
 
   // create a test connection and send a connect tx command for listener testing
-  avb_connection_s test_connection; 
   unique_id_t test_talker_id = {0x15, 0x98, 0x77, 0x40, 0xc7, 0x88, 0x80, 0x00};
-  memset(&test_connection, 0, sizeof(avb_connection_s));
-  memcpy(test_connection.controller_id, &state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
-  memcpy(test_connection.talker_id, &test_talker_id, UNIQUE_ID_LEN);
-  memcpy(test_connection.listener_id, &state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
-  avb_send_acmp_connect_tx_command(state, &test_connection);
+  avb_send_acmp_connect_tx_command(state, &state->own_entity.summary.entity_id, &test_talker_id);
 
   return ret;
 }
@@ -202,11 +188,8 @@ int avb_send_maap_announce(struct avb_state_s *state) {
 
   ret = avb_net_send(state, ethertype_avtp, &msg, sizeof(msg), &ts);
   if (ret < 0) {
-      avberr("send MAAP Announce failed: %d", errno);
-    }
-  else {
-      avbinfo("Sent MAAP Announce message");
-    }
+    avberr("send MAAP Announce failed: %d", errno);
+  }
   return OK;
 }
 
@@ -235,27 +218,28 @@ int avb_process_msrp_talker(struct avb_state_s *state,
   eth_addr_t talker_addr;
   memcpy(&talker_addr, msg.talker.info.stream_id, ETH_ADDR_LEN);
 
-  // If the stream is known then update talker info, else ignore
+  // If the talker is known then update talker info
   int index = avb_find_entity_by_addr(state, &talker_addr, avb_entity_type_talker);
   if (index >= 0) {
     memcpy(&state->talkers[index].info, &msg.talker.info, sizeof(talker_adv_info_s));
   }
-  else {
-    // create a new talker entity
-    avb_talker_s new_talker;
-    memset(&new_talker, 0, sizeof(avb_talker_s));
-    memcpy(&new_talker.info, &msg.talker.info, sizeof(talker_adv_info_s));
-    // if talker list is not full, add the talker to the list
-    if (state->num_talkers < AVB_MAX_NUM_TALKERS) {
-      memcpy(&state->talkers[state->num_talkers], &new_talker, sizeof(avb_talker_s));
-      state->num_talkers++;
-    }
-    // if talker list is full, replace the oldest talker
-    else {
-      memmove(&state->talkers[0], &state->talkers[1], (state->num_talkers - 1) * sizeof(avb_talker_s));
-      memcpy(&state->talkers[state->num_talkers - 1], &new_talker, sizeof(avb_talker_s));
-    }
-  }
+  // If the talker is not known then remember it
+  // else {
+  //   // create a new talker entity
+  //   avb_talker_s new_talker;
+  //   memset(&new_talker, 0, sizeof(avb_talker_s));
+  //   memcpy(&new_talker.info, &msg.talker.info, sizeof(talker_adv_info_s));
+  //   // if talker list is not full, add the talker to the list
+  //   if (state->num_talkers < AVB_MAX_NUM_TALKERS) {
+  //     memcpy(&state->talkers[state->num_talkers], &new_talker, sizeof(avb_talker_s));
+  //     state->num_talkers++;
+  //   }
+  //   // if talker list is full, replace the oldest talker
+  //   else {
+  //     memmove(&state->talkers[0], &state->talkers[1], (state->num_talkers - 1) * sizeof(avb_talker_s));
+  //     memcpy(&state->talkers[state->num_talkers - 1], &new_talker, sizeof(avb_talker_s));
+  //   }
+  // }
   return OK;
 }
 
@@ -270,6 +254,17 @@ int avb_process_msrp_listener(struct avb_state_s *state,
 
 /* Process received AVTP AAF PCM message */
 int avb_process_aaf(struct avb_state_s *state, aaf_pcm_message_s *msg) {
+  avbinfo("Got an AVTP AAF PCM message");
+
+  // check if the stream id is in the connection list
+  int index = avb_find_connection_by_id(state, &msg->stream_id, avb_entity_type_listener);
+  if (index >= 0) {
+    avbinfo("Stream id found in connection list");
+    // set the stream as active
+    state->connections[index].active = true;
+    // start the stream input task
+    avb_start_stream_in(state, &msg->stream_id);
+  }
   // not implemented
   return OK;
 }

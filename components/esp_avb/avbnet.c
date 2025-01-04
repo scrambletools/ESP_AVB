@@ -177,8 +177,7 @@ int avb_net_send(struct avb_state_s *state,
 }
 
 /* Receive an Ethernet frame */
-int avb_net_recv(struct avb_state_s *state, 
-                 int l2if, 
+int avb_net_recv(int l2if, 
                  void *msg, 
                  uint16_t msg_len, 
                  struct timespec *ts,
@@ -216,4 +215,3 @@ int avb_net_recv(struct avb_state_s *state,
   memcpy(msg, &eth_frame[ETH_HEADER_LEN], ret);
   return ret;
 }
-

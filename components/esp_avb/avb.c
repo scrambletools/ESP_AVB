@@ -46,28 +46,34 @@ static int avb_initialize_state(struct avb_state_s *state,
   memcpy(&state->own_entity.summary.entity_capabilities, &entity_caps, sizeof(avb_entity_cap_s));
 
   // Set talker sources and capabilities
-  uint16_t talker_sources = 1;
-  int_to_octets(&talker_sources, state->own_entity.summary.talker_stream_sources, 2);
-  avb_talker_cap_s talker_caps;
-  memset(&talker_caps, 0, sizeof(avb_talker_cap_s));
-  talker_caps.implemented = 1;
-  talker_caps.audio_source = 1;
-  memcpy(&state->own_entity.summary.talker_capabilities, &talker_caps, sizeof(avb_talker_cap_s));
+  if (state->config.talker) {
+    uint16_t talker_sources = 1;
+    int_to_octets(&talker_sources, state->own_entity.summary.talker_stream_sources, 2);
+    avb_talker_cap_s talker_caps;
+    memset(&talker_caps, 0, sizeof(avb_talker_cap_s));
+    talker_caps.implemented = 1;
+    talker_caps.audio_source = 1;
+    memcpy(&state->own_entity.summary.talker_capabilities, &talker_caps, sizeof(avb_talker_cap_s));
+  }
 
   // Set listener sinks and capabilities
-  uint16_t listener_sinks = 1;
-  int_to_octets(&listener_sinks, state->own_entity.summary.listener_stream_sinks, 2);
-  avb_listener_cap_s listener_caps;
-  memset(&listener_caps, 0, sizeof(avb_listener_cap_s));
-  listener_caps.implemented = 1;
-  listener_caps.audio_sink = 1;
-  memcpy(&state->own_entity.summary.listener_capabilities, &listener_caps, sizeof(avb_listener_cap_s));
+  if (state->config.listener) {
+    uint16_t listener_sinks = 1;
+    int_to_octets(&listener_sinks, state->own_entity.summary.listener_stream_sinks, 2);
+    avb_listener_cap_s listener_caps;
+    memset(&listener_caps, 0, sizeof(avb_listener_cap_s));
+    listener_caps.implemented = 1;
+    listener_caps.audio_sink = 1;
+    memcpy(&state->own_entity.summary.listener_capabilities, &listener_caps, sizeof(avb_listener_cap_s));
+  }
 
-  // Set controller sinks and capabilities
-  avb_controller_cap_s controller_caps;
-  memset(&controller_caps, 0, sizeof(avb_controller_cap_s));
-  controller_caps.implemented = 1;
-  memcpy(&state->own_entity.summary.controller_capabilities, &controller_caps, sizeof(avb_controller_cap_s));
+  // Set controller capabilities
+  if (state->config.controller) {
+    avb_controller_cap_s controller_caps;
+    memset(&controller_caps, 0, sizeof(avb_controller_cap_s));
+    controller_caps.implemented = 1;
+    memcpy(&state->own_entity.summary.controller_capabilities, &controller_caps, sizeof(avb_controller_cap_s));
+  }
 
   // Set entity detail info
   int64_t association_id = CONFIG_ESP_AVB_ASSOCIATION_ID;
@@ -95,6 +101,7 @@ static int avb_initialize_state(struct avb_state_s *state,
   // Set stop to false
   state->stop = false;
 
+  // Set global state
   s_state = state;
   return OK;
 }
@@ -127,41 +134,49 @@ static int avb_periodic_send(struct avb_state_s *state) {
   struct timespec delta;
   clock_gettime(CLOCK_MONOTONIC, &time_now);
 
+  // Send ADP entity available message
   clock_timespec_subtract(&time_now, &state->last_transmitted_adp_entity_avail, &delta);
   if (timespec_to_ms(&delta) > ADP_ENTITY_AVAIL_INTERVAL_MSEC) {
     state->last_transmitted_adp_entity_avail = time_now;
     avb_send_adp_entity_available(state);
   }
 
+  // Send MVRP VLAN ID message
   clock_timespec_subtract(&time_now, &state->last_transmitted_mvrp_vlan_id, &delta);
   if (timespec_to_ms(&delta) > MVRP_VLAN_ID_INTERVAL_MSEC) {
     state->last_transmitted_mvrp_vlan_id = time_now;
     avb_send_mvrp_vlan_id(state);
   }
 
+  // Send MSRP domain message
   clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_domain, &delta);
   if (timespec_to_ms(&delta) > MSRP_DOMAIN_INTERVAL_MSEC) {
     state->last_transmitted_msrp_domain = time_now;
     avb_send_msrp_domain(state);
   }
 
-  clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
-  if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
-    state->last_transmitted_msrp_talker_adv = time_now;
-    avb_send_msrp_talker(state, msrp_attr_event_join_in, false);
+  // Send MSRP talker and AVTP MAAP announce messages
+  if (state->config.talker) {
+    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
+    if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
+      state->last_transmitted_msrp_talker_adv = time_now;
+      avb_send_msrp_talker(state, msrp_attr_event_join_in, false);
+    }
+    clock_timespec_subtract(&time_now, &state->last_transmitted_maap_announce, &delta);
+    if (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
+      state->last_transmitted_maap_announce = time_now;
+      avb_send_maap_announce(state);
+    }
   }
 
-  clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener_ready, &delta);
-  if (timespec_to_ms(&delta) > MSRP_LISTENER_READY_INTERVAL_MSEC) {
-    state->last_transmitted_msrp_listener_ready = time_now;
-    avb_send_msrp_listener(state, msrp_attr_event_join_in, msrp_listener_event_ready);
+  // Send MSRP listener message
+  if (state->config.listener) {
+    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener_ready, &delta);
+    if (timespec_to_ms(&delta) > MSRP_LISTENER_READY_INTERVAL_MSEC) {
+      state->last_transmitted_msrp_listener_ready = time_now;
+      avb_send_msrp_listener(state, msrp_attr_event_join_in, msrp_listener_event_ready);
+    }
   }
-  
-  // clock_timespec_subtract(&time_now, &state->last_transmitted_maap_announce, &delta);
-  // if (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
-  //   state->last_transmitted_maap_announce = time_now;
-  //   avb_send_maap_announce(state);
-  // }
   return OK;
 }
 
@@ -181,7 +196,6 @@ static int avb_process_rx_message(struct avb_state_s *state,
   // String representation of source address
   char src_addr_str[ETH_ADDR_LEN * 3 + 1];
   octets_to_hex_string((uint8_t*)src_addr, ETH_ADDR_LEN, src_addr_str, ':');
-  //avbinfo("avb_net_recv: src_addr is %s", src_addr_str);
 
   /* Route the message to the appropriate handler */
   switch (protocol_idx) {
@@ -193,23 +207,19 @@ static int avb_process_rx_message(struct avb_state_s *state,
           return avb_process_aaf(state, &msg->aaf);
           break;
         case avtp_subtype_maap:
-          avbinfo("Got a MAAP message from %s", src_addr_str);
           return avb_process_maap(state, &msg->maap);
           break;
         case avtp_subtype_adp:
-          avbinfo("Got an ADP message from %s", src_addr_str);
           return avb_process_adp(state, &msg->adp, &src_addr);
           break;
         case avtp_subtype_aecp:
-          avbinfo("Got an AECP message from %s", src_addr_str);
           return avb_process_aecp(state, &msg->aecp, &src_addr);
           break;
         case avtp_subtype_acmp:
-          avbinfo("Got an ACMP message from %s", src_addr_str);
           return avb_process_acmp(state, &msg->acmp);
           break;
         default:
-          avbinfo("Ignoring unknown AVTP message subtype: 0x%02x",
+          avbinfo("Ignoring unsupported AVTP message subtype: 0x%02x",
                   msg->subtype);
       }
       break;
@@ -228,32 +238,27 @@ static int avb_process_rx_message(struct avb_state_s *state,
         size_t attr_size = octets_to_uint(header.attr_list_len, 2) + 4; // 4 bytes for the header w/o vechead
         switch (header.attr_type) {
           case msrp_attr_type_domain:
-            avbinfo("Got an MSRP domain message from %s", src_addr_str);
             avb_process_msrp_domain(state, msg, offset, attr_size);
             break;
           case msrp_attr_type_talker_advertise:
-            avbinfo("Got an MSRP talker advertise message from %s", src_addr_str);
             avb_process_msrp_talker(state, msg, offset, attr_size, false, &src_addr);
             break;
           case msrp_attr_type_talker_failed:
-            avbinfo("Got an MSRP talker failed message from %s", src_addr_str);
             avb_process_msrp_talker(state, msg, offset, attr_size, true, &src_addr);
             break;
           case msrp_attr_type_listener:
-            avbinfo("Got an MSRP listener message from %s", src_addr_str);
             avb_process_msrp_listener(state, msg, offset, attr_size);
             break;
           default:
             avbinfo("Ignoring unknown MSRP message atribute type: 0x%02x",
                     header.attr_type);
         }
-        // Get the next attribute offset
+        // Next attribute offset
         offset += attr_size;
         // Get the next attribute header
         memcpy(&header, &msg->messages_raw[offset], sizeof(msrp_attr_header_s));
         count++;
       }
-      //avbinfo("Processed %d attributes in MSRP message", count);
       break;
     }
   }
@@ -262,88 +267,139 @@ static int avb_process_rx_message(struct avb_state_s *state,
 
 /* AVB Stream input task */
 static void avb_stream_in_task(void *task_param) {
+  avbinfo("Starting stream in task");
 
   struct stream_in_params_s *stream_in_params = (struct stream_in_params_s *)task_param;
   if (stream_in_params == NULL) {goto err;}
 
-  int *stream_in_data = calloc(1, stream_in_params->buffer_size);
+  uint8_t *stream_in_data = calloc(1, stream_in_params->buffer_size);
   if (!stream_in_data) {
-    avberr("[i2s] No memory for read data buffer");
+    avberr("I2S: No memory for read data buffer");
     goto err;
   }
+  int ret = 0;
+  struct timespec ts;
+  eth_addr_t src_addr;
   size_t bytes_read = 0;
   size_t bytes_write = 0;
   size_t timeout_ms = 1000;
+  // Set up pollfd for AVTP interface
+  struct pollfd poll_fd = {
+    .events = POLLIN,
+    .fd = stream_in_params->l2if
+  };
+  // Validate file descriptor
+  if (poll_fd.fd < 0) {
+    avberr("Invalid file descriptor for interface fd=%d (AVTP)", poll_fd.fd);
+    goto err;
+  }
 
   while (1) {
-      memset(stream_in_data, 0, stream_in_params->buffer_size);
-      /* Read sample data from stream in */
-      // TBD
+    memset(stream_in_data, 0, stream_in_params->buffer_size);
 
-      /* Write sample data to earphone */
+    /* Read sample data from stream in */
+
+    /* Wait for a message on the L2TAP interface */
+    if (poll(&poll_fd, 1, stream_in_params->interval / 1000)) {
+      /* Check for events on each L2TAP interface */
+      if (poll_fd.revents) {
+        /* Get a message from the L2TAP interface */
+        ret = avb_net_recv(stream_in_params->l2if, stream_in_data, stream_in_params->buffer_size, &ts, &src_addr);
+        if (ret <= 0) {
+          avberr("Failed to read from stream in");
+          goto err;
+        }
+      }
+    }
+
+    /* Write sample data to earphone */
+    aaf_pcm_message_s *aaf_msg = (aaf_pcm_message_s *)stream_in_data;
+    if (aaf_msg->stream_id == stream_in_params->stream_id) {
+      memcpy(aaf_msg->stream_id, stream_in_params->stream_id, UNIQUE_ID_LEN);
       int ret = i2s_channel_write(stream_in_params->i2s_tx_handle, stream_in_data, stream_in_params->buffer_size, &bytes_write, timeout_ms);
       if (ret != ESP_OK) {
-          avberr("[i2s] i2s write failed, %s", ret == ESP_ERR_TIMEOUT ? "timeout" : "unknown");
-          goto err;
+        avberr("I2S: write failed, %s", ret == ESP_ERR_TIMEOUT ? "timeout" : "unknown");
+        goto err;
       }
       if (bytes_read != bytes_write) {
-          avbwarn("[i2s] %d bytes read but only %d bytes are written", bytes_read, bytes_write);
+        avbwarn("I2S: %d bytes read but only %d bytes are written", bytes_read, bytes_write);
       }
+    }
   }
 err:
-  s_state = NULL;
+  avberr("Stream in task stopped");
   vTaskDelete(NULL);
 }
 
 /* Start the AVB stream input task */
 int avb_start_stream_in(struct avb_state_s *state, unique_id_t *stream_id) {
-  if (s_state == NULL) {
 
-    // create a string representation of the stream id for error messages
-    char stream_id_str[UNIQUE_ID_LEN * 3 + 1];
-    octets_to_hex_string((uint8_t*)stream_id, UNIQUE_ID_LEN, stream_id_str, '-');
+  // create a string representation of the stream id for error messages
+  char stream_id_str[UNIQUE_ID_LEN * 3 + 1];
+  octets_to_hex_string((uint8_t*)stream_id, UNIQUE_ID_LEN, stream_id_str, '-');
 
-    // create a connection from the stream id
-    avb_connection_s connection;
-    if (avb_find_connection_by_id(state, stream_id, avb_entity_type_listener) < 0) {
-      avberr("No connection found for stream %s", stream_id_str);
-      return ERROR;
-    };
+  // get the connection from the stream id
+  int index = avb_find_connection_by_id(state, stream_id, avb_entity_type_listener);
+  if (index < 0) {
+    avberr("No connection found for stream %s", stream_id_str);
+    return ERROR;
+  }
 
-    // check that the connection has a talker id
-    if (memcmp(&connection.talker_id, &EMPTY_ID, UNIQUE_ID_LEN) == 0) {
-      avberr("No talker ID for stream %s", stream_id_str);
-      return ERROR;
-    }
+  // check that the connection has a talker id
+  if (memcmp(&state->connections[index].talker_id, &EMPTY_ID, UNIQUE_ID_LEN) == 0) {
+    avberr("No talker ID for stream %s", stream_id_str);
+    return ERROR;
+  }
 
-    // find the talker based on the talker id
-    int talker_idx = avb_find_entity_by_id(state, &connection.talker_id, avb_entity_type_talker);
-    if (talker_idx < 0) {
-      avberr("Talker not found for stream %s", stream_id_str);
-      return ERROR;
-    }
-    avb_talker_s talker = state->talkers[talker_idx];
+  // find the talker based on the talker id
+  char talker_id_str[UNIQUE_ID_LEN * 3 + 1];
+  octets_to_hex_string((uint8_t*)&state->connections[index].talker_id, UNIQUE_ID_LEN, talker_id_str, '-');
+  int talker_idx = avb_find_entity_by_id(state, &state->connections[index].talker_id, avb_entity_type_talker);
+  if (talker_idx < 0) {
+    avberr("Talker %s not found for stream %s among %d talkers", talker_id_str, stream_id_str, state->num_talkers);
+    return ERROR;
+  }
 
-    // create the stream input params
+  // if talker stream format is not set, then return error
+  avb_talker_s talker = state->talkers[talker_idx];
+  if (talker.stream.stream_format.bit_depth == 0) {
+    avberr("Talker %s stream format not set", talker_id_str);
+    return ERROR;
+  }
+
+  if (!state->connections[index].active) {
+    // Setup the stream input params
     struct stream_in_params_s *stream_in_params;
     stream_in_params = calloc(1, sizeof(struct stream_in_params_s));
     stream_in_params->i2s_tx_handle = state->config.i2s_tx_handle;
+    stream_in_params->l2if = state->l2if[AVTP];
+    memcpy(&stream_in_params->stream_id, stream_id, UNIQUE_ID_LEN);
+    stream_in_params->bit_depth = talker.stream.stream_format.bit_depth;
+    stream_in_params->channels = talker.stream.stream_format.channels_per_frame;
+    stream_in_params->sample_rate = talker.stream.stream_format.nsr;
+    stream_in_params->format = talker.stream.stream_format.format;
     int samples_per_interval = 0;
-    if (talker.info.priority == 3) { // Class A
-      samples_per_interval = (talker.stream.stream_format.nsr / 1000);  // 1ms intervals
-    } else { // Class B
-      samples_per_interval = (talker.stream.stream_format.nsr / 250);  // 4ms intervals
+    // Class A (1ms intervals)
+    if (talker.info.priority == 3) { 
+      samples_per_interval = (talker.stream.stream_format.nsr / 1000);
+      stream_in_params->interval = 1000;
+    // Class B (4ms intervals)
+    } else { 
+      samples_per_interval = (talker.stream.stream_format.nsr / 250);
+      stream_in_params->interval = 4000;
     }
     int buffer_size = samples_per_interval \
         * talker.stream.stream_format.channels_per_frame \
         * (talker.stream.stream_format.bit_depth / 8);
     stream_in_params->buffer_size = buffer_size;
     if (!stream_in_params) {
-      avberr("[i2s] No memory for stream in params");
+      avberr("I2S: No memory for stream in params");
       return ERROR;
     }
+    // Start the stream input task
     xTaskCreate(avb_stream_in_task, "AVB-IN", 6144,
               (void *)stream_in_params, 21, NULL);
+    state->connections[index].active = true;
     return OK;
   }
   avberr("Another instance of AVB-IN is already running");
@@ -419,7 +475,7 @@ static void avb_task(void *task_param) {
       for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
         if (pollfds[i].revents) {
           /* Get a message from the L2TAP interface */
-          ret = avb_net_recv(state, state->l2if[i], &state->rxbuf[i], AVB_MAX_MSG_LEN, &state->rxtime[i], &state->rxsrc[i]);
+          ret = avb_net_recv(state->l2if[i], &state->rxbuf[i], AVB_MAX_MSG_LEN, &state->rxtime[i], &state->rxsrc[i]);
           if (ret > 0) {
             /* Process the received message */
             avb_process_rx_message(state, i, ret);

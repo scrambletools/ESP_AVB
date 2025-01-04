@@ -36,9 +36,6 @@ int avb_send_adp_entity_available(struct avb_state_s *state) {
   if (ret < 0) {
     avberr("send ADP Entity Available failed: %d", errno);
   }
-  else {
-    avbinfo("Sent ADP Entity Available message");
-  }
   // Increment available index
   uint32_t index = octets_to_uint(state->own_entity.summary.available_index, 4);
   if (index < 9999) {  
@@ -82,9 +79,6 @@ int avb_send_aecp_cmd_get_stream_info(struct avb_state_s *state, unique_id_t *ta
   if (ret < 0) {
       avberr("send AECP Get Stream Info failed: %d", errno);
     }
-  else {
-      avbinfo("Sent AECP Get Stream Info message");
-    }
   return ret;
 }
 
@@ -106,15 +100,18 @@ int avb_send_aecp_rsp_get_counters(struct avb_state_s *state, unique_id_t *targe
   return OK;
 }
 
-/* Send ACMP connect rx command */
-int avb_send_acmp_connect_rx_command(struct avb_state_s *state, avb_connection_s *connection) {
+/* Send ACMP connect rx command (acting as controller) */
+int avb_send_acmp_connect_rx_command(struct avb_state_s *state, 
+                                     unique_id_t *talker_id,
+                                     unique_id_t *listener_id) {
   // not implemented
   return OK;
 }
 
-/* Send ACMP connect tx command */
-int avb_send_acmp_connect_tx_command(struct avb_state_s *state, avb_connection_s *connection) {
-
+/* Send ACMP connect tx command (acting as listener) */
+int avb_send_acmp_connect_tx_command(struct avb_state_s *state, 
+                                     unique_id_t *controller_id, 
+                                     unique_id_t *talker_id) {
   acmp_message_s msg;
   struct timespec ts;
   int ret;
@@ -125,37 +122,32 @@ int avb_send_acmp_connect_tx_command(struct avb_state_s *state, avb_connection_s
   msg.header.subtype = avtp_subtype_acmp;
   msg.header.msg_type = acmp_msg_type_connect_tx_command;
   msg.header.control_data_len = body_size;
-  memcpy(msg.controller_entity_id, connection->controller_id, UNIQUE_ID_LEN);
-  memcpy(msg.talker_entity_id, connection->talker_id, UNIQUE_ID_LEN);
-  memcpy(msg.listener_entity_id, connection->listener_id, UNIQUE_ID_LEN);
+  memcpy(msg.controller_entity_id, controller_id, UNIQUE_ID_LEN);
+  memcpy(msg.talker_entity_id, talker_id, UNIQUE_ID_LEN);
+  memcpy(msg.listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
 
-  // Get the talker and listener uids
+  // Get the talker uid (listener uid will be 0)
   eth_addr_t talker_addr;
-  int index = avb_find_entity_by_id(state, &connection->talker_id, avb_entity_type_talker);
+  int index = avb_find_entity_by_id(state, talker_id, avb_entity_type_talker);
   memcpy(msg.talker_uid, state->talkers[index].talker_uid, 2);
   memcpy(talker_addr, state->talkers[index].mac_addr, ETH_ADDR_LEN);
-  index = avb_find_entity_by_id(state, &connection->listener_id, avb_entity_type_listener);
-  memcpy(msg.listener_uid, state->listeners[index].listener_uid, 2);
 
   // send the message 
   uint16_t msg_len = 4 + body_size; // header + body
   ret = avb_net_send(state, ethertype_avtp, &msg, msg_len, &ts);
   if (ret < 0) {
-      avberr("send ACMP Connect Tx Command failed: %d", errno);
-    }
-  else {
-      avbinfo("Sent ACMP Connect Tx Command message");
-    }
+    avberr("send ACMP Connect Tx Command failed: %d", errno);
+  }
   return ret;
 }
 
-/* Send ACMP disconnect rx command */
+/* Send ACMP disconnect rx command (acting as controller) */
 int avb_send_acmp_disconnect_rx_command(struct avb_state_s *state, avb_connection_s *connection) {
   // not implemented
   return OK;
 }
 
-/* Send ACMP disconnect tx command */
+/* Send ACMP disconnect tx command (acting as listener) */
 int avb_send_acmp_disconnect_tx_command(struct avb_state_s *state, avb_connection_s *connection) {
   // not implemented
   return OK;
@@ -197,7 +189,7 @@ int avb_send_acmp_connect_rx_response(struct avb_state_s *state, avb_connection_
   return ret;
 }
 
-/* Send ACMP connect tx response */
+/* Send ACMP connect tx response (acting as talker) */
 int avb_send_acmp_connect_tx_response(struct avb_state_s *state, avb_connection_s *connection) {
   acmp_message_s msg;
   struct timespec ts;
@@ -224,10 +216,7 @@ int avb_send_acmp_connect_tx_response(struct avb_state_s *state, avb_connection_
   uint16_t msg_len = 4 + body_size; // header + body
   ret = avb_net_send(state, ethertype_avtp, &msg, msg_len, &ts);
   if (ret < 0) {
-      avberr("send ADP Entity Available failed: %d", errno);
-    }
-  else {
-      avbinfo("Sent ADP Entity Available message");
+      avberr("send ACMP Connect Tx Response failed: %d", errno);
     }
   return ret;
 }
@@ -248,7 +237,7 @@ int avb_send_acmp_disconnect_tx_response(struct avb_state_s *state, avb_connecti
 int avb_process_adp(struct avb_state_s *state, adp_message_s *msg, eth_addr_t *src_addr) {
   
   /* Process ADP Entity Available message */
-  if (msg->header.subtype == adp_msg_type_entity_available) {
+  if (msg->header.msg_type == adp_msg_type_entity_available) {
   
     // If the entity is an audio talker, then remember it
     if (msg->entity.talker_capabilities.implemented && msg->entity.talker_capabilities.audio_source) {
@@ -256,7 +245,6 @@ int avb_process_adp(struct avb_state_s *state, adp_message_s *msg, eth_addr_t *s
       // if the talker is not already known, add it to the list
       int index = avb_find_entity_by_addr(state, src_addr, avb_entity_type_talker);
       if (index == NOT_FOUND) {
-
         // create talker struct
         avb_talker_s talker;
         memset(&talker, 0, sizeof(avb_talker_s));
@@ -724,57 +712,96 @@ int avb_process_aecp_rsp_get_counters(struct avb_state_s *state, aecp_message_u 
 /* Process received ATDECC ACMP message */
 int avb_process_acmp(struct avb_state_s *state, acmp_message_s *msg) {
 
-  if (msg->header.subtype == acmp_msg_type_connect_rx_command) {
-
-    int ret;
-    struct timespec ts;
-    size_t body_size = 56; // ACMP Message body length
-    // Check if the listener entity ID matches the own entity ID
-    if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id, 8) != 0) {
-      avbinfo("Ignoring ACMP Connect RX Command for different listener");
-      return OK;
-    }
-
-    // find talker address from talker entity id
-    eth_addr_t dest_addr;
-    int index = avb_find_entity_by_id(state, &msg->talker_entity_id, true);
-    memcpy(dest_addr, state->talkers[index].mac_addr, ETH_ADDR_LEN);
-
-    // send connect tx cmd to talker
-    acmp_message_s connect_tx_cmd;
-    memcpy(&connect_tx_cmd, msg, sizeof(acmp_message_s));
-    uint16_t msg_len = 4 + body_size; // header + body
-    ret = avb_net_send_to(state, ethertype_avtp, &connect_tx_cmd, msg_len, &ts, &dest_addr);
-    if (ret < 0) {
-      avberr("send ADP Entity Available failed: %d", errno);
-      return ret;
-    }
-
-    // if the connection is not already known, add it to the list
-    if (avb_find_connection_by_id(state, &msg->stream_id, avb_entity_type_listener) == NOT_FOUND) {
-      // create a new connection
-      avb_connection_s connection;
-      memset(&connection, 0, sizeof(avb_connection_s));
-      memcpy(&connection.stream_id, &msg->stream_id, UNIQUE_ID_LEN);
-      memcpy(&connection.talker_id, &msg->talker_entity_id, UNIQUE_ID_LEN);
-      memcpy(&connection.listener_id,&msg->listener_entity_id, UNIQUE_ID_LEN);
-      memcpy(&connection.controller_id, &msg->controller_entity_id, UNIQUE_ID_LEN);
-      memcpy(&connection.dest_addr, &msg->stream_dest_addr, ETH_ADDR_LEN);
-      memcpy(&connection.vlan_id, &msg->stream_vlan_id, 2);
-      connection.active = true;
-    }
-
-    // send get stream info to talker, TBD
-    avb_send_aecp_cmd_get_stream_info(state, &msg->talker_entity_id);
-
-    // when receive stream info, send connect rx response to controller
+  switch (msg->header.msg_type) {
+    case acmp_msg_type_connect_rx_command:
+      if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+        avbinfo("Ignoring ACMP Connect RX Command for different listener");
+        break;
+      }
+      avb_process_acmp_connect_rx_command(state, msg);
+      break;
+    case acmp_msg_type_connect_rx_response:
+      if (memcmp(msg->controller_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+        avbinfo("Ignoring ACMP Connect RX Response for different controller");
+        break;
+      }
+      avb_process_acmp_connect_rx_response(state, msg);
+      break;
+    case acmp_msg_type_disconnect_rx_command:
+      if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+        avbinfo("Ignoring ACMP Disconnect RX Command for different listener");
+        break;
+      }
+      avb_process_acmp_disconnect_rx_command(state, msg);
+      break;
+    case acmp_msg_type_disconnect_rx_response:
+      if (memcmp(msg->controller_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+        avbinfo("Ignoring ACMP Disconnect RX Response for different controller");
+        break;
+      }
+      avb_process_acmp_disconnect_rx_response(state, msg);
+      break;
+    case acmp_msg_type_connect_tx_command:
+      if (memcmp(msg->talker_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+        avbinfo("Ignoring ACMP Connect TX Command for different talker");
+        break;
+      }
+      avb_process_acmp_connect_tx_command(state, msg);
+      break;
+    case acmp_msg_type_connect_tx_response:
+      if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+        avbinfo("Ignoring ACMP Connect TX Response for different listener");
+        break;
+      }
+      avb_process_acmp_connect_tx_response(state, msg);
+      break;
+    case acmp_msg_type_disconnect_tx_command:
+      if (memcmp(msg->talker_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+        avbinfo("Ignoring ACMP Disconnect TX Command for different talker");
+        break;
+      }
+      avb_process_acmp_disconnect_tx_command(state, msg);
+      break;
+    case acmp_msg_type_disconnect_tx_response:
+      if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+        avbinfo("Ignoring ACMP Disconnect TX Response for different listener");
+        break;
+      }
+      avb_process_acmp_disconnect_tx_response(state, msg);
+      break;
+    default:
+      avbinfo("Ignoring unsupported ACMP message type: %d", msg->header.msg_type);
+      break;
   }
   return OK;
 }
 
 /* Process ACMP connect rx command */
 int avb_process_acmp_connect_rx_command(struct avb_state_s *state, acmp_message_s *msg) {
-  // not implemented
+    
+  int ret;
+  struct timespec ts;
+  size_t body_size = 56; // ACMP Message body length
+
+  // find talker address from talker entity id
+  eth_addr_t dest_addr;
+  int index = avb_find_entity_by_id(state, &msg->talker_entity_id, true);
+  memcpy(dest_addr, state->talkers[index].mac_addr, ETH_ADDR_LEN);
+
+  // send connect tx cmd to talker
+  acmp_message_s connect_tx_cmd;
+  memcpy(&connect_tx_cmd, msg, sizeof(acmp_message_s));
+  uint16_t msg_len = 4 + body_size; // header + body
+  ret = avb_net_send(state, ethertype_avtp, &connect_tx_cmd, msg_len, &ts);
+  if (ret < 0) {
+    avberr("send ACMP Connect TX Command failed: %d", errno);
+    return ret;
+  }
+
+  // send get stream info to talker, TBD
+  avb_send_aecp_cmd_get_stream_info(state, &msg->talker_entity_id);
+
+  // when receive stream info, send connect rx response to controller
   return OK;
 }
 
@@ -804,7 +831,27 @@ int avb_process_acmp_connect_tx_command(struct avb_state_s *state, acmp_message_
 
 /* Process ACMP connect tx response */
 int avb_process_acmp_connect_tx_response(struct avb_state_s *state, acmp_message_s *msg) {
-  // not implemented
+  
+      // if the connection is not already known, add it to the list
+    int index = avb_find_connection_by_id(state, &msg->stream_id, avb_entity_type_listener);
+    if (index == NOT_FOUND) {
+      // create a new connection
+      avb_connection_s connection;
+      memset(&connection, 0, sizeof(avb_connection_s));
+      memcpy(&connection.stream_id, &msg->stream_id, UNIQUE_ID_LEN);
+      memcpy(&connection.talker_id, &msg->talker_entity_id, UNIQUE_ID_LEN);
+      memcpy(&connection.listener_id, &msg->listener_entity_id, UNIQUE_ID_LEN);
+      memcpy(&connection.controller_id, &msg->controller_entity_id, UNIQUE_ID_LEN);
+      memcpy(&connection.dest_addr, &msg->stream_dest_addr, ETH_ADDR_LEN);
+      memcpy(&connection.vlan_id, &msg->stream_vlan_id, 2);
+      state->connections[state->num_connections] = connection;
+      state->num_connections++;
+      index = state->num_connections - 1;
+    }
+    char stream_id_str[UNIQUE_ID_LEN * 3 + 1];
+    octets_to_hex_string((uint8_t*)&state->connections[index].stream_id, UNIQUE_ID_LEN, stream_id_str, '-');
+    avbinfo("Starting stream in for connection %d: (stream id: %s)", index, stream_id_str);
+    avb_start_stream_in(state, &state->connections[index].stream_id);
   return OK;
 }
 
@@ -891,21 +938,24 @@ int avb_find_connection_by_id(struct avb_state_s *state,
   switch (role) { 
     case avb_entity_type_talker:
       for (int i = 0; i < state->num_connections; i++) {
-        if (memcmp(state->connections[i].stream_id, stream_id, UNIQUE_ID_LEN) == 0 && state->connections[i].talker_id == stream_id) {
+        if (memcmp(state->connections[i].stream_id, stream_id, UNIQUE_ID_LEN) == 0 
+        && memcmp(state->connections[i].talker_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) == 0) {
           return i;
         }
       }
       break;
     case avb_entity_type_listener:
       for (int i = 0; i < state->num_connections; i++) {
-        if (memcmp(state->connections[i].stream_id, stream_id, UNIQUE_ID_LEN) == 0 && state->connections[i].listener_id == stream_id) {
+        if (memcmp(state->connections[i].stream_id, stream_id, UNIQUE_ID_LEN) == 0 
+        && memcmp(state->connections[i].listener_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) == 0) {
           return i;
         }
       }
       break;
     case avb_entity_type_controller:
       for (int i = 0; i < state->num_connections; i++) {
-        if (memcmp(state->connections[i].stream_id, stream_id, UNIQUE_ID_LEN) == 0 && state->connections[i].controller_id == stream_id) {
+        if (memcmp(state->connections[i].stream_id, stream_id, UNIQUE_ID_LEN) == 0 
+        && memcmp(state->connections[i].controller_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) == 0) {
           return i;
         }
       }
