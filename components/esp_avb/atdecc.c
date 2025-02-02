@@ -632,14 +632,14 @@ int avb_process_aecp_cmd_read_descriptor(struct avb_state_s *state,
       for (int i = 0; i < descriptor_counts_count; i++) {
         aem_config_desc_count_s desc_count;
         memset(&desc_count, 0, sizeof(aem_config_desc_count_s));
-        int_to_octets(&AEM_CONFIG_DESCRIPTORS[i], desc_count.descriptor_type, 2);
-        size_t count = AEM_CONFIG_MAX_DESC_COUNT;
+        int_to_octets(&descriptors[i], desc_count.descriptor_type, 2);
+        size_t count = AEM_CONFIG_MAX_DESC_COUNT; // how many of each descriptor
         int_to_octets(&count, desc_count.count, 2);
         memcpy(&config_desc.descriptor_counts[i], &desc_count, 4);
       }
       memcpy(response.descriptor_data, &config_desc, sizeof(aem_config_desc_s));
       control_data_len += sizeof(aem_config_desc_s) 
-                       - (4 * (AEM_CONFIG_MAX_NUM_DESC - sizeof(AEM_CONFIG_DESCRIPTORS))); // adjust for the descriptor counts
+         - (4 * (AEM_CONFIG_MAX_NUM_DESC - descriptor_counts_count)); // adjust for the descriptor counts
       break;
     case aem_desc_type_audio_unit:
       response.common.header.status_valtime = aecp_status_not_implemented; // status: not implemented
