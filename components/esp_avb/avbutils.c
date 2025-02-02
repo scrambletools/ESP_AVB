@@ -11,6 +11,13 @@
 
 #include "avbutils.h"
 
+/* Convert an octet buffer to a hex string 
+ * 
+ * buffer: the octet buffer to convert
+ * size: the size of the buffer
+ * hex_string: the resulting hex string (must be at least size * 3 + 1 bytes)
+ * delimiter: the delimiter to use between octets (default is space)
+ */
 void octets_to_hex_string(const uint8_t* buffer, size_t size, char* hex_string, unsigned char delimiter) {
     if (!buffer || size == 0) {
         return;
@@ -302,4 +309,16 @@ void three_pe_to_int(uint8_t value, int *value1, int *value2, int *value3) {
     *value1 = value / 36;
     *value2 = (value % 36) / 6;
     *value3 = value % 6;
+}
+
+/* Check if a value is in an array of integers */
+bool in_array_of_int(int value, int *array, size_t size) {
+    bool result = false;
+    for (size_t i = 0; i < size; i++) { 
+        if (array[i] == value) { 
+            result = true; 
+            break; 
+        } 
+    }
+    return result;
 }

@@ -1,8 +1,8 @@
 dependencies:
-  ethernet_init:
-    path: ${IDF_PATH}/examples/ethernet/basic/components/ethernet_init
+  idf: ^5.0
   esp_eth_time:
     path: ${IDF_PATH}/examples/ethernet/ptp/components/esp_eth_time
   ptpd:
     path: ${IDF_PATH}/examples/ethernet/ptp/components/ptpd
-  
+  espressif/esp_codec_dev: ^1.3.4
+  espressif/es8311: ^1.0.0

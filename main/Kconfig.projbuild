@@ -1,58 +1,38 @@
 menu "AVB Example Configuration"
-
-    orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
     
     config EXAMPLE_AVB_ENTITY_NAME
         string "Entity Name"
         default "AVB Example Entity"
         help
-            Set the name of the AVB entity. This name will be used to identify this device
-            in the AVB network.
+            Set the name of the AVB entity. This name will be used 
+            to identify this device in the AVB network.
 
-    config EXAMPLE_AVB_ENTITY_MODEL_ID
-        int "Entity Model ID"
-        default 0
-        range 0 1000000
+    config EXAMPLE_AVB_MODEL_ID
+        hex "Model ID"
+        default 0x0000007468696e67
         help
-            Set the model ID for this AVB entity. This ID should uniquely identify the model/type
-            of AVB device within your vendor's product line.
+            Set the model ID for this AVB entity. This ID should uniquely identify 
+            the model/type of AVB device within your vendor's product line.
 
     config EXAMPLE_AVB_TALKER
-        bool "Function as AVB Talker"
-        default true
+        bool "Enable AVB Talker"
+        default n
         help
             Function as AVB Talker.
 
-    config EXAMPLE_AVB_LISTENER
-        bool "Function as AVB Listener"
-        default true
+    config EXAMPLE_AVB_TALKER_AUTO_STREAM
+        bool "Auto Stream"
+        depends on EXAMPLE_AVB_TALKER
+        default n
         help
-            Function as AVB Listener.
-
-    if EXAMPLE_AVB_LISTENER
-
-        config EXAMPLE_AVB_LISTENER_AUTO_CONNECT
-            bool "Auto Connect"
-            default false
-            help
-                Automatically connect to an AVB Talker with the same entity model ID.
-
-    endif
-
-    config EXAMPLE_AVB_SPEAKER_VOLUME
-        string "Speaker volume"
-        range 0 100
-        default 80
-        depends on EXAMPLE_AVB_LISTENER
-        help
-            Set the volume of the speaker.
-
+            Automatically start streaming when link is up.
+      
     choice EXAMPLE_SELECT_MIC_GAIN
         prompt "Set MIC gain"
         depends on EXAMPLE_AVB_TALKER
         default MIC_GAIN_18DB
         help
-            Select mic gain for echo mode
+            Select mic gain for echo mode.
 
         config MIC_GAIN_0DB
             bool "0dB"
@@ -71,8 +51,9 @@ menu "AVB Example Configuration"
         config MIC_GAIN_42DB
             bool "42dB"
     endchoice
-
+      
     config EXAMPLE_AVB_MIC_GAIN
+        depends on EXAMPLE_AVB_TALKER
         int
         default 0 if MIC_GAIN_0DB
         default 1 if MIC_GAIN_6DB
@@ -83,22 +64,43 @@ menu "AVB Example Configuration"
         default 6 if MIC_GAIN_36DB
         default 7 if MIC_GAIN_42DB
 
-    config EXAMPLE_AVB_ATDECC
+    config EXAMPLE_AVB_LISTENER
+        bool "Enable AVB Listener"
+        default y
+        help
+            Function as AVB Listener.
+
+    config EXAMPLE_AVB_LISTENER_AUTO_CONNECT
+        bool "Auto Connect"
+        depends on EXAMPLE_AVB_LISTENER
+        default n
+        help
+            Automatically connect to an AVB Talker with the same entity model ID.
+      
+    config EXAMPLE_AVB_SPEAKER_VOLUME
+        int "Speaker volume"
+        depends on EXAMPLE_AVB_LISTENER
+        range 0 100
+        default 80
+        help
+            Set the volume of the speaker.
+
+    config EXAMPLE_AVB_REMOTE_CONTROL
         bool "Allow remote control via ATDECC"
-        default true
+        default y
         help
             Allow an AVB Controller to control this device via ATDECC protocol.
 
     config EXAMPLE_AVB_PULSE_GPIO
-        int "GPIO for pulse"
+        int "GPIO for pulse indicator LED"
         default 20
         help
-            GPIO to use for PTP pulse.
+            GPIO to use for pulse indicator LED.
 
     config EXAMPLE_AVB_PULSE_WIDTH_NS
         int "Pulse width"
         default 250000000
         help
-            Pulse width for PTP pulse.
+            Pulse width for pulse indicator LED.
 
 endmenu

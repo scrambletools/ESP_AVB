@@ -60,7 +60,9 @@
     ((((x) & 0xff00) >> 8) |                        \
      (((x) & 0x00ff) << 8)))
 
-// Functions
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+// Function declarations
 uint64_t octets_to_uint(const uint8_t *buffer, size_t size);
 void octets_to_timeval(const uint8_t *buffer, struct timeval *tv);
 void reverse_octets(uint8_t *buffer, size_t size);
@@ -88,5 +90,6 @@ int32_t ppm_to_scaled(double ppm_value);
 int64_t timespec_to_ms(const struct timespec *ts);
 uint8_t int_to_3pe(int value1, int value2, int value3);
 void three_pe_to_int(uint8_t value, int *value1, int *value2, int *value3);
+bool in_array_of_int(int value, int *array, size_t size);
 
 #endif /* ESP_AVB_AVBUTILS_H_ */

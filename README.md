@@ -2,12 +2,28 @@
 
  AVB Implementation using ESP-IDF
 
+ Formats supported by test devices:
+ Mac Mini input and output:
+ - IEC61883-6: AM8-24, 48/96/192kHz, 8 data blocks non-blocking 8 MBLA
+ - IEC61883-6: AM8-24, 48/96/192kHz, 8 data blocks non-blocking synchronous clock 8 MBLA
+ - AAF-PCM: 24 bits in 32bit int, 8 channels of 6 samples @ 44.1/48kHz
+ - AAF-PCM: 24 bits in 32bit int, 8 channels of 12 samples @ 88.2/96kHz
+ - AAF-PCM: 24 bits in 32bit int, 8 channels of 24 samples @ 176.4/192kHz
+ Motu 8D input and output:
+ - IEC61883-6: AM8-24 (PCM-INT-24), 44.1/48/88.2/96/176.4/192kHz, 1-8 data blocks non-blocking (async) 1-8 MBLA
 
  Testing notes:
- M4: EID = ...448000         M1: EID = ...888000
- M4: MAC = ...f5:44          M1: MAC = ...c7:88
- M4: GM = ...10002           M1: GM = ...30002
+ M1: EID = ...888000
+ M1: MAC = ...c7:88
+ M1: GM = ...30002
 
+ 8D: EID = ...0162e5
+ 8D: MAC = ...62:e5
+ 8D: GM = ...50006
+
+ T1: EID = ...230000
+ T1: MAC = ...8c:23
+ T1: GM = ...00000
 
 Summary of the AVB talker (T), listener (L), controller (C) and bridge (B) interaction:
 [Sequence of frame transmissions by each device type]

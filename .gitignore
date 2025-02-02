@@ -1,4 +1,8 @@
 build/
+managed_components/
+reference/
+.vscode/
 *.lock
 sdkconfig
 .DS_Store
+*.old

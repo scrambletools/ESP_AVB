@@ -11,64 +11,76 @@
 
 #include "avb.h"
 
+#define DMA_BUFFER_SIZE 1024
+#define I2S_SAMPLE_RATE 48000
+
+#define TAG "AVB-NET"
+
+// Shared DMA buffer
+uint8_t *shared_dma_buffer;
+
+// Semaphore to synchronize Ethernet RX and I2S TX
+SemaphoreHandle_t eth_rx_ready;
+
 /* Initialize the network interface */
-int avb_net_init(struct avb_state_s *state, const char *interface) {
-  /* Create a handle to the Ethernet driver */
-  esp_eth_handle_t eth_handle;
+int avb_net_init(struct avb_state_s *state) {
+  
+    // Create 3 L2TAP interfaces (FDs) for AVTP, MSRP, and MVRP
+    for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
+        
+        int fd = open("/dev/net/tap", 0);
+        state->l2if[i] = fd;
+        if (state->l2if[i] < 0) {
+            avberr("Failed to create tx l2if: %d", errno);
+            return ERROR;
+        }
 
-  // Create 3 L2TAP interfaces (FDs) for AVTP, MSRP, and MVRP
-  for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
+        // Set Ethernet interface on which to get raw frames
+        if (ioctl(state->l2if[i], L2TAP_S_INTF_DEVICE, state->config.eth_interface) < 0) {
+            avberr("failed to set network interface at fd %d on interface %s: errno %d", fd, state->config.eth_interface, errno);
+            return ERROR;
+        }
 
-    int fd = open("/dev/net/tap", 0);
-    avbinfo("fd: %d", fd);
-    state->l2if[i] = fd;
-    if (state->l2if[i] < 0) {
-      avberr("Failed to create tx l2if: %d", errno);
-      return ERROR;
-    }
-    // Set Ethernet interface on which to get raw frames
-    if (ioctl(state->l2if[i], L2TAP_S_INTF_DEVICE, interface) < 0) {
-      avberr("failed to set network interface at fd %d: errno %d", fd, errno);
-      return ERROR;
-    }
-
-    // Set the ethertype based on the protocol index
-    uint16_t ethertype;
-    switch(i) {
-      case AVTP:
-        ethertype = ethertype_avtp;
-        break;
-      case MSRP:
-        ethertype = ethertype_msrp;
-        break;
-      case MVRP:
-        ethertype = ethertype_mvrp;
-        break;
-      default:
-        avberr("Invalid protocol index\n");
+        // Set the ethertype based on the protocol index
+        uint16_t ethertype;
+        switch(i) {
+        case AVTP:
+            ethertype = ethertype_avtp;
+            break;
+        case MSRP:
+            ethertype = ethertype_msrp;
+            break;
+        case MVRP:
+            ethertype = ethertype_mvrp;
+            break;
+        default:
+            avberr("Invalid protocol index\n");
+            return ERROR;
+        }
+        // Set the Ethertype filter (frames with this type will be available through the state->tx_l2if)
+        if (ioctl(state->l2if[i], L2TAP_S_RCV_FILTER, &ethertype) < 0) {
+        avberr("Failed to set Ethertype filter for fd %d: errno %d", fd, errno);
         return ERROR;
-    }
-    // Set the Ethertype filter (frames with this type will be available through the state->tx_l2if)
-    if (ioctl(state->l2if[i], L2TAP_S_RCV_FILTER, &ethertype) < 0) {
-      avberr("failed to set Ethertype filter for fd %d: errno %d", fd, errno);
-      return ERROR;
-    }
-    // Enable time stamping in driver
-    if (ioctl(state->l2if[i], L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) < 0) {
-      avberr("failed to get l2if eth_handle for fd %d: errno %d", fd, errno);
-      return ERROR;
+        }
+
+        // Enable time stamping in L2TAP (clock already initialized by PTPd)
+        if(ioctl(state->l2if[i], L2TAP_S_TIMESTAMP_EN) < 0) {
+        avberr("Failed to enable time stamping in L2TAP fd %d: errno %d", fd, errno);
+        return ERROR;
+        }
+        avbinfo("Initialized L2TAP fd %d for ethertype %x", fd, ethertype);
     }
 
-    // Enable time stamping in L2TAP (clock already initialized by PTPd)
-    if(ioctl(state->l2if[i], L2TAP_S_TIMESTAMP_EN) < 0) {
-      avberr("failed to enable time stamping in L2TAP fd %d: errno %d", fd, errno);
+    /* Create a handle to the Ethernet driver */
+    esp_eth_handle_t eth_handle;
+    if (ioctl(state->l2if[0], L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) < 0) {
+      avberr("Failed to get eth_handle for fd %d: errno %d", state->l2if[0], errno);
       return ERROR;
     }
-    avbinfo("Successfully initialized L2TAP fd %d for ethertype %x", fd, ethertype);
-  }
-  // get HW address
-  esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, &state->internal_mac_addr);
-  return OK;
+    
+    // Get MAC address and store in state
+    esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, &state->internal_mac_addr);
+    return OK;
 }
 
 /* Create an Ethernet frame */
@@ -215,3 +227,16 @@ int avb_net_recv(int l2if,
   memcpy(msg, &eth_frame[ETH_HEADER_LEN], ret);
   return ret;
 }
+
+// Ethernet RX callback
+static esp_err_t eth_on_data(esp_eth_handle_t eth_handle, uint8_t *buf, uint32_t len) {
+    if (len > DMA_BUFFER_SIZE) {
+        ESP_LOGE(TAG, "Ethernet frame too large for DMA buffer");
+        return ESP_OK;
+    }
+
+    // wire to I2S
+
+    return ESP_OK;
+}
+
