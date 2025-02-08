@@ -68,7 +68,7 @@ void octets_to_timeval(const uint8_t *buffer, struct timeval *tv);
 void reverse_octets(uint8_t *buffer, size_t size);
 void octets_to_hex_string(const uint8_t* buffer, size_t size, char* hex_string, unsigned char delimiter);
 void octets_to_binary_string(const uint8_t *buffer, size_t size, char *bit_string);
-void int_to_octets(void *value, uint8_t *buffer, size_t size);
+void int_to_octets(void *value, void *buffer, size_t size);
 void int_to_binary_string(uint64_t value, int num_bits, char *bit_string, bool reverse_order);
 void int_to_binary_string_64(uint64_t value, char *bit_string);
 void int_to_binary_string_32(uint32_t value, char *bit_string);

@@ -143,7 +143,7 @@ void app_main(void) {
     }
 
     /* Set up the AVB configuration */
-    struct avb_config_s avb_config = AVB_DEFAULT_CONFIG();
+    avb_config_s avb_config = AVB_DEFAULT_CONFIG();
 #if CONFIG_EXAMPLE_AVB_TALKER
     avb_config.talker = true;
 #endif

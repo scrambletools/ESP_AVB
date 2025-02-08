@@ -11,25 +11,12 @@
 
 #include "avb.h"
 
-/* supported formats */
-const int supported_aaf_formats[] = {
-  aaf_format_int_16bit,
-  aaf_format_int_24bit,
-  aaf_format_int_32bit
-};
-
-/* supported sample rates */
-const int supported_sample_rates[] = {
-  pcm_sample_rate_44_1k,
-  pcm_sample_rate_48k,
-  pcm_sample_rate_192k
-};
-
-/* supported bit depths */
-const int supported_bit_depths[] = { 16, 24 };
+/* globals to optimize l2tap usage */
+static bool avtp_active_stream_in = false;
+static bool avtp_active_stream_out = false;
 
 /* Send MVRP VLAN identifier message */
-int avb_send_mvrp_vlan_id(struct avb_state_s *state) {
+int avb_send_mvrp_vlan_id(avb_state_s *state) {
   mvrp_vlan_id_message_s msg;
   struct timespec ts;
   int ret;
@@ -57,7 +44,7 @@ int avb_send_mvrp_vlan_id(struct avb_state_s *state) {
 }
 
 /* Send MSRP domain message */
-int avb_send_msrp_domain(struct avb_state_s *state) {
+int avb_send_msrp_domain(avb_state_s *state) {
   msrp_domain_message_s msg;
   struct timespec ts;
   int ret;
@@ -94,7 +81,7 @@ int avb_send_msrp_domain(struct avb_state_s *state) {
 
 /* Send MSRP talker advertise message with appropriate event */
 int avb_send_msrp_talker(
-    struct avb_state_s *state, 
+    avb_state_s *state, 
     msrp_attr_event_t event, 
     bool is_failed
 ) {
@@ -156,7 +143,7 @@ int avb_send_msrp_talker(
 
 /* Send MSRP listener message with appropriate event */
 int avb_send_msrp_listener(
-    struct avb_state_s *state, 
+    avb_state_s *state, 
     msrp_attr_event_t attr_event, 
     msrp_listener_event_t listener_event
 ) {
@@ -191,14 +178,14 @@ int avb_send_msrp_listener(
   }
 
   // create a test connection and send a connect tx command for listener testing
-  unique_id_t test_talker_id = {0x15, 0x98, 0x77, 0x40, 0xc7, 0x88, 0x80, 0x00};
-  avb_send_acmp_connect_tx_command(state, &state->own_entity.summary.entity_id, &test_talker_id);
+  //unique_id_t test_talker_id = {0x15, 0x98, 0x77, 0x40, 0xc7, 0x88, 0x80, 0x00};
+  //avb_send_acmp_connect_tx_command(state, &state->own_entity.summary.entity_id, &test_talker_id);
 
   return ret;
 }
 
 /* Send MAAP Announce message */
-int avb_send_maap_announce(struct avb_state_s *state) {
+int avb_send_maap_announce(avb_state_s *state) {
   maap_message_s msg;
   struct timespec ts;
   int ret;
@@ -215,7 +202,7 @@ int avb_send_maap_announce(struct avb_state_s *state) {
 
 /* Process received MSRP domain message */
 int avb_process_msrp_domain(
-    struct avb_state_s *state,
+    avb_state_s *state,
     msrp_msgbuf_s *msg,
     int offset,
     size_t length
@@ -226,7 +213,7 @@ int avb_process_msrp_domain(
 
 /* Process received MSRP talker advertise message */
 int avb_process_msrp_talker(
-    struct avb_state_s *state,
+    avb_state_s *state,
     msrp_msgbuf_s *msg_data,
     int offset,
     size_t length,
@@ -268,7 +255,7 @@ int avb_process_msrp_talker(
 
 /* Process received MSRP listener ready message */
 int avb_process_msrp_listener(
-    struct avb_state_s *state,
+    avb_state_s *state,
     msrp_msgbuf_s *msg,
     int offset,
     size_t length
@@ -278,7 +265,7 @@ int avb_process_msrp_listener(
 }
 
 /* Process received AVTP IEC 61883 message */
-int avb_process_iec_61883(struct avb_state_s *state, iec_61883_6_message_s *msg) {
+int avb_process_iec_61883(avb_state_s *state, iec_61883_6_message_s *msg) {
   avbinfo("Got an AVTP IEC 61883 message");
 
   // check if the stream id is in the connection list and the stream is not yet active
@@ -288,7 +275,7 @@ int avb_process_iec_61883(struct avb_state_s *state, iec_61883_6_message_s *msg)
     // set the stream as active to avoid duplicate processing
     state->connections[index].active = true;
     // check if the connection has stream format info
-    if (state->connections[index].stream.stream_format.bit_depth == 0) {
+    if (state->connections[index].stream.stream_format.am824.fdf_evt == 0) {
       // set the stream format in the connection
     //   state->connections[index].stream.stream_format.format = msg->format;
     //   state->connections[index].stream.stream_format.sample_rate = msg->sample_rate;
@@ -296,12 +283,12 @@ int avb_process_iec_61883(struct avb_state_s *state, iec_61883_6_message_s *msg)
     //   state->connections[index].stream.stream_format.bit_depth = msg->bit_depth;
     }
     // if the stream format, sample rate or bit depth is not supported, then ignore the message
-    if (!in_array_of_int(state->connections[index].stream.stream_format.format, (int *)supported_aaf_formats, ARRAY_SIZE(supported_aaf_formats)) ||
-        !in_array_of_int(state->connections[index].stream.stream_format.sample_rate, (int *)supported_sample_rates, ARRAY_SIZE(supported_sample_rates)) ||
-        !in_array_of_int(state->connections[index].stream.stream_format.bit_depth, (int *)supported_bit_depths, ARRAY_SIZE(supported_bit_depths))) {
-      avberr("Unsupported stream format, sample rate or bit depth");
-      return ERROR;
-    }
+    // if (!in_array_of_int(state->connections[index].stream.stream_format.format, (int *)supported_aaf_formats, ARRAY_SIZE(supported_aaf_formats)) ||
+    //     !in_array_of_int(state->connections[index].stream.stream_format.sample_rate, (int *)supported_sample_rates, ARRAY_SIZE(supported_sample_rates)) ||
+    //     !in_array_of_int(state->connections[index].stream.stream_format.bit_depth, (int *)supported_bit_depths, ARRAY_SIZE(supported_bit_depths))) {
+    //   avberr("Unsupported stream format, sample rate or bit depth");
+    //   return ERROR;
+    // }
     // start the stream input task
     avb_start_stream_in(state, &msg->stream_id);
   }
@@ -310,7 +297,7 @@ int avb_process_iec_61883(struct avb_state_s *state, iec_61883_6_message_s *msg)
 }
 
 /* Process received AVTP AAF PCM message */
-int avb_process_aaf(struct avb_state_s *state, aaf_pcm_message_s *msg) {
+int avb_process_aaf(avb_state_s *state, aaf_pcm_message_s *msg) {
   avbinfo("Got an AVTP AAF PCM message");
 
   // check if the stream id is in the connection list and the stream is not yet active
@@ -320,20 +307,20 @@ int avb_process_aaf(struct avb_state_s *state, aaf_pcm_message_s *msg) {
     // set the stream as active to avoid duplicate processing
     state->connections[index].active = true;
     // check if the connection has stream format info
-    if (state->connections[index].stream.stream_format.bit_depth == 0) {
-      // set the stream format in the connection
-      state->connections[index].stream.stream_format.format = msg->format;
-      state->connections[index].stream.stream_format.sample_rate = msg->sample_rate;
-      state->connections[index].stream.stream_format.chan_per_frame = msg->chan_per_frame;
-      state->connections[index].stream.stream_format.bit_depth = msg->bit_depth;
-    }
+    // if (state->connections[index].stream.stream_format.bit_depth == 0) {
+    //   // set the stream format in the connection
+    //   state->connections[index].stream.stream_format.format = msg->format;
+    //   state->connections[index].stream.stream_format.sample_rate = msg->sample_rate;
+    //   state->connections[index].stream.stream_format.chan_per_frame = msg->chan_per_frame;
+    //   state->connections[index].stream.stream_format.bit_depth = msg->bit_depth;
+    // }
     // if the stream format, sample rate or bit depth is not supported, then ignore the message
-    if (!in_array_of_int(state->connections[index].stream.stream_format.format, (int *)supported_aaf_formats, ARRAY_SIZE(supported_aaf_formats)) ||
-        !in_array_of_int(state->connections[index].stream.stream_format.sample_rate, (int *)supported_sample_rates, ARRAY_SIZE(supported_sample_rates)) ||
-        !in_array_of_int(state->connections[index].stream.stream_format.bit_depth, (int *)supported_bit_depths, ARRAY_SIZE(supported_bit_depths))) {
-      avberr("Unsupported stream format, sample rate or bit depth");
-      return ERROR;
-    }
+    // if (!in_array_of_int(state->connections[index].stream.stream_format.format, (int *)supported_aaf_formats, ARRAY_SIZE(supported_aaf_formats)) ||
+    //     !in_array_of_int(state->connections[index].stream.stream_format.sample_rate, (int *)supported_sample_rates, ARRAY_SIZE(supported_sample_rates)) ||
+    //     !in_array_of_int(state->connections[index].stream.stream_format.bit_depth, (int *)supported_bit_depths, ARRAY_SIZE(supported_bit_depths))) {
+    //   avberr("Unsupported stream format, sample rate or bit depth");
+    //   return ERROR;
+    // }
     // start the stream input task
     avb_start_stream_in(state, &msg->stream_id);
   }
@@ -342,7 +329,7 @@ int avb_process_aaf(struct avb_state_s *state, aaf_pcm_message_s *msg) {
 }
 
 /* Process received AVTP MAAP message */
-int avb_process_maap(struct avb_state_s *state, maap_message_s *msg) {
+int avb_process_maap(avb_state_s *state, maap_message_s *msg) {
   // not implemented
   return OK;
 }

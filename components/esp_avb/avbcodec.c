@@ -68,7 +68,7 @@
 * 
 * @param state: AVB state
 */
-esp_err_t avb_config_i2s(struct avb_state_s *state) {
+esp_err_t avb_config_i2s(avb_state_s *state) {
 
     // Create an I2S channel and set the handles in the state
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(
@@ -77,8 +77,8 @@ esp_err_t avb_config_i2s(struct avb_state_s *state) {
     chan_cfg.auto_clear = true; // Auto clear the legacy data in the DMA buffer
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &state->i2s_tx_handle, &state->i2s_rx_handle));
     i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(state->config.sample_rate),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(state->config.bits_per_sample, I2S_SLOT_MODE_STEREO),
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(state->config.default_sample_rate),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(state->config.default_bits_per_sample, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_MCK_IO,
             .bclk = I2S_BCK_IO,
@@ -105,25 +105,26 @@ esp_err_t avb_config_i2s(struct avb_state_s *state) {
 }
 
 /* Configure ES8311 codec */
-static esp_err_t avb_config_codec_es8311(struct avb_state_s *state) {
+static esp_err_t avb_config_codec_es8311(avb_state_s *state) {
 
     // Check for valid number of channels
-    if (state->config.num_channels != 1) {
-        ESP_LOGE("ES8311", "Unsupported number of channels: %d", state->config.num_channels);
+    if (state->config.num_channels_input != 1 || state->config.num_channels_output != 1) {
+        ESP_LOGE("ES8311", "Unsupported number of channels: %d in, %d out", state->config.num_channels_input, state->config.num_channels_output);
         return ESP_FAIL;
     }
 
     // Check for valid bits per sample
-    if (state->config.bits_per_sample != 16 && state->config.bits_per_sample != 24) {
-        ESP_LOGE("ES8311", "Unsupported bits per sample: %d", state->config.bits_per_sample);
+    if (state->config.default_bits_per_sample != 16 && state->config.default_bits_per_sample != 24) {
+        ESP_LOGE("ES8311", "Unsupported bits per sample: %d", state->config.default_bits_per_sample);
         return ESP_FAIL;
     }
 
     // Check for valid sample rate
-    if (state->config.sample_rate != 44100 && state->config.sample_rate != 48000 && state->config.sample_rate != 96000) {
-        ESP_LOGE("ES8311", "Unsupported sample rate: %d", state->config.sample_rate);
+    if (state->config.default_sample_rate != 44100 && state->config.default_sample_rate != 48000 && state->config.default_sample_rate != 96000) {
+        ESP_LOGE("ES8311", "Unsupported sample rate: %lu", state->config.default_sample_rate);
         return ESP_FAIL;
     }
+
 
     // Setup the I2C bus handle using older i2c API which works with es8311 component
     const i2c_config_t es_i2c_cfg = {
@@ -145,12 +146,12 @@ static esp_err_t avb_config_codec_es8311(struct avb_state_s *state) {
         .mclk_inverted = false,
         .sclk_inverted = false,
         .mclk_from_mclk_pin = true,
-        .mclk_frequency = state->config.sample_rate * AVB_MCLK_MULTIPLE,
-        .sample_frequency = state->config.sample_rate
+        .mclk_frequency = state->config.default_sample_rate * AVB_MCLK_MULTIPLE,
+        .sample_frequency = state->config.default_sample_rate
     };
 
-    ESP_ERROR_CHECK(es8311_init(es_handle, &es_clk, state->config.bits_per_sample, state->config.bits_per_sample));
-    ESP_RETURN_ON_ERROR(es8311_sample_frequency_config(es_handle, state->config.sample_rate * AVB_MCLK_MULTIPLE, state->config.sample_rate), TAG, "set es8311 sample frequency failed");
+    ESP_ERROR_CHECK(es8311_init(es_handle, &es_clk, state->config.default_bits_per_sample, state->config.default_bits_per_sample));
+    ESP_RETURN_ON_ERROR(es8311_sample_frequency_config(es_handle, state->config.default_sample_rate * AVB_MCLK_MULTIPLE, state->config.default_sample_rate), TAG, "set es8311 sample frequency failed");
 
     // Setup the GPIO for the PA and set it to high
     gpio_config_t io_conf = {
@@ -169,23 +170,23 @@ static esp_err_t avb_config_codec_es8311(struct avb_state_s *state) {
 /* Configure ES8311 codec using ESP_CODEC_DEV 
  * but it's currently failing on open with I2C errors
  */
-static esp_err_t avb_config_codec_es8311_ng(struct avb_state_s *state) {
+static esp_err_t avb_config_codec_es8311_ng(avb_state_s *state) {
 
     // Check for valid number of channels
-    if (state->config.num_channels != 1) {
-        ESP_LOGE("ES8311", "Unsupported number of channels: %d", state->config.num_channels);
+    if (state->config.num_channels_input != 1 || state->config.num_channels_output != 1) {
+        ESP_LOGE("ES8311", "Unsupported number of channels: %d in, %d out", state->config.num_channels_input, state->config.num_channels_output);
         return ESP_FAIL;
     }
 
     // Check for valid bits per sample
-    if (state->config.bits_per_sample != 16 && state->config.bits_per_sample != 24) {
-        ESP_LOGE("ES8311", "Unsupported bits per sample: %d", state->config.bits_per_sample);
+    if (state->config.default_bits_per_sample != 16 && state->config.default_bits_per_sample != 24) {
+        ESP_LOGE("ES8311", "Unsupported bits per sample: %d", state->config.default_bits_per_sample);
         return ESP_FAIL;
     }
 
     // Check for valid sample rate
-    if (state->config.sample_rate != 44100 && state->config.sample_rate != 48000 && state->config.sample_rate != 96000) {
-        ESP_LOGE("ES8311", "Unsupported sample rate: %d", state->config.sample_rate);
+    if (state->config.default_sample_rate != 44100 && state->config.default_sample_rate != 48000 && state->config.default_sample_rate != 96000) {
+        ESP_LOGE("ES8311", "Unsupported sample rate: %lu", state->config.default_sample_rate);
         return ESP_FAIL;
     }
 
@@ -256,7 +257,7 @@ static esp_err_t avb_config_codec_es8311_ng(struct avb_state_s *state) {
 * 
 * @param state: AVB state
 */
-esp_err_t avb_config_codec(struct avb_state_s *state) {
+esp_err_t avb_config_codec(avb_state_s *state) {
   switch (state->config.codec_type) {
       case avb_codec_type_es8311:
           return avb_config_codec_es8311(state);

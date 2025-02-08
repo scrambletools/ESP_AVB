@@ -3,12 +3,14 @@
  AVB Implementation using ESP-IDF
 
  Formats supported by test devices:
+
  Mac Mini input and output:
  - IEC61883-6: AM8-24, 48/96/192kHz, 8 data blocks non-blocking 8 MBLA
  - IEC61883-6: AM8-24, 48/96/192kHz, 8 data blocks non-blocking synchronous clock 8 MBLA
  - AAF-PCM: 24 bits in 32bit int, 8 channels of 6 samples @ 44.1/48kHz
  - AAF-PCM: 24 bits in 32bit int, 8 channels of 12 samples @ 88.2/96kHz
  - AAF-PCM: 24 bits in 32bit int, 8 channels of 24 samples @ 176.4/192kHz
+ 
  Motu 8D input and output:
  - IEC61883-6: AM8-24 (PCM-INT-24), 44.1/48/88.2/96/176.4/192kHz, 1-8 data blocks non-blocking (async) 1-8 MBLA
 

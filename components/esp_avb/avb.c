@@ -12,17 +12,22 @@
 #include "avb.h" // Internal API
 
 /* Global state */
-struct avb_state_s *s_state;
+avb_state_s *s_state;
+
+// logo.png
+extern const char logo_png_start[] asm("_binary_logo_png_start");
+extern const char logo_png_end[] asm("_binary_logo_png_end");
 
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
 /* Initialize AVB state and create L2TAP FD - FIXME 3 FDs needed */
-static int avb_initialize_state(struct avb_state_s *state,
-                                struct avb_config_s *config) {
-
+static int avb_initialize_state(
+    avb_state_s *state,
+    avb_config_s *config
+) {
   // Copy config to state
-  memcpy(&state->config, config, sizeof(struct avb_config_s));
+  memcpy(&state->config, config, sizeof(avb_config_s));
 
   // Initialize the low level ethernet interface
   int ret = avb_net_init(state);
@@ -81,10 +86,14 @@ static int avb_initialize_state(struct avb_state_s *state,
   memcpy(state->own_entity.detail.group_name, group_name, sizeof(group_name));
   char serial_number[64] = CONFIG_ESP_AVB_SERIAL_NUMBER;
   memcpy(state->own_entity.detail.serial_number, serial_number, sizeof(serial_number));
-  size_t config_num = AVB_MAX_NUM_CONFIGS;
+  size_t config_num = AEM_MAX_NUM_CONFIGS;
   int_to_octets(&config_num, state->own_entity.detail.configurations_count, 2);
   size_t config_index = DEFAULT_CONFIG_INDEX;
   int_to_octets(&config_index, state->own_entity.detail.current_configuration, 2);
+
+  // Set logo start and length
+  state->logo_start = (uint8_t *)logo_png_start;
+  state->logo_length = logo_png_end - logo_png_start;
 
   // Get latest PTP status
   struct ptpd_status_s ptp_status;
@@ -102,7 +111,7 @@ static int avb_initialize_state(struct avb_state_s *state,
 }
 
 /* Destroy l2ifs */
-static int avb_destroy_state(struct avb_state_s *state) {
+static int avb_destroy_state(avb_state_s *state) {
 
   for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
     if (state->l2if[i] > 0) {
@@ -114,7 +123,7 @@ static int avb_destroy_state(struct avb_state_s *state) {
 }
 
 /* Get latest PTP status */
-static void avb_update_ptp_status(struct avb_state_s *state) {
+static void avb_update_ptp_status(avb_state_s *state) {
   // if valid PTP status
   struct ptpd_status_s ptp_status;
   // if valid PTP status
@@ -124,7 +133,7 @@ static void avb_update_ptp_status(struct avb_state_s *state) {
 }
 
 /* Send periodic messages */
-static int avb_periodic_send(struct avb_state_s *state) {
+static int avb_periodic_send(avb_state_s *state) {
   struct timespec time_now;
   struct timespec delta;
   clock_gettime(CLOCK_MONOTONIC, &time_now);
@@ -168,23 +177,46 @@ static int avb_periodic_send(struct avb_state_s *state) {
   if (state->config.listener) {
     clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener_ready, &delta);
     if (timespec_to_ms(&delta) > MSRP_LISTENER_READY_INTERVAL_MSEC) {
-      state->last_transmitted_msrp_listener_ready = time_now;
-      avb_send_msrp_listener(state, msrp_attr_event_join_in, msrp_listener_event_ready);
+        state->last_transmitted_msrp_listener_ready = time_now;
+        avb_send_msrp_listener(state, msrp_attr_event_join_in, msrp_listener_event_ready);
+    }
+  }
+
+  // Send Unsolicited notifications
+  if (state->unsol_notif_enabled) {
+
+    if (state->config.talker) {
+        // Send get counters stream_output response
+        clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
+        if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
+            state->last_transmitted_unsol_notif = time_now;
+            avb_send_get_counters_response(state);
+        }
+    }
+    if (state->config.listener) {
+        // Send get counters stream_input response
+        clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
+        if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
+            state->last_transmitted_unsol_notif = time_now;
+            avb_send_get_counters_response(state);
+        }
     }
   }
   return OK;
 }
 
 /* Determine received message type and process it */
-static int avb_process_rx_message(struct avb_state_s *state,
-                                  int protocol_idx,
-                                  ssize_t length) {
+
+static int avb_process_rx_message(
+    avb_state_s *state,
+    int protocol_idx,
+    ssize_t length
+) {
   // Check if the message length is valid
   if (length <= ETH_HEADER_LEN) {
     avbwarn("Ignoring invalid message, length only %d bytes", (int)length);
         return OK;
   }
-
   eth_addr_t src_addr;
   memcpy(&src_addr, &state->rxsrc[protocol_idx], ETH_ADDR_LEN);
 
@@ -331,7 +363,7 @@ err:
 }
 
 /* Start the AVB stream input task */
-int avb_start_stream_in(struct avb_state_s *state, unique_id_t *stream_id) {
+int avb_start_stream_in(avb_state_s *state, unique_id_t *stream_id) {
 
   // create a string representation of the stream id for error messages
   char stream_id_str[UNIQUE_ID_LEN * 3 + 1];
@@ -351,23 +383,37 @@ int avb_start_stream_in(struct avb_state_s *state, unique_id_t *stream_id) {
     stream_in_params->i2s_tx_handle = state->i2s_tx_handle;
     stream_in_params->l2if = state->l2if[AVTP];
     memcpy(&stream_in_params->stream_id, stream_id, UNIQUE_ID_LEN);
-    stream_in_params->bit_depth = state->connections[index].stream.stream_format.bit_depth;
-    stream_in_params->channels = state->connections[index].stream.stream_format.chan_per_frame;
-    stream_in_params->sample_rate = state->connections[index].stream.stream_format.sample_rate;
-    stream_in_params->format = state->connections[index].stream.stream_format.format;
+    stream_in_params->format = state->connections[index].stream.stream_format.subtype;
+    if (stream_in_params->format == 0x02) { // AAF
+        stream_in_params->bit_depth = state->connections[index].stream.stream_format.aaf_pcm.bit_depth;
+        stream_in_params->channels = state->connections[index].stream.stream_format.aaf_pcm.chan_per_frame;
+        stream_in_params->sample_rate = state->connections[index].stream.stream_format.aaf_pcm.sample_rate;
+    } else { // assume IEC 61883-6 AM824
+        stream_in_params->bit_depth = state->config.default_bits_per_sample; // ?
+        stream_in_params->channels = state->connections[index].stream.stream_format.am824.dbs; // ?
+        stream_in_params->sample_rate = state->config.default_sample_rate; // ?
+    }
     int samples_per_interval = 0;
     // Class A (1ms intervals)
     if (state->connections[index].talker_info.priority == 3) { 
-      samples_per_interval = (state->connections[index].stream.stream_format.sample_rate / 1000);
+      samples_per_interval = (stream_in_params->sample_rate / 1000);
       stream_in_params->interval = 1000;
     // Class B (4ms intervals)
     } else { 
-      samples_per_interval = (state->connections[index].stream.stream_format.sample_rate / 250);
+      samples_per_interval = (stream_in_params->sample_rate / 250);
       stream_in_params->interval = 4000;
     }
-    int buffer_size = samples_per_interval \
-        * state->connections[index].stream.stream_format.chan_per_frame \
-        * (state->connections[index].stream.stream_format.bit_depth / 8);
+    // Calculate the buffer size
+    int buffer_size = 0;
+    if (stream_in_params->format == 0x02) { // AAF
+        buffer_size = samples_per_interval 
+            * stream_in_params->channels 
+            * (stream_in_params->bit_depth / 8);
+    } else { // assume IEC 61883-6 AM824
+        buffer_size = samples_per_interval 
+            * stream_in_params->channels 
+            * (stream_in_params->bit_depth / 8);
+    }
     stream_in_params->buffer_size = buffer_size;
     if (!stream_in_params) {
       avberr("I2S: No memory for stream in params");
@@ -383,9 +429,12 @@ int avb_start_stream_in(struct avb_state_s *state, unique_id_t *stream_id) {
   return ERROR;
 }
 
+/* Callback on ethernet frame receive */
+//TBD
+
 /* Process status information request */
-static void avb_process_statusreq(struct avb_state_s *state) {
-  struct avb_status_s *status;
+static void avb_process_statusreq(avb_state_s *state) {
+  avb_status_s *status;
 
   if (!state->status_req.dest) {
     return; /* No active request */
@@ -408,13 +457,15 @@ static void avb_process_statusreq(struct avb_state_s *state) {
 static void avb_task(void *task_param) {
 
     // Create AVB state structure
-    struct avb_state_s *state = NULL;
-    state = calloc(1, sizeof(struct avb_state_s));
+    avb_state_s *state = NULL;
+    state = calloc(1, sizeof(avb_state_s));
     if (!state) {
         avberr("Failed to allocate memory for AVB state");
         goto err;
     }
-    avbinfo("AVB state size: %d bytes", sizeof(struct avb_state_s));
+
+    avbinfo("AVB state size: %d bytes", sizeof(avb_state_s));
+
 
     // Get configuration from task_param
     if (task_param == NULL) {
@@ -423,7 +474,7 @@ static void avb_task(void *task_param) {
     }
 
     // Fall back to default ethernet interface if not provided
-    struct avb_config_s *config = (struct avb_config_s *)task_param;
+    avb_config_s *config = (avb_config_s *)task_param;
     if (config->eth_interface == NULL) {
         config->eth_interface = "ETH_DEF";
     }
@@ -463,12 +514,19 @@ static void avb_task(void *task_param) {
         /* Check for events on each L2TAP interface */
         for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
             if (pollfds[i].revents) {
-            /* Get a message from the L2TAP interface */
-            int ret = avb_net_recv(state->l2if[i], &state->rxbuf[i], AVB_MAX_MSG_LEN, &state->rxtime[i], &state->rxsrc[i]);
-            if (ret > 0) {
-                /* Process the received message */
-                avb_process_rx_message(state, i, ret);
-            }
+                /* Get a message from the L2TAP interface */
+                int ret = avb_net_recv(state->l2if[i], &state->rxbuf[i], AVB_MAX_MSG_LEN, &state->rxtime[i], &state->rxsrc[i]);
+                if (ret > 0) {
+                    /* ignore active streams as they are too fast */
+                    if (i == AVTP
+                    && (state->rxbuf[i].avtp.subtype == avtp_subtype_aaf
+                    || state->rxbuf[i].avtp.subtype == avtp_subtype_61883)) {
+                        break;
+                    } 
+                    /* Process the received message */
+                    avb_process_rx_message(state, i, ret);
+
+                }
             }
         }
         }
@@ -506,7 +564,7 @@ err:
  ****************************************************************************/
 
 /* Start the AVB task */
-int avb_start(struct avb_config_s *config)
+int avb_start(avb_config_s *config)
 {
   if (!config->talker && !config->listener) {
     avberr("No talker or listener enabled");
@@ -522,15 +580,15 @@ int avb_start(struct avb_config_s *config)
 }
 
 /* Query status from a running AVB task */
-int avb_status(struct avb_status_s *status)
+int avb_status(avb_status_s *status)
 {
   int ret = 0;
   sem_t donesem;
-  struct avb_statusreq_s req;
+  avb_statusreq_s req;
   struct timespec timeout;
 
   /* Fill in the status request */
-  memset(status, 0, sizeof(struct avb_status_s));
+  memset(status, 0, sizeof(avb_status_s));
   sem_init(&donesem, 0, 0);
   req.done = &donesem;
   req.dest = status;

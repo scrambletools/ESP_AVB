@@ -23,7 +23,7 @@ uint8_t *shared_dma_buffer;
 SemaphoreHandle_t eth_rx_ready;
 
 /* Initialize the network interface */
-int avb_net_init(struct avb_state_s *state) {
+int avb_net_init(avb_state_s *state) {
   
     // Create 3 L2TAP interfaces (FDs) for AVTP, MSRP, and MVRP
     for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
@@ -86,7 +86,7 @@ int avb_net_init(struct avb_state_s *state) {
 /* Create an Ethernet frame */
 void avb_create_eth_frame(uint8_t *eth_frame, 
                           eth_addr_t *dest_addr, 
-                          struct avb_state_s *state, 
+                          avb_state_s *state, 
                           ethertype_t ethertype, 
                           void *msg, 
                           uint16_t msg_len) {
@@ -100,7 +100,7 @@ void avb_create_eth_frame(uint8_t *eth_frame,
 }
 
 /* Send an Ethernet frame */
-int avb_net_send_to(struct avb_state_s *state, 
+int avb_net_send_to(avb_state_s *state, 
                  ethertype_t ethertype, 
                  void *msg, 
                  uint16_t msg_len, 
@@ -157,7 +157,7 @@ int avb_net_send_to(struct avb_state_s *state,
   return ret;
 }
 
-int avb_net_send(struct avb_state_s *state, 
+int avb_net_send(avb_state_s *state, 
                     ethertype_t ethertype, 
                     void *msg, 
                     uint16_t msg_len, 

@@ -39,9 +39,16 @@
     .codec_handle = NULL, \
     .eth_handle = NULL, \
     .codec_type = avb_codec_type_es8311, \
-    .sample_rate = 48000, \
-    .bits_per_sample = 24, \
-    .num_channels = 1, \
+    .default_sample_rate = 48000, \
+    .default_bits_per_sample = 24, \
+    .num_channels_input = 1, \
+    .num_channels_output = 1, \
+    .supported_sample_rates = { \
+        .sample_rates = {44100, 48000, 96000}, \
+        .num_rates = 3}, \
+    .supported_bits_per_sample = { \
+        .bit_rates = {16, 24}, \
+        .num_rates = 2} \
 }
 
 /****************************************************************************
@@ -53,36 +60,48 @@ typedef enum {
   avb_codec_type_es8311 // Everest Semiconductor ES8311 (currently only one supported)
 } avb_codec_type_t;
 
-/* AVB configuration structure */
-struct avb_config_s {
-  
-  bool talker;                        // enable talker
-  bool listener;                      // enable listener
-  char *eth_interface;                // ethernet interface name
-  int i2s_port;                       // i2s port number
-  int output_pa_pin;                  // output PA pin
-  void *i2c_handle;                   // i2c handle
-  void *codec_handle;                 // codec handle
-  esp_eth_handle_t *eth_handle;       // ethernet handle
-  const avb_codec_type_t codec_type;  // codec type
-  int sample_rate;                    // sample rate
-  int bits_per_sample;                // bits per sample
-  int num_channels;                   // number of channels
+/* Sample rates struct */
+typedef struct {
+    uint32_t sample_rates[8];
+    uint8_t num_rates;
+} avb_sample_rates_s;
 
+/* Bit rates struct */
+typedef struct {
+    uint8_t bit_rates[8]; // bits per sample
+    uint8_t num_rates;
+} avb_bit_rates_s;
 
-
-};
+/* AVB configuration structure
+ * Currently sample rate and bit rate must be same for
+ * for all inputs and outputs.
+ */
+typedef struct {
+    bool                   talker;                    // enable talker
+    bool                   listener;                  // enable listener
+    char *                 eth_interface;             // ethernet interface name
+    uint8_t                i2s_port;                  // i2s port number
+    uint8_t                output_pa_pin;             // output PA pin
+    void *                 i2c_handle;                // i2c handle
+    void *                 codec_handle;              // codec handle
+    esp_eth_handle_t *     eth_handle;                // ethernet handle
+    const avb_codec_type_t codec_type;                // codec type
+    uint32_t               default_sample_rate;       // default sample rate
+    uint8_t                default_bits_per_sample;   // default bits per sample
+    uint8_t                num_channels_input;        // number of input channels
+    uint8_t                num_channels_output;       // number of output channels
+    avb_sample_rates_s     supported_sample_rates;    // supported sample rates
+    avb_bit_rates_s        supported_bits_per_sample; // supported bits per sample
+} avb_config_s;
 
 /* AVB status information structure */
-struct avb_status_s {
-  bool clock_source_valid;           // clock source valid
-
+typedef struct {
+  bool clock_source_valid;      // clock source valid
   struct {
-    uint8_t id[8];                   // Entity ID
+    uint8_t id[8];              // Entity ID
   } entity;
-
-  struct timespec last_started;      // when AVB was last started
-};
+  struct timespec last_started; // when AVB was last started
+} avb_status_s;
 
 /****************************************************************************
  * Public Function Prototypes
@@ -107,7 +126,7 @@ extern "C"
  *       Only one instance of AVB task can run at a time. 
  *       Attempting to start multiple instances will fail with an error.
  */
-int avb_start(struct avb_config_s *config);
+int avb_start(avb_config_s *config);
 
 /* @brief Query status from a running AVB task
  * 
@@ -119,7 +138,7 @@ int avb_start(struct avb_config_s *config);
  *       can request status simultaneously. If higher priority threads 
  *       request status simultaneously, some of the requests may timeout.
  */
-int avb_status(struct avb_status_s *status);
+int avb_status(avb_status_s *status);
 
 /* @brief Stop the AVB task
  * 

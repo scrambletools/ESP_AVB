@@ -98,10 +98,10 @@ void octets_to_binary_string(const uint8_t *buffer, size_t size, char *bit_strin
 }
 
 // Converts an integer to a buffer of octets; reverses the order of the octets
-void int_to_octets(void *value, uint8_t *buffer, size_t size) {
+void int_to_octets(void *value, void *buffer, size_t size) {
     //ESP_LOGI(TAG, "int_to_octets: %lld", (long long)*value);
     memcpy(buffer, value, size);
-    reverse_octets(buffer, size);
+    reverse_octets((uint8_t *)buffer, size);
 }
 
 // Generates a string of bits fron a uint64_t; num_bits can be 64,32,16 or 8
