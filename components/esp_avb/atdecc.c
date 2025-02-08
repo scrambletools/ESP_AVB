@@ -297,14 +297,16 @@ int avb_send_aecp_rsp_read_descr_audio_unit(
 
     // data for the audio unit descriptor
     int localized_description = 1;
-    int num_input_ports = state->config.num_channels_input;
-    int num_output_ports = state->config.num_channels_output;
+    int num_input_ports = state->num_input_streams;
+    int num_output_ports = state->num_output_streams;
     int sampling_rate = state->config.default_sample_rate;
     int offset = 144; // 144 for this version of AEM
     int sampling_rates_count = state->config.supported_sample_rates.num_rates;
-    int sampling_rates[sampling_rates_count];
-    memcpy(sampling_rates, state->config.supported_sample_rates.sample_rates, sampling_rates_count * sizeof(uint32_t));
-    
+    uint32_t sampling_rates[sampling_rates_count];
+    for (int i = 0; i < sampling_rates_count; i++) {
+        sampling_rates[i] = state->config.supported_sample_rates.sample_rates[i];
+    }
+
     // create an audio unit descriptor
     aem_audio_unit_desc_s descriptor;
     memset(&descriptor, 0, sizeof(aem_audio_unit_desc_s));
@@ -317,7 +319,7 @@ int avb_send_aecp_rsp_read_descr_audio_unit(
     int_to_octets(&offset, descriptor.sampling_rate_offset, 2);
     int_to_octets(&sampling_rates_count, descriptor.sampling_rates_count, 2); 
     for (int i = 0; i < sampling_rates_count; i++) {
-        int_to_octets(&sampling_rates[i], (uint8_t *)&descriptor.sampling_rates[i * 4], 4);
+        int_to_octets(&sampling_rates[i], (uint8_t *)&descriptor.sampling_rates[i], 4);
     }
 
     // insert the descriptor into the response message
@@ -1319,27 +1321,37 @@ int avb_process_aecp_cmd_acquire_entity(avb_state_s *state,
     return OK;
   }
 
-  // create a response, copy the cmd message data and change the msg type and status
-  aecp_acquire_entity_s response;
-  memset(&response, 0, sizeof(aecp_acquire_entity_s));
-  memcpy(&response.common, &msg->common, sizeof(aecp_common_s));
-  memcpy(&response.aem, &msg->basic.aem, sizeof(aecp_common_aem_s));
+  // create a response, copy the cmd message data and change the msg type
+  aecp_acquire_entity_s response = {0};
+  memcpy(&response, msg, sizeof(aecp_acquire_entity_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
-  response.common.header.status_valtime = aecp_status_not_supported; // status: not supported
 
   // send the response message  
   uint16_t msg_len = sizeof(atdecc_header_s) + sizeof(aecp_acquire_entity_s);
   ret = avb_net_send_to(state, ethertype_avtp, &response, msg_len, &ts, src_addr);
+
   if (ret < 0) {
     avberr("send AECP Acquire Entity response failed: %d", errno);
+  } else {
+    if (msg->acquire_entity.release) {
+        state->acquired = false;
+    } else {
+        state->acquired = true;
+        memcpy(state->acquired_by, msg->common.controller_entity_id, UNIQUE_ID_LEN);
+        state->last_acquired.tv_sec = ts.tv_sec;
+        state->last_acquired.tv_usec = (suseconds_t)(ts.tv_nsec / 1000);
+    }
   }
   return ret;
 }
 
+
 /* Process AECP command lock entity */
-int avb_process_aecp_cmd_lock_entity(avb_state_s *state, 
-                                      aecp_message_u *msg, 
-                                      eth_addr_t *src_addr) {
+int avb_process_aecp_cmd_lock_entity(
+    avb_state_s *state, 
+    aecp_message_u *msg, 
+    eth_addr_t *src_addr
+) {
   int ret;
   struct timespec ts;
 
@@ -1349,22 +1361,31 @@ int avb_process_aecp_cmd_lock_entity(avb_state_s *state,
     return OK;
   }
 
-  // create a response, copy the cmd message data and change the msg type and status
-  aecp_lock_entity_s response;
-  memset(&response, 0, sizeof(aecp_lock_entity_s));
-  memcpy(&response.common, &msg->common, sizeof(aecp_common_s));
-  memcpy(&response.aem, &msg->basic.aem, sizeof(aecp_common_aem_s));
+  // create a response, copy the cmd message data and change the msg type
+  aecp_lock_entity_s response = {0};
+  memcpy(&response, msg, sizeof(aecp_lock_entity_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
-  response.common.header.status_valtime = aecp_status_not_supported; // status: not supported
 
   // send the response message  
   uint16_t msg_len = sizeof(atdecc_header_s) + sizeof(aecp_lock_entity_s);
   ret = avb_net_send_to(state, ethertype_avtp, &response, msg_len, &ts, src_addr);
   if (ret < 0) {
     avberr("send AECP Lock Entity response failed: %d", errno);
+  } else {
+    if (msg->lock_entity.unlock) {
+        state->locked = false;
+    } else {
+        state->locked = true;
+        memcpy(state->locked_by, msg->common.controller_entity_id, UNIQUE_ID_LEN);
+        state->last_locked.tv_sec = ts.tv_sec;
+        state->last_locked.tv_usec = (suseconds_t)(ts.tv_nsec / 1000);
+    }
   }
   return ret;
 }
+
+
+
 
 /* Process AECP command entity available */
 int avb_process_aecp_cmd_entity_available(avb_state_s *state, 
