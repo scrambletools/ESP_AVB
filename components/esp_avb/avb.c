@@ -91,6 +91,25 @@ static int avb_initialize_state(
   size_t config_index = DEFAULT_CONFIG_INDEX;
   int_to_octets(&config_index, state->own_entity.detail.current_configuration, 2);
 
+  // Set stream info flags and format
+  aem_stream_info_flags_s stream_info_flags = {0};
+  stream_info_flags.stream_vlan_id_valid = true;
+  stream_info_flags.stream_id_valid = true;
+  stream_info_flags.stream_format_valid = true;
+  avtp_stream_format_am824_s format = AVB_DEFAULT_FORMAT(cip_sfc_sample_rate_48k);
+
+  // Set input stream info
+  for (int i = 0; i < AVB_MAX_NUM_INPUT_STREAMS; i++) {
+    state->input_streams[i].stream.flags = stream_info_flags;
+    state->input_streams[i].stream.stream_format = (avtp_stream_format_s)format;
+  }
+
+  // Set output stream info
+  for (int i = 0; i < AVB_MAX_NUM_OUTPUT_STREAMS; i++) {
+    state->output_streams[i].stream.flags = stream_info_flags;
+    state->output_streams[i].stream.stream_format = (avtp_stream_format_s)format;
+  }
+
   // Set logo start and length
   state->logo_start = (uint8_t *)logo_png_start;
   state->logo_length = logo_png_end - logo_png_start;
@@ -185,22 +204,29 @@ static int avb_periodic_send(avb_state_s *state) {
   // Send Unsolicited notifications
   if (state->unsol_notif_enabled) {
 
-    if (state->config.talker) {
-        // Send get counters stream_output response
-        clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
-        if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
-            state->last_transmitted_unsol_notif = time_now;
-            avb_send_get_counters_response(state);
-        }
-    }
-    if (state->config.listener) {
-        // Send get counters stream_input response
-        clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
-        if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
-            state->last_transmitted_unsol_notif = time_now;
-            avb_send_get_counters_response(state);
-        }
-    }
+    // TODO: this should be done only after specific responses are sent
+
+    // if (state->config.talker) {
+    //     // Send get counters stream_output notification
+    //     for (int i = 0; i < state->num_output_streams; i++) {
+    //         clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
+    //         if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
+    //             state->last_transmitted_unsol_notif = time_now;
+    //             avb_send_aecp_unsol_get_counters(state, aem_desc_type_stream_output, i);
+    //         }
+    //     }
+    // }
+    // if (state->config.listener) {
+    //     // Send get counters stream_input notification
+    //     for (int i = 0; i < state->num_input_streams; i++) {
+    //         if (state->input_streams[i].stream.flags.connected) {
+    //         clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
+    //         if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
+    //             state->last_transmitted_unsol_notif = time_now;
+    //             avb_send_aecp_unsol_get_counters(state, aem_desc_type_stream_input, i);
+    //         }
+    //     }
+    // }
   }
   return OK;
 }

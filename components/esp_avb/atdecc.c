@@ -49,13 +49,19 @@ int avb_send_adp_entity_available(avb_state_s *state) {
 }
 
 /* Send AECP command controller available message */
-int avb_send_aecp_cmd_controller_available(avb_state_s *state, unique_id_t *target_id) {
+int avb_send_aecp_cmd_controller_available(
+    avb_state_s *state, 
+    unique_id_t *target_id
+) {
   // not implemented
   return OK;
 }
 
 /* Send AECP command get stream info message */
-int avb_send_aecp_cmd_get_stream_info(avb_state_s *state, unique_id_t *target_id) {
+int avb_send_aecp_cmd_get_stream_info(
+    avb_state_s *state, 
+    unique_id_t *target_id
+) {
   aecp_get_stream_info_s msg;
   struct timespec ts;
   int ret;
@@ -70,7 +76,7 @@ int avb_send_aecp_cmd_get_stream_info(avb_state_s *state, unique_id_t *target_id
   memcpy(msg.common.target_entity_id, target_id, UNIQUE_ID_LEN);
   memcpy(msg.common.controller_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
   size_t command_type = aecp_cmd_code_get_stream_info;
-  int_to_octets(&command_type, &msg.common.command_type, 2);
+  int_to_octets(&command_type, &msg.aem.command_type, 2);
   int descriptor_type = aem_desc_type_stream_output;
   int_to_octets(&descriptor_type, msg.descriptor_type, 2);
 
@@ -83,24 +89,94 @@ int avb_send_aecp_cmd_get_stream_info(avb_state_s *state, unique_id_t *target_id
   return ret;
 }
 
+/* Send AECP response get stream info message */
+int avb_send_aecp_rsp_get_stream_info(
+    avb_state_s *state, 
+    aecp_get_stream_info_s *msg,
+    eth_addr_t *dest_addr
+) {
+    int ret = OK;
+    struct timespec ts;
+    uint16_t index = octets_to_uint(msg->descriptor_index, 2);
+    uint16_t descriptor_type = octets_to_uint(msg->descriptor_type, 2);
 
-/* Send AECP command get counters message */
-int avb_send_aecp_cmd_get_counters(avb_state_s *state, unique_id_t *target_id) {
+    // set if input or output
+    bool is_output = descriptor_type == aem_desc_type_stream_output;
+
+    // check if the index is out of range
+    if ((is_output && index >= state->num_output_streams) || 
+    (!is_output && index >= state->num_input_streams)) {
+        avberr("stream descriptor index out of range: %d", index);
+        ret = ERROR;
+    } 
+
+    // create a response message
+    aecp_get_stream_info_rsp_s response = {0};
+    memcpy(&response, msg, sizeof(aecp_get_stream_info_s));
+    response.common.header.msg_type = aecp_msg_type_aem_response;
+
+    // populate the response message
+    memcpy(&response.stream, &state->input_streams[index].stream, sizeof(aem_stream_summary_s));
+    memcpy(&response.vlan_id, &state->input_streams[index].vlan_id, 2);
+    if (is_output) {
+        memcpy(&response.stream, &state->output_streams[index].stream, sizeof(aem_stream_summary_s));
+        memcpy(&response.vlan_id, &state->output_streams[index].vlan_id, 2);
+    }
+
+    // calc control data length
+    uint16_t control_data_len = sizeof(aecp_get_stream_info_rsp_s) - AVTP_CDL_PREAMBLE_LEN;
+    avbinfo("control data length: %d", control_data_len);
+
+    // set the control data length
+    msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
+    msg->common.header.control_data_len = control_data_len & 0xFF;
+    
+    // send the response message
+    uint16_t msg_len = sizeof(aecp_get_stream_info_rsp_s);
+    ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, dest_addr);
+    if (ret < 0) {
+        avberr("send AECP get stream info response failed: %d", errno);
+    }
+    return ret;
+}
+
+/* Send AECP unsolicited notification get stream info response */
+// sends to all regitered notification recipients
+int avb_send_aecp_unsol_get_stream_info(
+    avb_state_s *state,
+    uint16_t index,
+    bool is_output 
+) {
   // not implemented
   return OK;
 }
 
-/* Send AECP response get stream info message */
-int avb_send_aecp_rsp_get_stream_info(avb_state_s *state, unique_id_t *target_id) {
+/* Send AECP command get stream info message */
+int avb_send_aecp_cmd_get_counters(
+    avb_state_s *state, 
+    unique_id_t *target_id
+) {
   // not implemented
   return OK;
 }
 
 /* Send AECP response get counters message */
+// may be sent as an unsolicited notification
 int avb_send_aecp_rsp_get_counters(
     avb_state_s *state,
-    aecp_message_u *msg,
+    aecp_get_counters_s *msg,
     eth_addr_t *dest_addr
+) {
+  // not implemented
+  return OK;
+}
+
+/* Send AECP unsolicited notification get stream info response */
+// sends to all regitered notification recipients
+int avb_send_aecp_unsol_get_counters(
+    avb_state_s *state,
+    aem_desc_type_t descriptor_type,
+    uint16_t index
 ) {
   // not implemented
   return OK;
@@ -262,9 +338,12 @@ int avb_send_aecp_rsp_read_descr_audio_unit(
 }
 
 /* Send AECP response get descriptor for stream input or output message */
+// TODO: change to use the input_streams and output_streams arrays from the state
+// also move the supported formats to the state
 int avb_send_aecp_rsp_read_descr_stream(
     avb_state_s *state,
     aecp_read_descriptor_rsp_s *msg,
+
     eth_addr_t *dest_addr,
     bool is_output
 ) {
@@ -778,7 +857,7 @@ int avb_send_aecp_rsp_read_descr_control(
     uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x01}; // INDENTIFY
     uint16_t values_offset = 104; // Required by spec
     uint16_t num_values = 1;
-    uint16_t signal_type = 1; // CONTROL_LINEAR_UINT8
+    uint16_t signal_type = aem_desc_type_invalid; // spec requires this to be invalid
     // milan compliant identify control values
     aem_identify_control_value_s control_values = {
         .values = {0, 255, 255, 0, 0},
@@ -1121,7 +1200,13 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg, eth_addr_t *src_ad
   
   /* Process AECP command */
   if (msg->header.msg_type == aecp_msg_type_aem_command) {
-    switch (msg->common.command_type) {
+    switch (msg->basic.aem.command_type) {
+      case aecp_cmd_code_register_unsol_notif:
+        return avb_process_aecp_cmd_register_unsol_notif(state, msg, src_addr);
+        break;
+      case aecp_cmd_code_deregister_unsol_notif:
+        return avb_process_aecp_cmd_deregister_unsol_notif(state, msg, src_addr);
+        break;
       case aecp_cmd_code_acquire_entity:
         return avb_process_aecp_cmd_acquire_entity(state, msg, src_addr);
         break;
@@ -1149,9 +1234,12 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg, eth_addr_t *src_ad
   }
   /* Process AECP response */
   else {
-    switch (msg->common.command_type) {
+    switch (msg->basic.aem.command_type) {
       case aecp_cmd_code_register_unsol_notif:
         return avb_process_aecp_rsp_register_unsol_notif(state, msg);
+        break;
+      case aecp_cmd_code_deregister_unsol_notif:
+        return avb_process_aecp_rsp_deregister_unsol_notif(state, msg);
         break;
       case aecp_cmd_code_entity_available:
         return avb_process_aecp_rsp_entity_available(state, msg);
@@ -1171,6 +1259,53 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg, eth_addr_t *src_ad
   }
 }
 
+/* Process AECP command register unsolicited notification */
+int avb_process_aecp_cmd_register_unsol_notif(avb_state_s *state, 
+                                        aecp_message_u *msg, 
+                                        eth_addr_t *src_addr) {
+  int ret = OK;
+  struct timespec ts;
+
+// create a response, copy the cmd message data and change the msg type and status
+  aecp_register_unsol_notif_s response;
+  memcpy(&response, msg, sizeof(aecp_register_unsol_notif_s));
+  response.common.header.msg_type = aecp_msg_type_aem_response;
+
+// send the response message  
+  uint16_t msg_len = sizeof(atdecc_header_s) + sizeof(aecp_acquire_entity_s);
+  ret = avb_net_send_to(state, ethertype_avtp, &response, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP register unsolicited notification response failed: %d", errno);
+  } else {
+    state->unsol_notif_enabled = true;
+  }
+  return ret;
+}
+
+
+/* Process AECP command deregister unsolicited notification */
+int avb_process_aecp_cmd_deregister_unsol_notif(avb_state_s *state, 
+                                        aecp_message_u *msg, 
+                                        eth_addr_t *src_addr) {
+  int ret = OK;
+  struct timespec ts;
+
+// create a response, copy the cmd message data and change the msg type and status
+  aecp_register_unsol_notif_s response;
+  memcpy(&response, msg, sizeof(aecp_register_unsol_notif_s));
+  response.common.header.msg_type = aecp_msg_type_aem_response;
+
+// send the response message  
+  uint16_t msg_len = sizeof(atdecc_header_s) + sizeof(aecp_acquire_entity_s);
+  ret = avb_net_send_to(state, ethertype_avtp, &response, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP deregister unsolicited notification response failed: %d", errno);
+  } else {
+    state->unsol_notif_enabled = false;
+  }
+  return ret;
+}
+
 /* Process AECP command acquire entity */
 int avb_process_aecp_cmd_acquire_entity(avb_state_s *state, 
                                         aecp_message_u *msg, 
@@ -1187,7 +1322,8 @@ int avb_process_aecp_cmd_acquire_entity(avb_state_s *state,
   // create a response, copy the cmd message data and change the msg type and status
   aecp_acquire_entity_s response;
   memset(&response, 0, sizeof(aecp_acquire_entity_s));
-  memcpy(&response.common, &msg->common, sizeof(aem_common_s));
+  memcpy(&response.common, &msg->common, sizeof(aecp_common_s));
+  memcpy(&response.aem, &msg->basic.aem, sizeof(aecp_common_aem_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
   response.common.header.status_valtime = aecp_status_not_supported; // status: not supported
 
@@ -1216,7 +1352,8 @@ int avb_process_aecp_cmd_lock_entity(avb_state_s *state,
   // create a response, copy the cmd message data and change the msg type and status
   aecp_lock_entity_s response;
   memset(&response, 0, sizeof(aecp_lock_entity_s));
-  memcpy(&response.common, &msg->common, sizeof(aem_common_s));
+  memcpy(&response.common, &msg->common, sizeof(aecp_common_s));
+  memcpy(&response.aem, &msg->basic.aem, sizeof(aecp_common_aem_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
   response.common.header.status_valtime = aecp_status_not_supported; // status: not supported
 
@@ -1245,7 +1382,8 @@ int avb_process_aecp_cmd_entity_available(avb_state_s *state,
   // create a response, copy the cmd message data and change the msg type
   aecp_entity_available_rsp_s response;
   memset(&response, 0, sizeof(aecp_entity_available_rsp_s));
-  memcpy(&response.common, &msg->common, sizeof(aem_common_s));
+  memcpy(&response.common, &msg->common, sizeof(aecp_common_s));
+  memcpy(&response.aem, &msg->basic.aem, sizeof(aecp_common_aem_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
 
   // send the response message
@@ -1273,7 +1411,8 @@ int avb_process_aecp_cmd_get_configuration(avb_state_s *state,
   // create a response, copy the cmd message data and change the msg type, add config index
   aecp_get_configuration_rsp_s response;
   memset(&response, 0, sizeof(aecp_get_configuration_rsp_s));
-  memcpy(&response.common, &msg->common, sizeof(aem_common_s));
+  memcpy(&response.common, &msg->common, sizeof(aecp_common_s));
+  memcpy(&response.aem, &msg->basic.aem, sizeof(aecp_common_aem_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
   size_t config_index = DEFAULT_CONFIG_INDEX;
   int_to_octets(&config_index, response.configuration_index, 2);
@@ -1464,7 +1603,12 @@ int avb_process_aecp_cmd_get_counters(avb_state_s *state,
 }
 
 /* Process AECP response register unsol notif */
-int avb_process_aecp_rsp_register_unsol_notif(avb_state_s *state, aecp_message_u *ms) {
+int avb_process_aecp_rsp_register_unsol_notif(avb_state_s *state, aecp_message_u *msg) {
+  return OK;
+}
+
+/* Process AECP response deregister unsol notif */
+int avb_process_aecp_rsp_deregister_unsol_notif(avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
@@ -1479,7 +1623,7 @@ int avb_process_aecp_rsp_controller_available(avb_state_s *state, aecp_message_u
 }
 
 /* Process AECP response get stream info 
- * this may be sent by the talker as an unsolicited notification
+ * this may be sent as an unsolicited notification
 */
 int avb_process_aecp_rsp_get_stream_info(avb_state_s *state, aecp_message_u *msg) {
   
@@ -1491,7 +1635,7 @@ int avb_process_aecp_rsp_get_stream_info(avb_state_s *state, aecp_message_u *msg
   }
   // update the talker stream info
   else {
-    memcpy(&state->talkers[index].stream, &msg->get_set_stream_info.stream, sizeof(aem_stream_summary_s));
+    memcpy(&state->talkers[index].stream, &msg->get_stream_info_rsp.stream, sizeof(aem_stream_summary_s));
     
     // if the connection is active, then send connect rx response to controller
     int index = avb_find_connection_by_id(state, &msg->common.target_entity_id, avb_entity_type_listener);

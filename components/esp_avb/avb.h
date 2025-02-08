@@ -71,6 +71,10 @@
 /* Maximum number of connections to remember */
 #define AVB_MAX_NUM_CONNECTIONS 2
 
+/* Maximum number of streams */
+#define AVB_MAX_NUM_INPUT_STREAMS 1
+#define AVB_MAX_NUM_OUTPUT_STREAMS 1
+
 /* Periodic message intervals */
 #define MSRP_DOMAIN_INTERVAL_MSEC 9000
 #define MVRP_VLAN_ID_INTERVAL_MSEC 10000
@@ -79,6 +83,8 @@
 #define ADP_ENTITY_AVAIL_INTERVAL_MSEC 5000
 #define MAAP_ANNOUNCE_INTERVAL_MSEC 10000
 #define PTP_STATUS_UPDATE_INTERVAL_MSEC 3000
+#define UNSOL_NOTIF_INTERVAL_MSEC 2000
+
 
 // Commonly used mac addresses
 #define BCAST_MAC_ADDR      (uint8_t[6]){ 0x91, 0xe0, 0xf0, 0x01, 0x00, 0x00 } // adp,acmp
@@ -98,7 +104,6 @@
 
 /* Maximum message length */
 #define AVB_MAX_MSG_LEN 600
-
 
 /* Preamble before the control data */
 #define AVTP_CDL_PREAMBLE_LEN 12
@@ -875,15 +880,22 @@ typedef struct {
                                            // four 8-bit numbers which, when read from MSB to LSB and noted as dot-separated 
                                            // decimal numbers, are the human-readable representation of the version. This 
                                            // field is set to 0 if the PAAD-AE has not passed any Milan
-} aecp_mvu_s; // 44 bytes
+} aecp_mvu_rsp_s; // 44 bytes
 
 /* AECP AEM common data */
 typedef struct {
   uint8_t  cr : 1;               // request for controller to perform an action
   uint8_t  unsolicited : 1;      // unsolicited notification
-  uint8_t  padding2 : 6;         // ignored part of command type
+  uint8_t  command_type_h : 6;   // high order bits of command type
   uint8_t  command_type;         // command type
 } aecp_common_aem_s; // 2 bytes
+
+/* AECP AEM basic command */
+// used for some commands
+typedef struct {
+  aecp_common_s     common;
+  aecp_common_aem_s aem;        
+} aecp_aem_basic_s; // 2 bytes
 
 /* AECP acquire entity command and response */
 typedef struct {
@@ -915,12 +927,9 @@ typedef struct {
 } aecp_lock_entity_s; // 40 bytes
 
 /* AECP entity available command
- * uses common AEM format with no command specific data
+ * uses common AEM basic command format
  */
-typedef struct {
-   aecp_common_s     common;
-   aecp_common_aem_s aem; 
-} aecp_entity_available_s; // 24 bytes
+typedef aecp_aem_basic_s aecp_entity_available_s; // 24 bytes
 
 /* AECP entity available response */
 typedef struct {
@@ -939,10 +948,7 @@ typedef struct {
 /* AECP controller available command and response
  * both use common format with no command specific data
  */
-typedef struct {
-   aecp_common_s     common;
-   aecp_common_aem_s aem; 
-} aecp_controller_available_s; // 24 bytes
+typedef aecp_aem_basic_s aecp_controller_available_s; // 24 bytes
 
 /* AECP read descriptor command */
 typedef struct {
@@ -968,10 +974,7 @@ typedef struct {
 /* AECP get configuration command 
  * uses common format with no command specific data
  */
-typedef struct {
-   aecp_common_s     common;
-   aecp_common_aem_s aem; 
-} aecp_get_configuration_s; // 24 bytes
+typedef aecp_aem_basic_s aecp_get_configuration_s; // 24 bytes
 
 /* AECP get configuration response */
 typedef struct {
@@ -1109,7 +1112,7 @@ typedef struct {
 } aem_stream_desc_s; 
 
 /* AEM stream summary 
- * used in get stream info response and talker list
+ * used in get stream info response and talker/listener list
  */
 typedef struct {
   aem_stream_info_flags_s flags;                       // stream descriptor flags
@@ -1124,16 +1127,16 @@ typedef struct {
 typedef struct {
   aecp_common_s     common;
   aecp_common_aem_s aem;
-  uint8_t       descriptor_type[2];  // descriptor type
-  uint8_t       descriptor_index[2]; // descriptor index
+  uint8_t           descriptor_type[2];  // descriptor type
+  uint8_t           descriptor_index[2]; // descriptor index
 } aecp_get_stream_info_s; // 28 bytes
 
-/* AECP set stream info command and response 
- * also used for get stream info response
+/* AECP set stream info command  
+ * also used for get/set stream info response
  */
 typedef struct {
-  aecp_common_s     common;
-  aecp_common_aem_s aem;
+  aecp_common_s        common;
+  aecp_common_aem_s    aem;
   uint8_t              descriptor_type[2];          // descriptor type
   uint8_t              descriptor_index[2];         // descriptor index
   aem_stream_summary_s stream;                      // stream summary
@@ -1145,7 +1148,15 @@ typedef struct {
   uint8_t              dest_port[2];                // stream destination port
   uint8_t              src_ip_addr[16];             // stream source IP address
   uint8_t              dest_ip_addr[16];            // stream destination IP address
-} aecp_get_set_stream_info_s; // 108 bytes
+} aecp_set_stream_info_s; // 108 bytes
+
+/* AECP get stream info response */
+// same as set stream info command
+typedef aecp_set_stream_info_s aecp_get_stream_info_rsp_s;
+
+/* AECP set stream info response */
+// same as set stream info command
+typedef aecp_set_stream_info_s aecp_set_stream_info_rsp_s;
 
 /* AEM Entity counters valid flags */
 typedef struct {
@@ -1337,65 +1348,66 @@ typedef struct {
 } aem_clock_domain_counters_s; // 128 bytes
 
 /* AEM counters valid flags union */
-
 typedef union {
-  aem_entity_counters_val_s     entity_counters_val;
-  aem_stream_in_counters_val_s  stream_in_counters_val;
-  aem_stream_out_counters_val_s stream_out_counters_val;
+  aem_entity_counters_val_s        entity_counters_val;
+  aem_stream_in_counters_val_s     stream_in_counters_val;
+  aem_stream_out_counters_val_s    stream_out_counters_val;
   aem_avb_interface_counters_val_s avb_interface_counters_val;
-  aem_clock_domain_counters_val_s clock_domain_counters_val;
+  aem_clock_domain_counters_val_s  clock_domain_counters_val;
 } aem_counters_val_u; // 4 bytes
 
 /* AEM counters block union */
 typedef union {
-  aem_entity_counters_s     entity_counters;
-  aem_stream_in_counters_s  stream_in_counters;
-  aem_stream_out_counters_s stream_out_counters;
+  aem_entity_counters_s        entity_counters;
+  aem_stream_in_counters_s     stream_in_counters;
+  aem_stream_out_counters_s    stream_out_counters;
   aem_avb_interface_counters_s avb_interface_counters;
-  aem_clock_domain_counters_s clock_domain_counters;
+  aem_clock_domain_counters_s  clock_domain_counters;
 } aem_counters_block_u; // 128 bytes
 
 /* AECP get counters command uses basic command format */
 typedef struct {
   aecp_common_s     common;
   aecp_common_aem_s aem;
-  uint8_t       descriptor_type[2];  // descriptor type
-  uint8_t       descriptor_index[2]; // descriptor index
+  uint8_t           descriptor_type[2];  // descriptor type
+  uint8_t           descriptor_index[2]; // descriptor index
 } aecp_get_counters_s; // 28 bytes
 
 /* AECP get counters response */
 typedef struct {
   aecp_common_s     common;
   aecp_common_aem_s aem;
-  uint8_t                  descriptor_type[2];  // descriptor type
-  uint8_t                  descriptor_index[2]; // descriptor index
-  aem_counters_val_u       counters_valid;      // counters valid
-  aem_counters_block_u     counters_block;      // counters block
+  uint8_t               descriptor_type[2];  // descriptor type
+  uint8_t               descriptor_index[2]; // descriptor index
+  aem_counters_val_u    counters_valid;      // counters valid
+  aem_counters_block_u  counters_block;      // counters block
 } aecp_get_counters_rsp_s; // 160 bytes
 
-/* AECP register unsolicited notification command and response */
+/* AECP register unsol flags */
 typedef struct {
-  aecp_common_s     common;
-  aecp_common_aem_s aem;
-  uint8_t      descriptor_type[2]; // descriptor type
-  uint8_t      reserved1[3];       // reserved for future use
-  uint8_t      time_limited : 1;   // The registration will automatically timeout and be removed if it is not renewed.
-  uint8_t      reserved2 : 7;      // Reserved for future use
+  uint8_t  reserved1[3];
+  uint8_t  time_limited : 1;
+  uint8_t  reserved2 : 7;
+} aecp_register_unsol_flags_s; // 4 bytes
+
+/* AECP register unsolicited notification command and response */
+
+typedef struct {
+  aecp_common_s      common;
+  aecp_common_aem_s  aem;
+  aecp_register_unsol_flags_s  flags;
 } aecp_register_unsol_notif_s; // 28 bytes
 
 /* AECP deregister unsolicited notification command and response 
  * uses common format with no command specific data
  */
-typedef struct {
-   aecp_common_s     common;
-   aecp_common_aem_s aem; 
-} aecp_deregister_unsol_notif_s; // 24 bytes
+typedef aecp_aem_basic_s aecp_deregister_unsol_notif_s; // 24 bytes
 
 /* AECP message union */
 typedef union {
     atdecc_header_s               header;
+    aecp_aem_basic_s              basic;
     aecp_common_s                 common;
-    aecp_common_aem_s             aem; 
     aecp_acquire_entity_s         acquire_entity;
     aecp_lock_entity_s            lock_entity;
     aecp_entity_available_s       entity_available;
@@ -1403,7 +1415,9 @@ typedef union {
     aecp_get_configuration_s      get_configuration;
     aecp_read_descriptor_s        read_descriptor;
     aecp_get_stream_info_s        get_stream_info;
-    aecp_get_set_stream_info_s    get_set_stream_info;
+    aecp_get_stream_info_rsp_s    get_stream_info_rsp;
+    aecp_set_stream_info_s        set_stream_info;     // not supporte
+    aecp_set_stream_info_rsp_s    set_stream_info_rsp; // not supported
     aecp_get_counters_s           get_counters;
     aecp_get_counters_rsp_s       get_counters_rsp;
     aecp_register_unsol_notif_s   register_unsol_notif;
@@ -1411,12 +1425,12 @@ typedef union {
     aecp_addr_access_s            addr_access;
     aecp_mvu_s                    mvu;
     uint8_t                       raw[AVB_MAX_MSG_LEN];
-} aecp_message_u; // 36 bytes
+} aecp_message_u;
 
 /* AEM configuration descriptor counts */
 typedef struct {
-    uint8_t descriptor_type[2];  
-    uint8_t count[2];
+    uint8_t  descriptor_type[2];  
+    uint8_t  count[2];
 } aem_config_desc_count_s; // 4 bytes
 
 /* AEM descriptors */
@@ -1710,7 +1724,7 @@ typedef struct {
   bool        ready; // status
 } avb_controller_s;
 
-/* Connection */
+/* Stream */
 typedef struct {
   uint8_t              vlan_id[2]; // vlan ID
   eth_addr_t           dest_addr; // stream destination address
@@ -1723,7 +1737,10 @@ typedef struct {
   struct timespec      started; // last start timestamp
   int64_t              accumulated_latency; // observed latency
   int64_t              accumulated_jitter; // observed jitter
-} avb_connection_s;
+} avb_stream_s;
+
+/* Connection */
+typedef avb_stream_s avb_connection_s;
 
 /* Carrier structure for querying AVB status */
 typedef struct {
@@ -1733,6 +1750,7 @@ typedef struct {
 
 /* Main AVB state storage */
 typedef struct {
+
   /* AVB configuration */
   avb_config_s config;
 
@@ -1751,6 +1769,12 @@ typedef struct {
   /* AVB interface */
   // only one interface is supported currently
   aem_avb_interface_desc_s avb_interface;
+
+  /* AVB streams */
+  avb_stream_s input_streams[AVB_MAX_NUM_INPUT_STREAMS];
+  avb_stream_s output_streams[AVB_MAX_NUM_OUTPUT_STREAMS];
+  size_t num_input_streams;
+  size_t num_output_streams;
 
   /* Endpoints that we are aware of */
   avb_talker_s talkers[AVB_MAX_NUM_TALKERS];
@@ -1776,7 +1800,6 @@ typedef struct {
   avb_connection_s connections[AVB_MAX_NUM_CONNECTIONS];
   size_t num_connections;
 
-
   /* Latest received packet and its timestamp (CLOCK_REALTIME) 
    * 3 elements, 1 for each protocol (AVTP, MSRP, MVRP)
    */
@@ -1797,6 +1820,7 @@ typedef struct {
   struct timespec last_transmitted_msrp_listener_ready;
   struct timespec last_transmitted_maap_announce;
   struct timespec last_ptp_status_update;
+  struct timespec last_transmitted_unsol_notif;
 
   /* Sequence IDs for outbound ADP messages */
   uint32_t adp_entity_avail_seq_id;
@@ -1823,7 +1847,6 @@ typedef struct {
 } avb_state_s;
 
 /* Stream Input params */
-
 struct stream_in_params_s {
   i2s_chan_handle_t i2s_tx_handle; // handle to i2s tx channel
   uint16_t buffer_size; // buffer size
@@ -1921,19 +1944,30 @@ int avb_send_aecp_cmd_get_stream_info(
     avb_state_s *state, 
     unique_id_t *target_id
 );
+int avb_send_aecp_rsp_get_stream_info(
+    avb_state_s *state, 
+    aecp_get_stream_info_s *msg,
+    eth_addr_t *dest_addr
+);
+int avb_send_aecp_unsol_get_stream_info(
+    avb_state_s *state,
+    uint16_t index,
+    bool is_output
+);
 int avb_send_aecp_cmd_get_counters(
     avb_state_s *state, 
     unique_id_t *target_id
 );
-int avb_send_aecp_rsp_get_stream_info(
-    avb_state_s *state, 
-    unique_id_t *target_id
-); // as unsolicited notification
 int avb_send_aecp_rsp_get_counters(
     avb_state_s *state,
-    aecp_message_u *msg,
+    aecp_get_counters_s *msg,
     eth_addr_t *dest_addr
-); // as unsolicited notification
+); 
+int avb_send_aecp_unsol_get_counters(
+    avb_state_s *state,
+    aem_desc_type_t descriptor_type,
+    uint16_t index
+);
 int avb_send_aecp_rsp_read_descr_entity(
     avb_state_s *state, 
     aecp_read_descriptor_rsp_s *msg,
@@ -2107,6 +2141,16 @@ int avb_process_aecp_cmd_entity_available(
     aecp_message_u *msg,
     eth_addr_t *src_addr
 );
+int avb_process_aecp_cmd_register_unsol_notif(
+    avb_state_s *state,
+    aecp_message_u *msg,
+    eth_addr_t *src_addr
+);
+int avb_process_aecp_cmd_deregister_unsol_notif(
+    avb_state_s *state,
+    aecp_message_u *msg,
+    eth_addr_t *src_addr
+);
 int avb_process_aecp_cmd_lock_entity(
     avb_state_s *state,
     aecp_message_u *msg,
@@ -2138,6 +2182,10 @@ int avb_process_aecp_cmd_get_counters(
     eth_addr_t *src_addr
 );
 int avb_process_aecp_rsp_register_unsol_notif(
+    avb_state_s *state,
+    aecp_message_u *msg
+);
+int avb_process_aecp_rsp_deregister_unsol_notif(
     avb_state_s *state,
     aecp_message_u *msg
 );
