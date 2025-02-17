@@ -294,9 +294,20 @@ int32_t ppm_to_scaled(double ppm_value) {
     return (int32_t)((ppm_value / 1e6) * pow(2, 41));
 }
 
+// Convert a timespec to milliseconds
 int64_t timespec_to_ms(const struct timespec *ts)
 {
   return ts->tv_sec * MSEC_PER_SEC + (ts->tv_nsec / NSEC_PER_MSEC);
+}
+
+// Function to add milliseconds to a timeval
+void timeval_add_ms(struct timeval *tv, int ms) {
+    tv->tv_sec += ms / 1000;
+    tv->tv_usec += (ms % 1000) * 1000;
+    if (tv->tv_usec >= 1000000) {
+        tv->tv_sec++;
+        tv->tv_usec -= 1000000;
+    }
 }
 
 /* Convert three integers to a 3PE value */

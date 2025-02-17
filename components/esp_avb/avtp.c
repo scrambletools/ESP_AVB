@@ -82,7 +82,9 @@ int avb_send_msrp_domain(avb_state_s *state) {
 /* Send MSRP talker advertise message with appropriate event */
 int avb_send_msrp_talker(
     avb_state_s *state, 
-    msrp_attr_event_t event, 
+    msrp_attr_event_t attr_event, 
+    bool leave_all,
+    unique_id_t stream_id,
     bool is_failed
 ) {
   msrp_talker_message_u msg;
@@ -90,8 +92,6 @@ int avb_send_msrp_talker(
   int ret;
   int vlan_id = CONFIG_ESP_AVB_VLAN_ID;
   int attr_list_len;
-  uint8_t stream_id[UNIQUE_ID_LEN];
-  stream_id_from_mac(&state->internal_mac_addr, stream_id, 1); // only one stream
   memset(&msg, 0, sizeof(msg));
 
   // Populate the message
@@ -105,9 +105,9 @@ int avb_send_msrp_talker(
     attr_list_len = 38; // includes vechead, attr_event and vec end mark
   }
   int_to_octets(&attr_list_len, msg.header.attr_list_len, 2);
-  msg.header.vechead_leaveall = 0;
+  msg.header.vechead_leaveall = leave_all;
   msg.header.vechead_num_vals = 1;
-  memcpy(msg.talker.info.stream_id, stream_id, 8);
+  memcpy(msg.talker.info.stream_id, stream_id, UNIQUE_ID_LEN);
   memcpy(msg.talker.info.stream_dest_addr, &MAAP_MCAST_MAC_ADDR, 6);
   int_to_octets(&vlan_id, msg.talker.info.vlan_id, 2);
   int tspec_max_frame_size = 1024;
@@ -121,10 +121,10 @@ int avb_send_msrp_talker(
   if (is_failed) {
     memcpy(msg.talker_failed.failure_bridge_id, &EMPTY_ID, UNIQUE_ID_LEN);
     msg.talker_failed.failure_code = 0;
-    msg.talker_failed.event_data[0] = int_to_3pe(event, 0, 0);
+    msg.talker_failed.event_data[0] = int_to_3pe(attr_event, 0, 0);
   }
   else {
-    msg.talker.event_data[0] = int_to_3pe(event, 0, 0);
+    msg.talker.event_data[0] = int_to_3pe(attr_event, 0, 0);
   }
 
   // Create an MSRP message buffer
@@ -145,23 +145,27 @@ int avb_send_msrp_talker(
 int avb_send_msrp_listener(
     avb_state_s *state, 
     msrp_attr_event_t attr_event, 
-    msrp_listener_event_t listener_event
+    msrp_listener_event_t listener_event,
+    bool leave_all,
+    unique_id_t stream_id
 ) {
   msrp_listener_message_s msg;
   struct timespec ts;
   int ret; 
-  uint8_t stream_id[8] = {0x14, 0x98, 0x77, 0x40, 0xc7, 0x88, 0x00, 0x00};
   memset(&msg, 0, sizeof(msg));
+  if (stream_id == NULL) {
+    stream_id = EMPTY_ID;
+  }
 
   // Populate the message
   msg.header.attr_type = msrp_attr_type_listener;
   msg.header.attr_len = 8;
   int attr_list_len = 14; // includes vechead, attr_event and vec end mark
   int_to_octets(&attr_list_len, msg.header.attr_list_len, 2);
-  msg.header.vechead_leaveall = 0;
+  msg.header.vechead_leaveall = leave_all;
   msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1; // only attribute event counts
-  memcpy(msg.stream_id, stream_id, 8);
+  memcpy(msg.stream_id, stream_id, UNIQUE_ID_LEN);
   msg.event_decl_data[0].event = int_to_3pe(attr_event, 0, 0);
   msg.event_decl_data[1].declaration.event1 = listener_event;
 
@@ -176,11 +180,6 @@ int avb_send_msrp_listener(
   if (ret < 0) {
     avberr("send MSRP Listener failed: %d", errno);
   }
-
-  // create a test connection and send a connect tx command for listener testing
-  //unique_id_t test_talker_id = {0x15, 0x98, 0x77, 0x40, 0xc7, 0x88, 0x80, 0x00};
-  //avb_send_acmp_connect_tx_command(state, &state->own_entity.summary.entity_id, &test_talker_id);
-
   return ret;
 }
 
@@ -266,22 +265,22 @@ int avb_process_msrp_listener(
 
 /* Process received AVTP IEC 61883 message */
 int avb_process_iec_61883(avb_state_s *state, iec_61883_6_message_s *msg) {
-  avbinfo("Got an AVTP IEC 61883 message");
+  //avbinfo("Got an AVTP IEC 61883 message");
 
   // check if the stream id is in the connection list and the stream is not yet active
-  int index = avb_find_connection_by_id(state, &msg->stream_id, avb_entity_type_listener);
-  if (index >= 0 && !state->connections[index].active) {
-    avbinfo("Stream id found in connection list");
-    // set the stream as active to avoid duplicate processing
-    state->connections[index].active = true;
-    // check if the connection has stream format info
-    if (state->connections[index].stream.stream_format.am824.fdf_evt == 0) {
+//   int index = avb_find_connection_by_id(state, &msg->stream_id, avb_entity_type_listener);
+//   if (index >= 0 && !state->connections[index].active) {
+//     avbinfo("Stream id found in connection list");
+//     // set the stream as active to avoid duplicate processing
+//     state->connections[index].active = true;
+//     // check if the connection has stream format info
+//     if (state->connections[index].stream.stream_format.am824.fdf_evt == 0) {
       // set the stream format in the connection
     //   state->connections[index].stream.stream_format.format = msg->format;
     //   state->connections[index].stream.stream_format.sample_rate = msg->sample_rate;
     //   state->connections[index].stream.stream_format.chan_per_frame = msg->chan_per_frame;
     //   state->connections[index].stream.stream_format.bit_depth = msg->bit_depth;
-    }
+    //}
     // if the stream format, sample rate or bit depth is not supported, then ignore the message
     // if (!in_array_of_int(state->connections[index].stream.stream_format.format, (int *)supported_aaf_formats, ARRAY_SIZE(supported_aaf_formats)) ||
     //     !in_array_of_int(state->connections[index].stream.stream_format.sample_rate, (int *)supported_sample_rates, ARRAY_SIZE(supported_sample_rates)) ||
@@ -290,22 +289,22 @@ int avb_process_iec_61883(avb_state_s *state, iec_61883_6_message_s *msg) {
     //   return ERROR;
     // }
     // start the stream input task
-    avb_start_stream_in(state, &msg->stream_id);
-  }
+   //avb_start_stream_in(state, &msg->stream_id);
+  //}
   // not implemented
   return OK;
 }
 
 /* Process received AVTP AAF PCM message */
 int avb_process_aaf(avb_state_s *state, aaf_pcm_message_s *msg) {
-  avbinfo("Got an AVTP AAF PCM message");
+  //avbinfo("Got an AVTP AAF PCM message");
 
   // check if the stream id is in the connection list and the stream is not yet active
-  int index = avb_find_connection_by_id(state, &msg->stream_id, avb_entity_type_listener);
-  if (index >= 0 && !state->connections[index].active) {
-    avbinfo("Stream id found in connection list");
-    // set the stream as active to avoid duplicate processing
-    state->connections[index].active = true;
+//   int index = avb_find_connection_by_id(state, &msg->stream_id, avb_entity_type_listener);
+//   if (index >= 0 && !state->connections[index].active) {
+//     avbinfo("Stream id found in connection list");
+//     // set the stream as active to avoid duplicate processing
+//     state->connections[index].active = true;
     // check if the connection has stream format info
     // if (state->connections[index].stream.stream_format.bit_depth == 0) {
     //   // set the stream format in the connection
@@ -322,8 +321,8 @@ int avb_process_aaf(avb_state_s *state, aaf_pcm_message_s *msg) {
     //   return ERROR;
     // }
     // start the stream input task
-    avb_start_stream_in(state, &msg->stream_id);
-  }
+    //avb_start_stream_in(state, &msg->stream_id);
+  //}
   // not implemented
   return OK;
 }

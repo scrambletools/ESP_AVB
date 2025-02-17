@@ -108,7 +108,7 @@ int avb_send_aecp_rsp_get_stream_info(
     (!is_output && index >= state->num_input_streams)) {
         avberr("stream descriptor index out of range: %d", index);
         ret = ERROR;
-    } 
+    }
 
     // create a response message
     aecp_get_stream_info_rsp_s response = {0};
@@ -116,16 +116,25 @@ int avb_send_aecp_rsp_get_stream_info(
     response.common.header.msg_type = aecp_msg_type_aem_response;
 
     // populate the response message
-    memcpy(&response.stream, &state->input_streams[index].stream, sizeof(aem_stream_summary_s));
+    memcpy(&response.stream.flags, &state->input_streams[index].stream_info_flags, sizeof(aem_stream_info_flags_s));
+    memcpy(&response.stream.stream_format, &state->input_streams[index].stream_format, sizeof(avtp_stream_format_s));
+    memcpy(&response.stream.stream_id, &state->input_streams[index].stream_id, UNIQUE_ID_LEN);
+    memcpy(&response.stream.msrp_accumulated_latency, &state->input_streams[index].msrp_accumulated_latency, 4);
+    memcpy(&response.stream.dest_addr, &state->input_streams[index].stream_dest_addr, sizeof(eth_addr_t));
+    memcpy(&response.stream.msrp_failure_code, &state->input_streams[index].msrp_failure_code, 2);
     memcpy(&response.vlan_id, &state->input_streams[index].vlan_id, 2);
     if (is_output) {
-        memcpy(&response.stream, &state->output_streams[index].stream, sizeof(aem_stream_summary_s));
+        memcpy(&response.stream.flags, &state->output_streams[index].stream_info_flags, sizeof(aem_stream_info_flags_s));
+        memcpy(&response.stream.stream_format, &state->output_streams[index].stream_format, sizeof(avtp_stream_format_s));
+        memcpy(&response.stream.stream_id, &state->output_streams[index].stream_id, UNIQUE_ID_LEN);
+        memcpy(&response.stream.msrp_accumulated_latency, &state->output_streams[index].msrp_accumulated_latency, 4);
+        memcpy(&response.stream.dest_addr, &state->output_streams[index].stream_dest_addr, sizeof(eth_addr_t));
+        memcpy(&response.stream.msrp_failure_code, &state->output_streams[index].msrp_failure_code, 2);
         memcpy(&response.vlan_id, &state->output_streams[index].vlan_id, 2);
     }
 
     // calc control data length
     uint16_t control_data_len = sizeof(aecp_get_stream_info_rsp_s) - AVTP_CDL_PREAMBLE_LEN;
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -228,45 +237,48 @@ int avb_send_aecp_rsp_read_descr_configuration(
         - sizeof(atdecc_header_s) - AEM_MAX_DESC_LEN;
 
     // create a configuration descriptor
-    aem_config_desc_s config_desc;
-    memset(&config_desc, 0, sizeof(aem_config_desc_s));
-    
-    // These are the top level descriptors that will be listed in the descriptor counts
-    // Eventually, the entire entity model should probably be stored in the state
-    uint16_t descriptors[] = {
-        aem_desc_type_audio_unit,
-        aem_desc_type_stream_input,
-        aem_desc_type_stream_output,
-        aem_desc_type_avb_interface,
-        aem_desc_type_clock_source,
-        aem_desc_type_memory_object,
-        aem_desc_type_locale,
-        aem_desc_type_control,
-        aem_desc_type_clock_domain
-    };
-    uint16_t descriptor_counts_count = sizeof(descriptors) / sizeof(descriptors[0]);
-    int_to_octets(&descriptor_counts_count, config_desc.descriptor_counts_count, 2);
-    uint16_t offset = 74; // As defined in section 7.2.2
-    int_to_octets(&offset, config_desc.descriptor_counts_offset, 2);
-    
-    // add the configuration descriptors
-    for (int i = 0; i < descriptor_counts_count; i++) {
-        aem_config_desc_count_s desc_count;
-        memset(&desc_count, 0, sizeof(aem_config_desc_count_s));
-        int_to_octets(&descriptors[i], desc_count.descriptor_type, 2);
-        size_t count = AEM_MAX_DESC_COUNT;
-        if (descriptors[i] == aem_desc_type_strings) {
-            count = 2;
-        }
-        int_to_octets(&count, desc_count.count, 2);
-        memcpy(&config_desc.descriptor_counts[i], &desc_count, 4);
-    }
+    aem_config_desc_s config_desc = {0};
+
     // give it a name
     // 3bits for base_strings offset, 3bits for index in strings desc
     uint16_t localized_description = 0;
     int_to_octets(&localized_description, config_desc.localized_description, 2);
-
-    // insert the descriptor into the response message
+    
+    // These are the top level descriptors that will be listed in the descriptor counts
+    // Eventually, the entire entity model should probably be stored in the state
+    uint16_t descriptor_counts_count = 8; // assume at least talker or listener
+    if (state->config.listener && state->config.talker) {
+        descriptor_counts_count++; // if both talker and listener, then one more
+    }
+    uint16_t descriptors[descriptor_counts_count];
+    int i = 0;
+    descriptors[i++] = aem_desc_type_audio_unit;
+    if (state->config.listener) {
+        descriptors[i++] = aem_desc_type_stream_input;
+    }
+    if (state->config.talker) {
+        descriptors[i++] = aem_desc_type_stream_output;
+    }
+    descriptors[i++] = aem_desc_type_avb_interface;
+    descriptors[i++] = aem_desc_type_clock_source;
+    descriptors[i++] = aem_desc_type_memory_object;
+    descriptors[i++] = aem_desc_type_locale;
+    descriptors[i++] = aem_desc_type_control;
+    descriptors[i++] = aem_desc_type_clock_domain;
+    
+    // build the descriptor
+    for (int i = 0; i < descriptor_counts_count; i++) {
+        aem_config_desc_count_s desc_count = {0};
+        int_to_octets(&descriptors[i], desc_count.descriptor_type, 2);
+        size_t count = AEM_MAX_DESC_COUNT;
+        int_to_octets(&count, desc_count.count, 2);
+        memcpy(&config_desc.descriptor_counts[i], &desc_count, sizeof(aem_config_desc_count_s));
+    }
+    
+    // insert the descriptor data into the response message
+    int_to_octets(&descriptor_counts_count, config_desc.descriptor_counts_count, 2);
+    uint16_t offset = 74; // As defined in section 7.2.2
+    int_to_octets(&offset, config_desc.descriptor_counts_offset, 2);
     memcpy(msg->descriptor_data, &config_desc, sizeof(aem_config_desc_s));
     control_data_len += sizeof(aem_config_desc_s) + 4  // 4 bytes for type and index
         - (4 * (AEM_MAX_NUM_DESC - descriptor_counts_count)); // adjust for the descriptor counts
@@ -308,13 +320,16 @@ int avb_send_aecp_rsp_read_descr_audio_unit(
     }
 
     // create an audio unit descriptor
-    aem_audio_unit_desc_s descriptor;
-    memset(&descriptor, 0, sizeof(aem_audio_unit_desc_s));
+    aem_audio_unit_desc_s descriptor = {0};
 
     // populate the audio unit descriptor
     int_to_octets(&localized_description, descriptor.localized_description, 2);
-    int_to_octets(&num_input_ports, descriptor.num_stream_input_ports, 2);
-    int_to_octets(&num_output_ports, descriptor.num_stream_output_ports, 2);
+    if (state->config.listener) {
+        int_to_octets(&num_input_ports, descriptor.num_stream_input_ports, 2);
+    }
+    if (state->config.talker) {
+        int_to_octets(&num_output_ports, descriptor.num_stream_output_ports, 2);
+    }
     int_to_octets(&sampling_rate, descriptor.current_sampling_rate, 4);
     int_to_octets(&offset, descriptor.sampling_rate_offset, 2);
     int_to_octets(&sampling_rates_count, descriptor.sampling_rates_count, 2); 
@@ -345,23 +360,23 @@ int avb_send_aecp_rsp_read_descr_audio_unit(
 int avb_send_aecp_rsp_read_descr_stream(
     avb_state_s *state,
     aecp_read_descriptor_rsp_s *msg,
-
     eth_addr_t *dest_addr,
     bool is_output
 ) {
     int ret = OK;
     struct timespec ts;
+    uint16_t index = octets_to_uint(msg->descriptor_index, 2);
 
     // data for the stream input descriptor
     uint16_t localized_description = 4;  // see below for strings
+    avtp_stream_format_s current_format = state->input_streams[index].stream_format;
     if (is_output) {
         localized_description = 5;
+        current_format = state->output_streams[index].stream_format;
     }
     aem_stream_flags_s stream_flags = {0};
     stream_flags.class_a = true;
     stream_flags.class_b = true;
-
-    avtp_stream_format_am824_s current_format = AVB_DEFAULT_FORMAT(cip_sfc_sample_rate_48k);
     
     // print the current format
     // char current_format_str[200];
@@ -408,7 +423,6 @@ int avb_send_aecp_rsp_read_descr_stream(
         + sizeof(aem_stream_desc_s) + 4  // add the stream descriptor size including the type and index
         - (AEM_MAX_NUM_FORMATS - number_of_formats) * sizeof(avtp_stream_format_s) // resize for actual number of formats
         + 8; // for funzies
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -477,7 +491,6 @@ int avb_send_aecp_rsp_read_descr_avb_interface(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_avb_interface_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -520,7 +533,6 @@ int avb_send_aecp_rsp_read_descr_clock_source(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_clock_source_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -565,7 +577,6 @@ int avb_send_aecp_rsp_read_descr_memory_obj(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_memory_object_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -608,7 +619,6 @@ int avb_send_aecp_rsp_read_descr_locale(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_locale_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -676,7 +686,6 @@ int avb_send_aecp_rsp_read_descr_strings(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_strings_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -723,7 +732,6 @@ int avb_send_aecp_rsp_read_descr_stream_port(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_stream_port_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -775,7 +783,6 @@ int avb_send_aecp_rsp_read_descr_audio_cluster(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_audio_cluster_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -827,7 +834,6 @@ int avb_send_aecp_rsp_read_descr_audio_map(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_audio_map_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -886,7 +892,6 @@ int avb_send_aecp_rsp_read_descr_control(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_control_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -932,7 +937,6 @@ int avb_send_aecp_rsp_read_descr_clock_domain(
     // calc control data length
     uint16_t control_data_len = AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
         + sizeof(aem_clock_domain_desc_s) + 4;  // add the stream descriptor size including the type and index
-    avbinfo("control data length: %d", control_data_len);
 
     // set the control data length
     msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -945,142 +949,6 @@ int avb_send_aecp_rsp_read_descr_clock_domain(
         avberr("send AECP Read Descriptor response failed: %d", errno);
     }
     return ret;
-}
-
-/* Send ACMP connect rx command (acting as controller) */
-int avb_send_acmp_connect_rx_command(avb_state_s *state, 
-                                     unique_id_t *talker_id,
-                                     unique_id_t *listener_id) {
-  // not implemented
-  return OK;
-}
-
-/* Send ACMP connect tx command (acting as listener) */
-int avb_send_acmp_connect_tx_command(avb_state_s *state, 
-                                     unique_id_t *controller_id, 
-                                     unique_id_t *talker_id) {
-  acmp_message_s msg;
-  struct timespec ts;
-  int ret;
-  size_t body_size = 84; // ACMP message body length (IEEE 1722.1-2021 section 8.2.1)
-  memset(&msg, 0, sizeof(msg));
-
-  // Populate the message
-  msg.header.subtype = avtp_subtype_acmp;
-  msg.header.msg_type = acmp_msg_type_connect_tx_command;
-  msg.header.control_data_len = body_size;
-  memcpy(msg.controller_entity_id, controller_id, UNIQUE_ID_LEN);
-  memcpy(msg.talker_entity_id, talker_id, UNIQUE_ID_LEN);
-  memcpy(msg.listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
-
-  // Get the talker uid (listener uid will be 0)
-  eth_addr_t talker_addr;
-  int index = avb_find_entity_by_id(state, talker_id, avb_entity_type_talker);
-  memcpy(msg.talker_uid, state->talkers[index].talker_uid, 2);
-  memcpy(talker_addr, state->talkers[index].mac_addr, ETH_ADDR_LEN);
-
-  // send the message 
-  uint16_t msg_len = 4 + body_size; // header + body
-  ret = avb_net_send(state, ethertype_avtp, &msg, msg_len, &ts);
-  if (ret < 0) {
-    avberr("send ACMP Connect Tx Command failed: %d", errno);
-  }
-  avbinfo("sent ACMP Connect Tx Command");
-  return ret;
-}
-
-/* Send ACMP disconnect rx command (acting as controller) */
-int avb_send_acmp_disconnect_rx_command(avb_state_s *state, avb_connection_s *connection) {
-  // not implemented
-  return OK;
-}
-
-/* Send ACMP disconnect tx command (acting as listener) */
-int avb_send_acmp_disconnect_tx_command(avb_state_s *state, avb_connection_s *connection) {
-  // not implemented
-  return OK;
-}
-
-/* Send ACMP connect rx response */
-int avb_send_acmp_connect_rx_response(avb_state_s *state, avb_connection_s *connection) {
-  
-  // take the command and update the stream id, dest addr and connection count
-  // TBD
-  
-  acmp_message_s msg;
-  struct timespec ts;
-  int ret;
-  size_t body_size = 84; // ACMP message body length (IEEE 1722.1-2021 section 8.2.1)
-  memset(&msg, 0, sizeof(msg));
-
-  // Populate the message
-  msg.header.subtype = avtp_subtype_acmp;
-  msg.header.msg_type = acmp_msg_type_connect_rx_response;
-  msg.header.status_valtime = 0; // status: success
-  msg.header.control_data_len = body_size;
-  memcpy(msg.controller_entity_id, connection->controller_id, UNIQUE_ID_LEN);
-  memcpy(msg.talker_entity_id, connection->talker_id, UNIQUE_ID_LEN);
-  memcpy(msg.listener_entity_id, connection->listener_id, UNIQUE_ID_LEN);
-
-  // get the talker and listener uids
-  int index = avb_find_entity_by_id(state, &connection->talker_id, avb_entity_type_talker);
-  memcpy(msg.talker_uid, state->talkers[index].talker_uid, 2);
-  index = avb_find_entity_by_id(state, &connection->listener_id, avb_entity_type_listener);
-  memcpy(msg.listener_uid, state->listeners[index].listener_uid, 2); 
-
-  // send the message 
-  uint16_t msg_len = 4 + body_size; // header + body
-  ret = avb_net_send(state, ethertype_avtp, &msg, msg_len, &ts);
-  if (ret < 0) {
-      avberr("send ACMP Connect Rx Response failed: %d", errno);
-  }
-  avbinfo("sent ACMP Connect Rx Response");
-  return ret;
-}
-
-/* Send ACMP connect tx response (acting as talker) */
-int avb_send_acmp_connect_tx_response(avb_state_s *state, avb_connection_s *connection) {
-  acmp_message_s msg;
-  struct timespec ts;
-  int ret;
-  size_t body_size = 84; // ACMP message body length (IEEE 1722.1-2021 section 8.2.1)
-  memset(&msg, 0, sizeof(msg));
-
-  // Populate the message
-  msg.header.subtype = avtp_subtype_acmp;
-  msg.header.msg_type = acmp_msg_type_connect_tx_response;
-  msg.header.status_valtime = 0; // status: success
-  msg.header.control_data_len = body_size;
-  memcpy(msg.controller_entity_id, connection->controller_id, UNIQUE_ID_LEN);
-  memcpy(msg.talker_entity_id, connection->talker_id, UNIQUE_ID_LEN);
-  memcpy(msg.listener_entity_id, connection->listener_id, UNIQUE_ID_LEN);
-
-  // get the talker and listener uids
-  int index = avb_find_entity_by_id(state, &connection->talker_id, avb_entity_type_talker);
-  memcpy(msg.talker_uid, state->talkers[index].talker_uid, 2);
-  index = avb_find_entity_by_id(state, &connection->listener_id, avb_entity_type_listener);
-  memcpy(msg.listener_uid, state->listeners[index].listener_uid, 2);
-
-  // send the message 
-  uint16_t msg_len = 4 + body_size; // header + body
-  ret = avb_net_send(state, ethertype_avtp, &msg, msg_len, &ts);
-  if (ret < 0) {
-      avberr("send ACMP Connect Tx Response failed: %d", errno);
-    }
-  avbinfo("sent ACMP Connect Tx Response");
-  return ret;
-}
-
-/* Send ACMP disconnect rx response */
-int avb_send_acmp_disconnect_rx_response(avb_state_s *state, avb_connection_s *connection) {
-  // not implemented
-  return OK;
-}
-
-/* Send ACMP disconnect tx response */
-int avb_send_acmp_disconnect_tx_response(avb_state_s *state, avb_connection_s *connection) {
-  // not implemented
-  return OK;
 }
 
 /* Process received ATDECC ADP message */
@@ -1284,11 +1152,12 @@ int avb_process_aecp_cmd_register_unsol_notif(avb_state_s *state,
   return ret;
 }
 
-
 /* Process AECP command deregister unsolicited notification */
-int avb_process_aecp_cmd_deregister_unsol_notif(avb_state_s *state, 
-                                        aecp_message_u *msg, 
-                                        eth_addr_t *src_addr) {
+int avb_process_aecp_cmd_deregister_unsol_notif(
+    avb_state_s *state, 
+    aecp_message_u *msg, 
+    eth_addr_t *src_addr
+) {
   int ret = OK;
   struct timespec ts;
 
@@ -1309,9 +1178,11 @@ int avb_process_aecp_cmd_deregister_unsol_notif(avb_state_s *state,
 }
 
 /* Process AECP command acquire entity */
-int avb_process_aecp_cmd_acquire_entity(avb_state_s *state, 
-                                        aecp_message_u *msg, 
-                                        eth_addr_t *src_addr) {
+int avb_process_aecp_cmd_acquire_entity(
+    avb_state_s *state, 
+    aecp_message_u *msg, 
+    eth_addr_t *src_addr
+) {
   int ret;
   struct timespec ts;
 
@@ -1321,10 +1192,13 @@ int avb_process_aecp_cmd_acquire_entity(avb_state_s *state,
     return OK;
   }
 
-  // create a response, copy the cmd message data and change the msg type
+  // create a response, copy the cmd message data, change the msg type and set owner id
   aecp_acquire_entity_s response = {0};
   memcpy(&response, msg, sizeof(aecp_acquire_entity_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
+  if (!msg->acquire_entity.release) {
+    memcpy(response.owner_id, msg->common.controller_entity_id, UNIQUE_ID_LEN);
+  }
 
   // send the response message  
   uint16_t msg_len = sizeof(atdecc_header_s) + sizeof(aecp_acquire_entity_s);
@@ -1345,7 +1219,6 @@ int avb_process_aecp_cmd_acquire_entity(avb_state_s *state,
   return ret;
 }
 
-
 /* Process AECP command lock entity */
 int avb_process_aecp_cmd_lock_entity(
     avb_state_s *state, 
@@ -1361,10 +1234,13 @@ int avb_process_aecp_cmd_lock_entity(
     return OK;
   }
 
-  // create a response, copy the cmd message data and change the msg type
+  // create a response, copy the cmd message data, change the msg type and set locked id
   aecp_lock_entity_s response = {0};
   memcpy(&response, msg, sizeof(aecp_lock_entity_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
+  if (!msg->lock_entity.unlock) {
+    memcpy(response.locked_id, msg->common.controller_entity_id, UNIQUE_ID_LEN);
+  }
 
   // send the response message  
   uint16_t msg_len = sizeof(atdecc_header_s) + sizeof(aecp_lock_entity_s);
@@ -1417,9 +1293,11 @@ int avb_process_aecp_cmd_entity_available(avb_state_s *state,
 }
 
 /* Process AECP command get configuration */
-int avb_process_aecp_cmd_get_configuration(avb_state_s *state, 
-                                            aecp_message_u *msg, 
-                                            eth_addr_t *src_addr) {
+int avb_process_aecp_cmd_get_configuration(
+    avb_state_s *state, 
+    aecp_message_u *msg, 
+    eth_addr_t *src_addr
+) {
   int ret;
   struct timespec ts;
 
@@ -1657,12 +1535,6 @@ int avb_process_aecp_rsp_get_stream_info(avb_state_s *state, aecp_message_u *msg
   // update the talker stream info
   else {
     memcpy(&state->talkers[index].stream, &msg->get_stream_info_rsp.stream, sizeof(aem_stream_summary_s));
-    
-    // if the connection is active, then send connect rx response to controller
-    int index = avb_find_connection_by_id(state, &msg->common.target_entity_id, avb_entity_type_listener);
-    if (index != NOT_FOUND && state->connections[index].active) {
-      avb_send_acmp_connect_rx_response(state, &state->connections[index]);
-    }
   }
   return OK;
 }
@@ -1683,183 +1555,255 @@ int avb_process_acmp(avb_state_s *state, acmp_message_s *msg) {
         avbinfo("Ignoring ACMP Connect RX Command for different listener");
         break;
       }
-      avb_process_acmp_connect_rx_command(state, msg);
-      break;
-    case acmp_msg_type_connect_rx_response:
-      if (memcmp(msg->controller_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
-        avbinfo("Ignoring ACMP Connect RX Response for different controller");
-        break;
-      }
-      avb_process_acmp_connect_rx_response(state, msg);
+      avb_process_acmp_connect_rx_command(state, msg, false);
       break;
     case acmp_msg_type_disconnect_rx_command:
       if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
         avbinfo("Ignoring ACMP Disconnect RX Command for different listener");
         break;
       }
-      avb_process_acmp_disconnect_rx_command(state, msg);
-      break;
-    case acmp_msg_type_disconnect_rx_response:
-      if (memcmp(msg->controller_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
-        avbinfo("Ignoring ACMP Disconnect RX Response for different controller");
-        break;
-      }
-      avb_process_acmp_disconnect_rx_response(state, msg);
+      avb_process_acmp_connect_rx_command(state, msg, true);
       break;
     case acmp_msg_type_connect_tx_command:
       if (memcmp(msg->talker_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
         avbinfo("Ignoring ACMP Connect TX Command for different talker");
         break;
       }
-      avb_process_acmp_connect_tx_command(state, msg);
+      avb_process_acmp_connect_tx_command(state, msg, false);
       break;
     case acmp_msg_type_connect_tx_response:
       if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
         avbinfo("Ignoring ACMP Connect TX Response for different listener");
         break;
       }
-      avb_process_acmp_connect_tx_response(state, msg);
+      avb_process_acmp_connect_tx_response(state, msg, false);
       break;
     case acmp_msg_type_disconnect_tx_command:
       if (memcmp(msg->talker_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
         avbinfo("Ignoring ACMP Disconnect TX Command for different talker");
         break;
       }
-      avb_process_acmp_disconnect_tx_command(state, msg);
+      avb_process_acmp_connect_tx_command(state, msg, true);
       break;
     case acmp_msg_type_disconnect_tx_response:
       if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
         avbinfo("Ignoring ACMP Disconnect TX Response for different listener");
         break;
       }
-      avb_process_acmp_disconnect_tx_response(state, msg);
+      avb_process_acmp_connect_tx_response(state, msg, true);
       break;
     default:
-      avbinfo("Ignoring unsupported ACMP message type: %d", msg->header.msg_type);
+      avbinfo("Ignoring %s (unsupported)", get_acmp_message_type_name(msg->header.msg_type));
       break;
   }
   return OK;
 }
 
-/* Process ACMP connect rx command */
-int avb_process_acmp_connect_rx_command(avb_state_s *state, acmp_message_s *msg) {
-
-  int ret;
+/* Send an ACMP command message */
+int avb_send_acmp_command(
+    avb_state_s *state,
+    acmp_msg_type_t msg_type, 
+    acmp_message_s *command, 
+    bool retried
+) {
+  int ret = OK;
   struct timespec ts;
-  size_t body_size = 56; // ACMP Message body length
+  int control_data_len = 84; // IEEE 1722.1-2021 sets it at 84 bytes
 
-  // find talker address from talker entity id
-  eth_addr_t dest_addr;
-  int index = avb_find_entity_by_id(state, &msg->talker_entity_id, true);
-  memcpy(dest_addr, state->talkers[index].mac_addr, ETH_ADDR_LEN);
+  // Set the message type
+  command->header.msg_type = msg_type;
 
-  // send connect tx cmd to talker
-  acmp_message_s connect_tx_cmd;
-  memcpy(&connect_tx_cmd, msg, sizeof(acmp_message_s));
-  uint16_t msg_len = 4 + body_size; // header + body
-  ret = avb_net_send(state, ethertype_avtp, &connect_tx_cmd, msg_len, &ts);
+  // increment the sequence ID
+  state->acmp_seq_id++;
+  int_to_octets(&state->acmp_seq_id, &command->seq_id, 2);
+
+  // send the message 
+  uint16_t msg_len = control_data_len + 12; // 12 bytes for the header
+  ret = avb_net_send(state, ethertype_avtp, command, msg_len, &ts);
   if (ret < 0) {
-    avberr("send ACMP Connect TX Command failed: %d", errno);
-    return ret;
+      avberr("Failed to send %s (error: %d)", get_acmp_message_type_name(msg_type), errno);
+  }
+  
+  // add the command to the inflight commands list
+  avb_add_inflight_command(state, (atdecc_command_u *)command, false);
+
+  avbinfo("Sent %s", get_acmp_message_type_name(msg_type));
+  return ret;
+}
+
+/* Send an ACMP response message */
+int avb_send_acmp_response(
+    avb_state_s *state, 
+    acmp_msg_type_t msg_type, 
+    acmp_message_s *response, 
+    acmp_status_t status
+) {
+  int ret = OK;
+  struct timespec ts;
+  int control_data_len = 84; // IEEE 1722.1-2021 sets it at 84 bytes
+
+  // Set the message type and status
+  // sequence ID should be already set
+  response->header.msg_type = msg_type;
+  response->header.status_valtime = status;
+
+  // as the response is mostly a copy of the command we will 
+  // keep the control data length the same as the command;
+  // if the status is success, then we use the new control data length
+  if (status == acmp_status_success) {
+    response->header.control_data_len = control_data_len;
   }
 
-  // send get stream info to talker, TBD
-  avb_send_aecp_cmd_get_stream_info(state, &msg->talker_entity_id);
-
-  // when receive stream info, send connect rx response to controller
-  return OK;
+  // send the message 
+  uint16_t msg_len = response->header.control_data_len + 12; // 12 bytes for the header
+  ret = avb_net_send(state, ethertype_avtp, response, msg_len, &ts);
+  if (ret < 0) {
+      avberr("Failed to send %s (error: %d)", get_acmp_message_type_name(msg_type), errno);
+  }
+  avbinfo("Sent %s", get_acmp_message_type_name(msg_type));
+  return ret;
 }
 
-/* Process ACMP connect rx response */
-int avb_process_acmp_connect_rx_response(avb_state_s *state, acmp_message_s *msg) {
-  // not implemented
-  return OK;
-}
+/* Process ACMP connect/disconnect rx command */
+int avb_process_acmp_connect_rx_command(
+    avb_state_s *state, 
+    acmp_message_s *msg,
+    bool disconnect
+) {
+    int ret = OK;
+    uint16_t index = octets_to_uint(msg->listener_uid, 2);
+    acmp_status_t status = acmp_status_success;
+    acmp_msg_type_t rx_response_type = disconnect ? acmp_msg_type_disconnect_rx_response : acmp_msg_type_connect_rx_response;
+    acmp_msg_type_t tx_command_type = disconnect ? acmp_msg_type_disconnect_tx_command : acmp_msg_type_connect_tx_command;
 
-/* Process ACMP disconnect rx command */
-int avb_process_acmp_disconnect_rx_command(avb_state_s *state, acmp_message_s *msg) {
-  // not implemented
-  return OK;
-}
+    // check if listener is valid
+    uint16_t listener_uid = octets_to_uint(msg->listener_uid, 2);
+    if (!avb_valid_talker_listener_uid(state, listener_uid, avb_entity_type_listener)) {
+        avb_send_acmp_response(state, rx_response_type, msg, acmp_status_listener_unknown_id);
+        return ERROR;
+    }
 
-/* Process ACMP disconnect rx response */
-int avb_process_acmp_disconnect_rx_response(avb_state_s *state, acmp_message_s *msg) {
-  // not implemented
-  return OK;
+    // check if locked or acquired by another controller
+    if (avb_acquired_or_locked_by_other(state, &msg->controller_entity_id)) {
+        avberr("ConnRX cmd: Locked or acquired by another controller");
+        avb_send_acmp_response(state, rx_response_type, msg, acmp_status_controller_not_authorized);
+        return ERROR;
+    }
+
+    // check if listener is connected to another talker in case of connect rx
+    // check if listener is not connected to the same talker in case of disconnect rx
+    bool same_talker = disconnect ? true : false;
+    if (!avb_listener_is_connected(state, msg, same_talker)) {
+        if (disconnect) {
+            // listener is not connected to the talker in case of disconnect rx
+            avberr("DisconnRX cmd: Listener is not connected to the talker");
+            avb_send_acmp_response(state, rx_response_type, msg, acmp_status_not_connected);
+            return ERROR;
+        }
+    } else if (!disconnect) {
+        // listener is connected to the another talker in case of connect rx
+        avberr("ConnRX cmd: Listener is already connected to another talker");
+        avb_send_acmp_response(state, rx_response_type, msg, acmp_status_listener_exclusive);
+        return ERROR;
+    } else {
+        // disconnect the listener
+        status = avb_disconnect_listener(state, msg);
+        if (status != acmp_status_success) {
+            avberr("Failed to disconnect listener");
+            avb_send_acmp_response(state, rx_response_type, msg, status);
+            return ERROR;
+        }
+    }
+
+    // add the inbound command to the inflight commands list
+    ret = avb_add_inflight_command(state, (atdecc_command_u *)msg, true);
+    if (ret == ERROR) {
+        avberr("Failed to add inflight command");
+        avb_send_acmp_response(state, rx_response_type, msg, acmp_status_listener_misbehaving);
+        return ERROR;
+    }
+
+    // create a new command for the connect/disconnect tx command
+    acmp_message_s new_command = {0};
+    memcpy(&new_command, msg, sizeof(acmp_message_s));
+
+    // send connect/disconnect tx command to talker
+    ret = avb_send_acmp_command(state, tx_command_type, &new_command, false);
+    if (ret) {
+        memcpy(&state->input_streams[index].talker_id, &msg->talker_entity_id, UNIQUE_ID_LEN);
+        memcpy(&state->input_streams[index].talker_uid, &msg->talker_uid, 2);
+        state->input_streams[index].pending_connection = true;
+    }
+    return ret;
 }
 
 /* Process ACMP connect tx command */
-int avb_process_acmp_connect_tx_command(avb_state_s *state, acmp_message_s *msg) {
+int avb_process_acmp_connect_tx_command(
+    avb_state_s *state, 
+    acmp_message_s *msg,
+    bool disconnect
+) {
   // not implemented
   return OK;
 }
 
 /* Process ACMP connect tx response */
-int avb_process_acmp_connect_tx_response(avb_state_s *state, acmp_message_s *msg) {
-  
-  // check if the listener is me
-  char listener_id_str[UNIQUE_ID_LEN * 3 + 1];
-  octets_to_hex_string((uint8_t*)&msg->listener_entity_id, UNIQUE_ID_LEN, listener_id_str, '-');
-  if (memcmp(&msg->listener_entity_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
-    avberr("ConnTX resp: Listener %s is not me", listener_id_str);
-    return ERROR;
-  }
+int avb_process_acmp_connect_tx_response(
+    avb_state_s *state, 
+    acmp_message_s *response,
+    bool disconnect
+) {
+    int ret = OK;
+    acmp_status_t status = response->header.status_valtime;
+    uint16_t listener_uid = octets_to_uint(response->listener_uid, 2); // for the conn tx command
+    acmp_msg_type_t rx_reponse_type = disconnect ? acmp_msg_type_disconnect_rx_response : acmp_msg_type_connect_rx_response;
 
-  // check if the talker is known
-  char talker_id_str[UNIQUE_ID_LEN * 3 + 1];
-  octets_to_hex_string((uint8_t*)&msg->talker_entity_id, UNIQUE_ID_LEN, talker_id_str, '-');
-  int talker_idx = avb_find_entity_by_id(state, &msg->talker_entity_id, avb_entity_type_talker);
-  if (talker_idx == NOT_FOUND) {
-    avbwarn("ConnTX resp: Talker %s not found among %d talkers", talker_id_str, state->num_talkers);
-    return ERROR;
-  }
-
-  // check if the talker adv info is set
-  if (memcmp(&state->talkers[talker_idx].info, &EMPTY_ID, UNIQUE_ID_LEN) == 0) {
-    avbwarn("ConnTX resp: Talker %s info not yet known", talker_id_str);
-    return ERROR;
-  }
-
-  // if the connection is not yet known, add it to the list
-  int index = avb_find_connection_by_id(state, &msg->stream_id, avb_entity_type_listener);
-  if (index == NOT_FOUND) {
-
-    // create a new connection
-    avb_connection_s connection;
-    memset(&connection, 0, sizeof(avb_connection_s));
-    memcpy(&connection.talker_info, &state->talkers[talker_idx].info, sizeof(talker_adv_info_s));
-    memcpy(&connection.stream, &state->talkers[talker_idx].stream, sizeof(aem_stream_summary_s));
-    memcpy(&connection.stream.stream_id, &msg->stream_id, UNIQUE_ID_LEN); // in case stream summary is empty
-    memcpy(&connection.talker_id, &msg->talker_entity_id, UNIQUE_ID_LEN);
-    memcpy(&connection.listener_id, &msg->listener_entity_id, UNIQUE_ID_LEN);
-    memcpy(&connection.controller_id, &msg->controller_entity_id, UNIQUE_ID_LEN);
-    memcpy(&connection.dest_addr, &msg->stream_dest_addr, ETH_ADDR_LEN);
-    memcpy(&connection.vlan_id, &msg->stream_vlan_id, 2);
-
-    // if the connection list is not full, add the connection
-    if (state->num_connections < AVB_MAX_NUM_CONNECTIONS) {
-      state->connections[state->num_connections] = connection;
-      state->num_connections++;
+    // check if listener is valid
+    if (!avb_valid_talker_listener_uid(state, listener_uid, avb_entity_type_listener)) {
+        if (disconnect) {
+            // don't send a disconnect rx response if the listener is unknown
+            return ERROR;
+        }
+        status = acmp_status_listener_unknown_id;
     }
-    // if the connection list is full, replace the oldest connection
+
+    // create a response message for the controller
+    acmp_message_s new_response = {0};
+    memcpy(&new_response, response, sizeof(acmp_message_s));
+
+    if (!disconnect) {
+        // if succcessful connect tx response then connect the listener
+        if (response->header.status_valtime == acmp_status_success) {
+            status = avb_connect_listener(state, response);
+        }
+        // update input stream
+        state->input_streams[listener_uid].pending_connection = false;
+    }
+
+    // put the sequence ID from the inflight command into the new response
+    response->header.msg_type = rx_reponse_type;
+    int index = avb_find_inflight_command_by_data(state, (atdecc_command_u *)response, true);
+    if (index == NOT_FOUND) {
+        avberr("Inflight command not found.");
+    }
     else {
-      memmove(&state->connections[0], &state->connections[1], (state->num_connections - 1) * sizeof(avb_connection_s));
-      state->connections[state->num_connections - 1] = connection;
+        int_to_octets(&state->inflight_commands[index].acmp_seq_id, &new_response.seq_id, 2);
     }
-  }
-  return OK;
-}
 
-/* Process ACMP disconnect tx command */
-int avb_process_acmp_disconnect_tx_command(avb_state_s *state, acmp_message_s *msg) {
-  // not implemented
-  return OK;
-}
+    // other stuff TODO
+    // cancelTimeout(msg);
 
-/* Process ACMP disconnect tx response */
-int avb_process_acmp_disconnect_tx_response(avb_state_s *state, acmp_message_s *msg) {
-  // not implemented
-  return OK;
+    // remove the inflight command for the connect tx command
+    avb_remove_inflight_command(state, octets_to_uint(response->seq_id, 2), false);
+
+    // remove the inflight command for the original connect rx command
+    if (index != NOT_FOUND) {
+        avb_remove_inflight_command(state, state->inflight_commands[index].acmp_seq_id, true);
+    }
+
+    // send the response to the controller
+    ret = avb_send_acmp_response(state, rx_reponse_type, &new_response, status);
+    return ret;
 }
 
 /* Find an entity in the known list of talkers, listeners, or controllers */
@@ -1926,41 +1870,6 @@ int avb_process_acmp_disconnect_tx_response(avb_state_s *state, acmp_message_s *
   return NOT_FOUND;
 }
 
-/* Find a connection in the known list of connections by stream id and role this device plays */
-int avb_find_connection_by_id(avb_state_s *state, 
-                              unique_id_t *stream_id, 
-                              avb_entity_type_t role) {
-  switch (role) { 
-    case avb_entity_type_talker:
-      for (int i = 0; i < state->num_connections; i++) {
-        if (memcmp(state->connections[i].stream.stream_id, stream_id, UNIQUE_ID_LEN) == 0 
-        && memcmp(state->connections[i].talker_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) == 0) {
-          return i;
-        }
-      }
-      break;
-    case avb_entity_type_listener:
-      for (int i = 0; i < state->num_connections; i++) {
-        if (memcmp(state->connections[i].stream.stream_id, stream_id, UNIQUE_ID_LEN) == 0 
-        && memcmp(state->connections[i].listener_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) == 0) {
-          return i;
-        }
-      }
-      break;
-    case avb_entity_type_controller:
-      for (int i = 0; i < state->num_connections; i++) {
-        if (memcmp(state->connections[i].stream.stream_id, stream_id, UNIQUE_ID_LEN) == 0 
-        && memcmp(state->connections[i].controller_id, state->own_entity.summary.entity_id, UNIQUE_ID_LEN) == 0) {
-          return i;
-        }
-      }
-      break;
-    default:
-      return NOT_FOUND;
-  }
-  return NOT_FOUND;
-}
-
 // Get the name of the ADP message type
 const char* get_adp_message_type_name(adp_msg_type_t message_type) {
     switch (message_type) {
@@ -1999,5 +1908,253 @@ const char* get_acmp_message_type_name(acmp_msg_type_t message_type) {
         case acmp_msg_type_get_rx_state_command: return "ACMP Get RX State Command";
         case acmp_msg_type_get_rx_state_response: return "ACMP Get RX State Response";
         default: return "Unknown";
+    }
+}
+
+/* Check if the talker or listener unique ID is valid */
+bool avb_valid_talker_listener_uid(avb_state_s *state, uint16_t uid, avb_entity_type_t entity_type) {
+    switch (entity_type) {
+        case avb_entity_type_listener:
+            if (uid < state->num_listeners) {
+                return true;
+            }
+            break;
+        case avb_entity_type_talker:
+            if (uid < state->num_talkers) {
+                return true;
+            }
+            break;
+        default:
+            return false;
+    }
+    return false;
+}
+
+/* Check if the entity is acquired or locked by another entity */
+bool avb_acquired_or_locked_by_other(avb_state_s *state, unique_id_t *entity_id) {
+    if (!state->locked && !state->acquired) {
+        return false;
+    }
+    if (memcmp(state->acquired_by, entity_id, UNIQUE_ID_LEN) != 0) {
+        return true;
+    }
+    if (memcmp(state->locked_by, entity_id, UNIQUE_ID_LEN) != 0) {
+        return true;
+    }
+    return false;
+}
+
+/* Check if the listener is connected to another talker or same talker */
+bool avb_listener_is_connected(avb_state_s *state, acmp_message_s *msg, bool same_talker) {
+    // walk through all input streams
+    for (int i = 0; i < state->num_input_streams; i++) {
+        // check if the stream is connected or pending connection
+        if (state->input_streams[i].connected || state->input_streams[i].pending_connection) {
+            if (same_talker) {
+                // check if the talker is the same
+                if (memcmp(state->input_streams[i].talker_id, msg->talker_entity_id, UNIQUE_ID_LEN) == 0
+                && memcmp(state->input_streams[i].talker_uid, msg->talker_uid, 2) == 0) {
+                    return true;
+                }
+            }
+            else {
+                // check if the talker is different
+                if (memcmp(state->input_streams[i].talker_id, msg->talker_entity_id, UNIQUE_ID_LEN) != 0
+                && memcmp(state->input_streams[i].talker_uid, msg->talker_uid, 2) != 0) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/* add an inflight command to the inflight commands list */
+// return the index of the command, if the list is full then return -1
+int avb_add_inflight_command(avb_state_s *state, atdecc_command_u *command, bool inbound) {
+  if (state->num_inflight_commands >= AVB_MAX_NUM_INFLIGHT_COMMANDS) {
+    avberr("Cannot add command: Inflight commands list is full.");
+    return ERROR;
+  }
+
+  // check if the command is already in the list
+  atdecc_command_u match_command = {0};
+  memcpy(&match_command, command, sizeof(atdecc_command_u));
+  match_command.header.msg_type = command->header.msg_type + 1;
+  int index = avb_find_inflight_command_by_data(state, &match_command, inbound);
+  if (index != NOT_FOUND) {
+    avbwarn("Command already in list at index %d", index);
+    return index;
+  }
+
+  // set the index to the next available slot
+  index = state->num_inflight_commands;
+  int timeout_ms = 250; // default timeout amount
+
+  // copy the sequence ID from the command and adjust the timeout_ms for ACMP commands
+  if (command->header.subtype == avtp_subtype_acmp) {
+    state->inflight_commands[index].acmp_seq_id = octets_to_uint(command->acmp.seq_id, 2);
+    timeout_ms = avb_get_acmp_timeout_ms(command->header.msg_type); // ACMP timeouts are more specific
+  } else {
+    state->inflight_commands[index].aecp_seq_id = octets_to_uint(command->aecp.common.seq_id, 2);
+  }
+  
+  // set the timeout
+  struct timeval timeout;
+  gettimeofday(&timeout, NULL);
+  timeval_add_ms(&timeout, timeout_ms);
+  memcpy(&state->inflight_commands[index].timeout, &timeout, sizeof(struct timeval));
+
+  // set the inbound flag
+  state->inflight_commands[index].inbound = inbound;
+
+  // copy the command data to the inflight command
+  memcpy(&state->inflight_commands[index].command, command, sizeof(atdecc_command_u));
+
+  // set retried to false and increment the number of inflight commands
+  state->inflight_commands[index].retried = false;
+  state->num_inflight_commands++;
+  return index;
+}
+
+/* find an inflight command by the sequence ID */
+int avb_find_inflight_command(avb_state_s *state, uint16_t seq_id, bool inbound) {
+    for (int i = 0; i < state->num_inflight_commands; i++) {
+        if (state->inflight_commands[i].command.header.subtype == avtp_subtype_acmp) {
+            if (state->inflight_commands[i].acmp_seq_id == seq_id 
+            && state->inflight_commands[i].inbound == inbound) {
+                return i;
+            }
+        }
+        else {
+            if (state->inflight_commands[i].aecp_seq_id == seq_id 
+            && state->inflight_commands[i].inbound == inbound) {
+                return i;
+            }
+        }
+    }
+    return NOT_FOUND;
+}
+
+/* find an inflight commands list by the matching command data */
+int avb_find_inflight_command_by_data(avb_state_s *state, atdecc_command_u *data, bool inbound) {
+
+    for (int i = 0; i < state->num_inflight_commands; i++) {
+        if (state->inflight_commands[i].inbound == inbound
+        && state->inflight_commands[i].command.header.msg_type + 1 == data->header.msg_type) {
+            if (data->header.subtype == avtp_subtype_acmp) {
+                if (memcmp(state->inflight_commands[i].command.acmp.talker_uid, data->acmp.talker_uid, 2) == 0
+                && memcmp(state->inflight_commands[i].command.acmp.listener_uid, data->acmp.listener_uid, 2) == 0
+                && memcmp(state->inflight_commands[i].command.acmp.talker_entity_id, data->acmp.talker_entity_id, UNIQUE_ID_LEN) == 0
+                && memcmp(state->inflight_commands[i].command.acmp.listener_entity_id, data->acmp.listener_entity_id, UNIQUE_ID_LEN) == 0
+                && memcmp(state->inflight_commands[i].command.acmp.controller_entity_id, data->acmp.controller_entity_id, UNIQUE_ID_LEN) == 0) {
+                    return i;
+                }
+            }
+            else {
+                if (memcmp(state->inflight_commands[i].command.aecp.common.target_entity_id, data->aecp.common.target_entity_id, UNIQUE_ID_LEN) == 0
+                && memcmp(state->inflight_commands[i].command.aecp.common.controller_entity_id, data->aecp.common.controller_entity_id, UNIQUE_ID_LEN) == 0
+                && state->inflight_commands[i].command.aecp.aem.command_type == data->aecp.aem.command_type) {
+                    return i;
+                }
+            }
+        }
+    }
+    return NOT_FOUND;
+}
+
+/* remove an inflight command from the inflight commands list */
+// shift any elements after the index to the left
+void avb_remove_inflight_command(avb_state_s *state, uint16_t seq_id, bool inbound) {
+    int index = avb_find_inflight_command(state, seq_id, inbound);
+    if (index == NOT_FOUND) {
+        avberr("Cannot remove: Inflight command with seq ID %d not found.", seq_id);
+        return;
+    }
+    for (int i = index; i < state->num_inflight_commands - 1; i++) {
+        state->inflight_commands[i] = state->inflight_commands[i + 1];
+    }
+    state->num_inflight_commands--;
+}
+
+/* Connect a listener to a stream */
+acmp_status_t avb_connect_listener(
+    avb_state_s *state, 
+    acmp_message_s *response
+) {
+    acmp_status_t status = acmp_status_success;
+    uint16_t index = octets_to_uint(response->listener_uid, 2);
+
+    // update the input stream
+    state->input_streams[index].connected = true;
+
+    // send SRP listener ready command
+    int ret = avb_send_msrp_listener(
+        state, 
+        msrp_attr_event_join_mt, 
+        msrp_listener_event_ready,
+        false,
+        state->input_streams[index].stream_id);
+    if (ret < 0) {
+        return acmp_status_listener_misbehaving;
+    }
+    return status;
+}
+
+acmp_status_t avb_disconnect_listener(
+    avb_state_s *state, 
+    acmp_message_s *response
+) {
+    acmp_status_t status = acmp_status_success;
+    uint16_t index = octets_to_uint(response->listener_uid, 2);
+
+    // reset the input stream data
+    memset(&state->input_streams[index], 0, sizeof(avb_listener_stream_s));
+    uint16_t vlan_id = DEFAULT_VLAN_ID;
+    avtp_stream_format_am824_s format = AVB_DEFAULT_FORMAT(cip_sfc_sample_rate_48k);
+    memcpy(&state->input_streams[index].stream_format, &format, sizeof(avtp_stream_format_s));
+    int_to_octets(&vlan_id, state->input_streams[index].vlan_id, 2);
+
+    // send SRP listener deregistration command
+    int ret = avb_send_msrp_listener(
+        state, 
+        msrp_attr_event_join_mt, 
+        msrp_listener_event_ready,
+        true,
+        state->input_streams[index].stream_id);
+    if (ret < 0) {
+        return acmp_status_listener_misbehaving;
+    }
+    return status;
+}
+
+/* Start a stream */
+acmp_status_t avb_connect_talker(
+    avb_state_s *state, 
+    acmp_message_s *response
+) {
+    acmp_status_t status = acmp_status_success;
+    uint16_t index = octets_to_uint(response->talker_uid, 2);
+
+    // create a stream ID from the internal MAC address and stream index
+    //unique_id_t stream_id;
+    //stream_id_from_mac(&state->internal_mac_addr, stream_id, index);
+
+    // if output stream not already started then 
+    // create a stream ID, send SRP talker registration
+    return status;
+}
+
+/* Get the timeout for an ACMP message type */
+int avb_get_acmp_timeout_ms(acmp_msg_type_t msg_type) {
+    switch (msg_type) {
+        case acmp_msg_type_connect_tx_command: return acmp_timeout_connect_tx;
+        case acmp_msg_type_disconnect_tx_command: return acmp_timeout_disconnect_tx;
+        case acmp_msg_type_get_tx_state_command: return acmp_timeout_get_tx_state;
+        case acmp_msg_type_connect_rx_command: return acmp_timeout_connect_rx;
+        case acmp_msg_type_disconnect_rx_command: return acmp_timeout_disconnect_rx;
+        case acmp_msg_type_get_rx_state_command: return acmp_timeout_get_rx_state;
+        case acmp_msg_type_connection_command: return acmp_timeout_connection;
+        default: return 250;
     }
 }

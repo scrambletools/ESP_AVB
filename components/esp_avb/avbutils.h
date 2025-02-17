@@ -77,6 +77,7 @@ uint64_t reverse_endianness(uint64_t value, int num_bits);
 uint64_t reverse_endianness_64(uint64_t value);
 uint32_t reverse_endianness_32(uint32_t value);
 uint16_t reverse_endianness_16(uint16_t value);
+void timeval_add_ms(struct timeval *tv, int ms);
 void timeval_to_octets(struct timeval *tv, uint8_t *buffer_sec, uint8_t *buffer_nsec);
 void timeval_add(struct timeval *result, struct timeval *a, struct timeval *b);
 void timeval_subtract(struct timeval *result, struct timeval *a, struct timeval *b);

@@ -68,8 +68,11 @@
 #define AVB_MAX_NUM_LISTENERS 10
 #define AVB_MAX_NUM_CONTROLLERS 10
 
-/* Maximum number of connections to remember */
-#define AVB_MAX_NUM_CONNECTIONS 2
+/* Maximum number of listeners connected to a talker stream */
+#define AVB_MAX_NUM_CONNECTED_LISTENERS 10
+
+/* Maximum number of inflight commands */
+#define AVB_MAX_NUM_INFLIGHT_COMMANDS 20
 
 /* Maximum number of streams */
 #define AVB_MAX_NUM_INPUT_STREAMS 1
@@ -85,6 +88,8 @@
 #define PTP_STATUS_UPDATE_INTERVAL_MSEC 3000
 #define UNSOL_NOTIF_INTERVAL_MSEC 2000
 
+/* Default VLAN ID */
+#define DEFAULT_VLAN_ID 0
 
 // Commonly used mac addresses
 #define BCAST_MAC_ADDR      (uint8_t[6]){ 0x91, 0xe0, 0xf0, 0x01, 0x00, 0x00 } // adp,acmp
@@ -99,7 +104,7 @@
 /* MVU Protocol ID */
 #define MVU_PROTOCOL_ID (uint8_t[6]){0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00}
 
-/* Poll interval for checking for incoming messages on L2TAP FDs */
+/* Poll interval for checking for incoming frames on L2TAP FDs */
 #define AVB_POLL_INTERVAL_MS 1000
 
 /* Maximum message length */
@@ -146,13 +151,13 @@
     .sf = 1, \
     .fdf_sfc = cip_sfc_sample_rate, \
     .fdf_evt = 0, \
-    .dbs = 0, \
+    .dbs = 8, \
     .sc = 0, \
     .ut = 0, \
-    .nb = 0, \
+    .nb = 1, \
     .b = 0, \
     .label_iec_60958_cnt = 0, \
-    .label_mbla_cnt = 1, \
+    .label_mbla_cnt = 8, \
     .label_smptecnt = 0, \
     .label_midi_cnt = 0 \
   }
@@ -167,8 +172,8 @@
     .bit_depth = bit_rate, \
     .chan_per_frame_h = 0, \
     .samples_per_frame_h = 0, \
-    .chan_per_frame = 1, \
-    .samples_per_frame = 1 \
+    .chan_per_frame = 8, \
+    .samples_per_frame = 6 \
   }
 
 /****************************************************************************
@@ -299,26 +304,26 @@ typedef enum {
 	aecp_cmd_code_acquire_entity         = 0x0000,
 	aecp_cmd_code_lock_entity            = 0x0001,
 	aecp_cmd_code_entity_available       = 0x0002,
-	aecp_cmd_code_controller_available   = 0x0003,
+	aecp_cmd_code_controller_available   = 0x0003, // unsupported
     aecp_cmd_code_read_descriptor        = 0x0004,
 	aecp_cmd_code_get_configuration      = 0x0007,
+    aecp_cmd_code_set_stream_format      = 0x0008, // unsupported
+    aecp_cmd_code_get_stream_format      = 0x0009, // unsupported
     aecp_cmd_code_get_stream_info        = 0x000f,
-    aecp_cmd_code_set_name               = 0x0010,
-    aecp_cmd_code_get_name               = 0x0011,
-    aecp_cmd_code_set_sampling_rate      = 0x0014, // unsupported
-    aecp_cmd_code_get_sampling_rate      = 0x0015,
-    aecp_cmd_code_set_clock_source       = 0x0016,
+    aecp_cmd_code_set_name               = 0x0010, // unsupported
+    aecp_cmd_code_get_name               = 0x0011, // unsupported
+    aecp_cmd_code_set_clock_source       = 0x0016, // unsupported
     aecp_cmd_code_get_clock_source       = 0x0017,
-    aecp_cmd_code_set_control            = 0x0018,
-    aecp_cmd_code_get_control            = 0x0019,
-    aecp_cmd_code_start_streaming        = 0x0022,
-    aecp_cmd_code_stop_streaming         = 0x0023,
+    aecp_cmd_code_set_control            = 0x0018, // unsupported
+    aecp_cmd_code_get_control            = 0x0019, 
+    aecp_cmd_code_start_streaming        = 0x0022, // unsupported
+    aecp_cmd_code_stop_streaming         = 0x0023, // unsupported
 	aecp_cmd_code_register_unsol_notif   = 0x0024,
 	aecp_cmd_code_deregister_unsol_notif = 0x0025,
     aecp_cmd_code_get_avb_info           = 0x0027,
-    aecp_cmd_code_get_as_path            = 0x0028,
+    aecp_cmd_code_get_as_path            = 0x0028, // unsupported
     aecp_cmd_code_get_counters           = 0x0029,
-    aecp_cmd_code_expansion              = 0xffff // milan
+    aecp_cmd_code_expansion              = 0xffff  // for milan
 } aecp_cmd_code_t;
 
 /* AECP statuses in enumerated order */
@@ -456,6 +461,17 @@ typedef enum {
     acmp_status_not_supported = 31                // The command is not supported
 } acmp_status_t;
 
+/* ACMP timeouts in milliseconds */
+typedef enum {
+    acmp_timeout_connect_tx     = 2000,
+    acmp_timeout_disconnect_tx  = 200,
+    acmp_timeout_get_tx_state   = 200,
+    acmp_timeout_connect_rx     = 4500,
+    acmp_timeout_disconnect_rx  = 500,
+    acmp_timeout_get_rx_state   = 200,
+    acmp_timeout_connection     = 200
+} acmp_timeout_t;
+
 /* 61883 formats and their values */
 typedef enum {
     iec61883_format_bt_601   = 0x01,
@@ -504,6 +520,10 @@ typedef enum {
 
 typedef uint8_t eth_addr_t[ETH_ADDR_LEN];
 typedef uint8_t unique_id_t[UNIQUE_ID_LEN];
+typedef struct {
+    unique_id_t  id;     // entity id
+    uint8_t      uid[2]; // unique id
+} identity_pair_t;
 
 /* MRP types */
 
@@ -568,6 +588,15 @@ typedef struct {
   uint8_t vechead_num_vals;     // # of events (div by 3, round up for # of 3pes)
 } msrp_attr_header_s; // 6 bytes
 
+/* MSRP domain message */
+typedef struct {
+  msrp_attr_header_s header;            // attribute header
+  uint8_t            sr_class_id;       // sr class ID
+  uint8_t            sr_class_priority; // sr class priority
+  uint8_t            sr_class_vid[2];   // sr class VID
+  mrp_3pe_event_t    attr_event[MRP_MAX_NUM_EVENTS]; // attribute events
+} msrp_domain_message_s; // 25 bytes limit
+
 /* Talker advertise information */
 typedef struct {
   unique_id_t    stream_id;                   // stream ID
@@ -580,15 +609,6 @@ typedef struct {
   uint8_t        priority : 3;                // 3 = class A, 2 = class B
   uint8_t        accumulated_latency[4];      // as stated by the talker
 } talker_adv_info_s;
-
-/* MSRP domain message */
-typedef struct {
-  msrp_attr_header_s header;            // attribute header
-  uint8_t            sr_class_id;       // sr class ID
-  uint8_t            sr_class_priority; // sr class priority
-  uint8_t            sr_class_vid[2];   // sr class VID
-  mrp_3pe_event_t    attr_event[MRP_MAX_NUM_EVENTS]; // attribute events
-} msrp_domain_message_s; // 25 bytes limit
 
 /* MSRP talker advertise message */
 typedef struct {
@@ -895,7 +915,15 @@ typedef struct {
 typedef struct {
   aecp_common_s     common;
   aecp_common_aem_s aem;        
-} aecp_aem_basic_s; // 2 bytes
+} aecp_aem_basic_s; 
+
+/* AECP AEM short command */
+typedef struct {
+  aecp_common_s     common;
+  aecp_common_aem_s aem;
+  uint8_t           descriptor_type[2];  // descriptor type
+  uint8_t           descriptor_index[2]; // descriptor index
+} aecp_aem_short_s; // 28 bytes
 
 /* AECP acquire entity command and response */
 typedef struct {
@@ -1124,12 +1152,7 @@ typedef struct {
 } aem_stream_summary_s; // 17 bytes
 
 /* AECP get stream info command */
-typedef struct {
-  aecp_common_s     common;
-  aecp_common_aem_s aem;
-  uint8_t           descriptor_type[2];  // descriptor type
-  uint8_t           descriptor_index[2]; // descriptor index
-} aecp_get_stream_info_s; // 28 bytes
+typedef aecp_aem_short_s aecp_get_stream_info_s; // 28 bytes
 
 /* AECP set stream info command  
  * also used for get/set stream info response
@@ -1366,12 +1389,7 @@ typedef union {
 } aem_counters_block_u; // 128 bytes
 
 /* AECP get counters command uses basic command format */
-typedef struct {
-  aecp_common_s     common;
-  aecp_common_aem_s aem;
-  uint8_t           descriptor_type[2];  // descriptor type
-  uint8_t           descriptor_index[2]; // descriptor index
-} aecp_get_counters_s; // 28 bytes
+typedef aecp_aem_short_s aecp_get_counters_s; // 28 bytes
 
 /* AECP get counters response */
 typedef struct {
@@ -1659,13 +1677,18 @@ typedef struct {
   uint8_t         flags[2];                    // flags
   uint8_t         stream_vlan_id[2];           // stream VLAN ID
   uint8_t         conn_listeners_entries[2];   // connection listeners entries
+} acmp_message_s; // 56 bytes
+
+/* ACMP Message Extended */
+typedef struct {
+  acmp_message_s  base;
   uint8_t         ip_flags[2];                 // IP flags
   uint8_t         reserved[2];                 // reserved
   uint8_t         src_port[2];                 // source port
   uint8_t         dest_port[2];                // destination port
   uint8_t         src_ip_addr[16];             // source IP address
   uint8_t         dest_ip_addr[16];            // destination IP address
-} acmp_message_s; // 96 bytes
+} acmp_message_extended_s; // 96 bytes
 
 /* AVTP message buffer */
 typedef union {
@@ -1724,23 +1747,70 @@ typedef struct {
   bool        ready; // status
 } avb_controller_s;
 
-/* Stream */
+/* Listener stream flags */
 typedef struct {
-  uint8_t              vlan_id[2]; // vlan ID
-  eth_addr_t           dest_addr; // stream destination address
-  unique_id_t          talker_id; // talker entity ID
-  unique_id_t          listener_id; // listener entity ID
-  unique_id_t          controller_id; // controller entity ID
-  aem_stream_summary_s stream; // stream summary
-  talker_adv_info_s    talker_info; // talker advert info
-  bool                 active; // status
-  struct timespec      started; // last start timestamp
-  int64_t              accumulated_latency; // observed latency
-  int64_t              accumulated_jitter; // observed jitter
-} avb_stream_s;
+  uint8_t class_b : 1;                 // connection is class B, instead of class A
+  uint8_t fast_connect : 1;            // connection is using fast connect mode
+  uint8_t saved_state : 1;             // connection has saved ACMP state for fast connect mode
+  uint8_t streaming_wait : 1;          // for milan, this must be false
+  uint8_t supports_encrypted : 1;      // stream supports encrypted PDU
+  uint8_t encrypted_pdu : 1;           // stream is using encrypted PDU
+  uint8_t srp_registration_failed : 1; // listener has registered an SRP talker failed attr or talker as registered an SRP listener asking failed attr
+  uint8_t cl_entries_valid : 1;        // connected_listeners field is valid
+  uint8_t no_srp : 1;                  // SRP not used for the stream
+  uint8_t udp : 1;                     // stream using UDP transport
+  uint8_t reserved : 6;                // reserved for future use
+} avb_listener_stream_flags_s; // 2 bytes
 
-/* Connection */
-typedef avb_stream_s avb_connection_s;
+/* Listener stream */
+typedef struct {
+  unique_id_t                 talker_id;          // talker entity ID
+  uint8_t                     talker_uid[2];      // talker UID (same as stream output descr index)
+  unique_id_t                 controller_id;      // controller entity ID
+  unique_id_t                 stream_id;          // stream ID
+  eth_addr_t                  stream_dest_addr;   // stream destination address
+  avb_listener_stream_flags_s stream_flags;       // stream flags
+  aem_stream_info_flags_s     stream_info_flags;  // stream info flags
+  uint8_t                     vlan_id[2];         // vlan ID
+  avtp_stream_format_s        stream_format;      // stream format
+  uint8_t                     msrp_accumulated_latency[4]; // msrp accumulated latency
+  uint8_t                     msrp_failure_code[2]; // msrp failure code
+  bool                        connected;          // status as connected
+  bool                        pending_connection; // status as pending connection
+} avb_listener_stream_s;
+
+/* Talker stream */
+typedef struct {
+  unique_id_t             stream_id;           // stream ID
+  eth_addr_t              stream_dest_addr;    // stream destination address
+  aem_stream_info_flags_s stream_info_flags; // stream info flags
+  uint8_t                 vlan_id[2];          // vlan ID
+  avtp_stream_format_s    stream_format;       // stream format
+  uint8_t                 msrp_accumulated_latency[4]; // msrp accumulated latency
+  uint8_t                 msrp_failure_code[2]; // msrp failure code
+  uint8_t                 connection_count[2]; // number of connected listeners
+  identity_pair_t         connected_listeners[AVB_MAX_NUM_CONNECTED_LISTENERS]; // list of connected listeners
+} avb_talker_stream_s;
+
+/* ATDECC command message union */
+// used for inflight commands
+typedef union {
+  atdecc_header_s   header;
+  aecp_aem_short_s  aecp;
+  acmp_message_s    acmp;
+  uint8_t           raw[56];
+} atdecc_command_u;
+
+/* Inflight command (state for processing an asynchronous response to a command) */
+// used for AECP and ACMP command tracking
+typedef struct {
+  struct timeval   timeout;       // command timeout as a timeval
+  bool             retried;       // indicates if the command has been retried
+  uint16_t         aecp_seq_id;   // original AECP command sequence ID
+  uint16_t         acmp_seq_id;   // original ACMP command sequence ID
+  atdecc_command_u command;       // the command or partial command
+  bool             inbound;       // indicates if the command is inbound
+} atdecc_inflight_command_s;
 
 /* Carrier structure for querying AVB status */
 typedef struct {
@@ -1770,9 +1840,15 @@ typedef struct {
   // only one interface is supported currently
   aem_avb_interface_desc_s avb_interface;
 
+  /* Inflight commands */
+  atdecc_inflight_command_s inflight_commands[AVB_MAX_NUM_INFLIGHT_COMMANDS];
+  size_t num_inflight_commands;
+
   /* AVB streams */
-  avb_stream_s input_streams[AVB_MAX_NUM_INPUT_STREAMS];
-  avb_stream_s output_streams[AVB_MAX_NUM_OUTPUT_STREAMS];
+  // index of input_streams is the listener_uid
+  // index of output_streams is the talker_uid
+  avb_listener_stream_s input_streams[AVB_MAX_NUM_INPUT_STREAMS];
+  avb_talker_stream_s output_streams[AVB_MAX_NUM_OUTPUT_STREAMS];
   size_t num_input_streams;
   size_t num_output_streams;
 
@@ -1796,10 +1872,6 @@ typedef struct {
   bool unsol_notif_enabled;
   struct timespec last_unsol_notif;
 
-  /* Connections that are in progress */
-  avb_connection_s connections[AVB_MAX_NUM_CONNECTIONS];
-  size_t num_connections;
-
   /* Latest received packet and its timestamp (CLOCK_REALTIME) 
    * 3 elements, 1 for each protocol (AVTP, MSRP, MVRP)
    */
@@ -1822,23 +1894,10 @@ typedef struct {
   struct timespec last_ptp_status_update;
   struct timespec last_transmitted_unsol_notif;
 
-  /* Sequence IDs for outbound ADP messages */
-  uint32_t adp_entity_avail_seq_id;
-
-  /* Sequence IDs for outbound AECP messages */
-  uint16_t aecp_seq_id_acquire_entity;
-  uint16_t aecp_seq_id_lock_entity;
-  uint16_t aecp_seq_id_entity_available;
-  uint16_t aecp_seq_id_controller_available;
-  uint16_t aecp_seq_id_read_descriptor;
-  uint16_t aecp_seq_id_get_configuration;
-  uint16_t aecp_seq_id_get_stream_info;
-  uint16_t aecp_seq_id_register_unsol_notif;
-  uint16_t aecp_seq_id_deregister_unsol_notif;
-  uint16_t aecp_seq_id_get_counters;
-
-  /* Sequence IDs for outbound ACMP messages */
-  uint16_t acmp_seq_id[acmp_msg_type_count];
+  /* Sequence IDs for outbound ATDECC messages */
+  uint32_t adp_seq_id;
+  uint16_t aecp_seq_id;
+  int16_t  acmp_seq_id;
 
   /* Logo */
   const uint8_t *logo_start;
@@ -1917,13 +1976,17 @@ int avb_send_mvrp_vlan_id(avb_state_s *state);
 int avb_send_msrp_domain(avb_state_s *state);
 int avb_send_msrp_talker(
     avb_state_s *state, 
-    msrp_attr_event_t event, 
+    msrp_attr_event_t attr_event, 
+    bool leave_all,
+    unique_id_t stream_id,
     bool is_failed
 );
 int avb_send_msrp_listener(
     avb_state_s *state, 
     msrp_attr_event_t attr_event, 
-    msrp_listener_event_t listener_event
+    msrp_listener_event_t listener_event,
+    bool leave_all,
+    unique_id_t stream_id
 );
 
 /* AVTP send functions */
@@ -2050,30 +2113,18 @@ int avb_send_acmp_connect_tx_command(
     unique_id_t *controller_id, 
     unique_id_t *talker_id
 ); // acting as listener
-int avb_send_acmp_disconnect_rx_command(
+int avb_send_acmp_command(
+    avb_state_s *state,
+    acmp_msg_type_t msg_type, 
+    acmp_message_s *command, 
+    bool retried
+);
+int avb_send_acmp_response(
     avb_state_s *state, 
-    avb_connection_s *connection
-); // acting as controller
-int avb_send_acmp_disconnect_tx_command(
-    avb_state_s *state, 
-    avb_connection_s *connection
-); // acting as listener
-int avb_send_acmp_connect_rx_response(
-    avb_state_s *state, 
-    avb_connection_s *connection
-); // acting as listener
-int avb_send_acmp_connect_tx_response(
-    avb_state_s *state, 
-    avb_connection_s *connection
-); // acting as talker
-int avb_send_acmp_disconnect_rx_response(
-    avb_state_s *state, 
-    avb_connection_s *connection
-); // acting as listener
-int avb_send_acmp_disconnect_tx_response(
-    avb_state_s *state, 
-    avb_connection_s *connection
-); // acting as talker
+    acmp_msg_type_t msg_type, 
+    acmp_message_s *response, 
+    acmp_status_t status
+);
 
 /* AVB processing functions */
 
@@ -2209,42 +2260,30 @@ int avb_process_aecp_rsp_get_counters(
 /* ACMP processing functions */
 int avb_process_acmp_connect_rx_command(
     avb_state_s *state,
-    acmp_message_s *msg
+    acmp_message_s *msg,
+    bool disconnect
 );
 int avb_process_acmp_connect_tx_command(
     avb_state_s *state,
-    acmp_message_s *msg
-);
-int avb_process_acmp_disconnect_rx_command(
-    avb_state_s *state,
-    acmp_message_s *msg
-);
-int avb_process_acmp_disconnect_tx_command(
-    avb_state_s *state,
-    acmp_message_s *msg
-);
-int avb_process_acmp_connect_rx_response(
-    avb_state_s *state,
-    acmp_message_s *msg
+    acmp_message_s *msg,
+    bool disconnect
 );
 int avb_process_acmp_connect_tx_response(
     avb_state_s *state,
-    acmp_message_s *msg
+    acmp_message_s *msg,
+    bool disconnect
 );
-int avb_process_acmp_disconnect_rx_response(
+int avb_process_acmp_get_state_command(
     avb_state_s *state,
-    acmp_message_s *msg
-);
-int avb_process_acmp_disconnect_tx_response(
-    avb_state_s *state,
-    acmp_message_s *msg
+    acmp_message_s *msg,
+    bool rx
 );
 
 /* Stream functions */
-int avb_start_stream_in(avb_state_s *state, unique_id_t *stream_id);
-int avb_stop_stream_in(avb_state_s *state, unique_id_t *stream_id);
-int avb_start_stream_out(avb_state_s *state, unique_id_t *stream_id);
-int avb_stop_stream_out(avb_state_s *state, unique_id_t *stream_id);
+int avb_start_stream_in(avb_state_s *state, uint16_t index);
+int avb_stop_stream_in(avb_state_s *state, uint16_t index);
+int avb_start_stream_out(avb_state_s *state, uint16_t index);
+int avb_stop_stream_out(avb_state_s *state, uint16_t index);
 
 /* Codec functions */
 esp_err_t avb_config_i2s(avb_state_s *state);
@@ -2267,13 +2306,55 @@ int avb_find_entity_by_addr(
     eth_addr_t *entity_addr, 
     avb_entity_type_t entity_type
 );
-int avb_find_connection_by_id(
-    avb_state_s *state, 
-    unique_id_t *stream_id, 
-    avb_entity_type_t entity_type
-);
 const char* get_adp_message_type_name(adp_msg_type_t message_type);
 const char* get_aecp_command_code_name(aecp_cmd_code_t command_code);
 const char* get_acmp_message_type_name(acmp_msg_type_t message_type);
+bool avb_acquired_or_locked_by_other(
+    avb_state_s *state, 
+    unique_id_t *entity_id
+);
+bool avb_listener_is_connected(
+    avb_state_s *state, 
+    acmp_message_s *msg, 
+    bool same_talker
+);
+bool avb_valid_talker_listener_uid(
+    avb_state_s *state, 
+    uint16_t uid, 
+    avb_entity_type_t entity_type
+);
+int avb_add_inflight_command(
+    avb_state_s *state, 
+    atdecc_command_u *command, 
+    bool inbound
+);
+int avb_find_inflight_command(
+    avb_state_s *state, 
+    uint16_t seq_id, 
+    bool inbound
+);
+int avb_find_inflight_command_by_data(
+    avb_state_s *state, 
+    atdecc_command_u *data, 
+    bool inbound
+);
+void avb_remove_inflight_command(
+    avb_state_s *state, 
+    uint16_t seq_id, 
+    bool inbound
+);
+acmp_status_t avb_connect_listener(
+    avb_state_s *state, 
+    acmp_message_s *response
+);
+acmp_status_t avb_disconnect_listener(
+    avb_state_s *state, 
+    acmp_message_s *response
+);
+acmp_status_t avb_connect_talker(
+    avb_state_s *state, 
+    acmp_message_s *response
+);
+int avb_get_acmp_timeout_ms(acmp_msg_type_t msg_type);
 
 #endif /* _ESP_AVB_AVB_H_ */

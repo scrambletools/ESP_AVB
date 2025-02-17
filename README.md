@@ -27,6 +27,40 @@
  T1: MAC = ...8c:23
  T1: GM = ...00000
 
+ Summary of MRP actions:
+ - Empty: not declared, and not registered.
+ - In: not declared, but registered.
+ - JoinEmpty: declared, but not registered.
+ - JoinIn: declared and registered.
+
+ 8D SRP send pattern:
+
+ upon talker connection:
+   talker ready New twice, then listener In once
+   then leaveAll (with Mt on talker and domain only)
+ upon talker disconnect:
+   talker ready Lv once, then listener Mt once,
+   then leavall with (with nothing on T, L, Mt on domain)
+ upon listener connection:
+   listener New+ready twice, then joinMt+ready 
+ upon listener disconnect:
+   listener ready Lv+ready once (streamid 0s)
+
+ when no connection:
+   T/L=Mt, domain=joinMt (send T and L every 10sec, domain every 2sec)
+   leaveAll (with T, L and domain) every 25sec (domain with Mt, rest with nothing)
+   when leavAll and no attr, then all data is 0s
+ when talker connection:
+   T/L=joinMt, domain=joinMt (talker adv every 10sec, domain every 2sec)
+   leaveAll (with T, L and domain) every 25sec (some with Mt some with nothing)
+   when leaveAll with Mt, then data is populated
+ when listener connection:
+   L=joinMt+ready, domain=joinMt (every 2sec)
+   T/L=Mt/Mt+ready, new L=joinMt+ready, domain=joinMt (every 5sec)
+   leaveAll (with T, L and domain) every 25sec (new L and domain with Mt, others with nothing)
+   when leaveAll with Mt, then data is populated
+
+
 Summary of the AVB talker (T), listener (L), controller (C) and bridge (B) interaction:
 [Sequence of frame transmissions by each device type]
 

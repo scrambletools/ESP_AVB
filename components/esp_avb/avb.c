@@ -91,23 +91,37 @@ static int avb_initialize_state(
   size_t config_index = DEFAULT_CONFIG_INDEX;
   int_to_octets(&config_index, state->own_entity.detail.current_configuration, 2);
 
-  // Set stream info flags and format
-  aem_stream_info_flags_s stream_info_flags = {0};
-  stream_info_flags.stream_vlan_id_valid = true;
-  stream_info_flags.stream_id_valid = true;
-  stream_info_flags.stream_format_valid = true;
+  // setup listener stream flags, and stream info flags, default vlan id and stream format
+  avb_listener_stream_flags_s flags = {0};
+  // set any flags here
+  aem_stream_info_flags_s info_flags = {0};
+  // set any info flags here
+  uint16_t vlan_id = DEFAULT_VLAN_ID;
   avtp_stream_format_am824_s format = AVB_DEFAULT_FORMAT(cip_sfc_sample_rate_48k);
 
-  // Set input stream info
-  for (int i = 0; i < AVB_MAX_NUM_INPUT_STREAMS; i++) {
-    state->input_streams[i].stream.flags = stream_info_flags;
-    state->input_streams[i].stream.stream_format = (avtp_stream_format_s)format;
+if (state->config.listener) {
+    // Build input streams
+    state->num_input_streams = AVB_MAX_NUM_INPUT_STREAMS;
+    avb_listener_stream_s input_stream = {0};
+    memcpy(&input_stream.stream_flags, &flags, sizeof(avb_listener_stream_flags_s));
+    memcpy(&input_stream.stream_info_flags, &info_flags, sizeof(aem_stream_info_flags_s));
+    int_to_octets(&vlan_id, input_stream.vlan_id, 2);
+    memcpy(&input_stream.stream_format, &format, sizeof(avtp_stream_format_s));
+    for (int i = 0; i < state->num_input_streams; i++) {
+        memcpy(&state->input_streams[i], &input_stream, sizeof(avb_listener_stream_s));
+    }
   }
 
-  // Set output stream info
-  for (int i = 0; i < AVB_MAX_NUM_OUTPUT_STREAMS; i++) {
-    state->output_streams[i].stream.flags = stream_info_flags;
-    state->output_streams[i].stream.stream_format = (avtp_stream_format_s)format;
+  if (state->config.talker) {
+    // Build output streams
+    state->num_output_streams = AVB_MAX_NUM_OUTPUT_STREAMS;
+    avb_talker_stream_s output_stream = {0};
+    memcpy(&output_stream.stream_info_flags, &info_flags, sizeof(aem_stream_info_flags_s));
+    int_to_octets(&vlan_id, output_stream.vlan_id, 2);
+    memcpy(&output_stream.stream_format, &format, sizeof(avtp_stream_format_s));
+    for (int i = 0; i < state->num_output_streams; i++) {
+        memcpy(&state->output_streams[i], &output_stream, sizeof(avb_talker_stream_s));
+    }
   }
 
   // Set logo start and length
@@ -180,25 +194,27 @@ static int avb_periodic_send(avb_state_s *state) {
 
   // Send MSRP talker and AVTP MAAP announce messages
   if (state->config.talker) {
-    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
-    if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
-      state->last_transmitted_msrp_talker_adv = time_now;
-      avb_send_msrp_talker(state, msrp_attr_event_join_in, false);
-    }
-    clock_timespec_subtract(&time_now, &state->last_transmitted_maap_announce, &delta);
-    if (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
-      state->last_transmitted_maap_announce = time_now;
-      avb_send_maap_announce(state);
-    }
+    // clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
+    // if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
+    //   state->last_transmitted_msrp_talker_adv = time_now;
+    //   unique_id_t stream_id = {0};
+    //   avb_send_msrp_talker(state, msrp_attr_event_join_in, stream_id, false);
+    // }
+    // clock_timespec_subtract(&time_now, &state->last_transmitted_maap_announce, &delta);
+    // if (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
+    //   state->last_transmitted_maap_announce = time_now;
+    //   avb_send_maap_announce(state);
+    // }
   }
 
   // Send MSRP listener message
   if (state->config.listener) {
-    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener_ready, &delta);
-    if (timespec_to_ms(&delta) > MSRP_LISTENER_READY_INTERVAL_MSEC) {
-        state->last_transmitted_msrp_listener_ready = time_now;
-        avb_send_msrp_listener(state, msrp_attr_event_join_in, msrp_listener_event_ready);
-    }
+    // clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener_ready, &delta);
+    // if (timespec_to_ms(&delta) > MSRP_LISTENER_READY_INTERVAL_MSEC) {
+    //     state->last_transmitted_msrp_listener_ready = time_now;
+    //     unique_id_t stream_id = {0};
+    //     avb_send_msrp_listener(state, msrp_attr_event_join_in, msrp_listener_event_ready, stream_id);
+    // }
   }
 
   // Send Unsolicited notifications
@@ -389,45 +405,34 @@ err:
 }
 
 /* Start the AVB stream input task */
-int avb_start_stream_in(avb_state_s *state, unique_id_t *stream_id) {
+int avb_start_stream_in(avb_state_s *state, uint16_t index) {
 
-  // create a string representation of the stream id for error messages
-  char stream_id_str[UNIQUE_ID_LEN * 3 + 1];
-  octets_to_hex_string((uint8_t*)stream_id, UNIQUE_ID_LEN, stream_id_str, '-');
-
-  // get the connection from the stream id
-  int index = avb_find_connection_by_id(state, stream_id, avb_entity_type_listener);
-  if (index < 0) {
-    avberr("No connection found for stream %s", stream_id_str);
-    return ERROR;
-  }
-
-  if (!state->connections[index].active) {
+  if (!state->input_streams[index].connected) {
     // Setup the stream input params
     struct stream_in_params_s *stream_in_params;
     stream_in_params = calloc(1, sizeof(struct stream_in_params_s));
     stream_in_params->i2s_tx_handle = state->i2s_tx_handle;
     stream_in_params->l2if = state->l2if[AVTP];
-    memcpy(&stream_in_params->stream_id, stream_id, UNIQUE_ID_LEN);
-    stream_in_params->format = state->connections[index].stream.stream_format.subtype;
+    memcpy(&stream_in_params->stream_id, state->input_streams[index].stream_id, UNIQUE_ID_LEN);
+    stream_in_params->format = state->input_streams[index].stream_format.subtype;
     if (stream_in_params->format == 0x02) { // AAF
-        stream_in_params->bit_depth = state->connections[index].stream.stream_format.aaf_pcm.bit_depth;
-        stream_in_params->channels = state->connections[index].stream.stream_format.aaf_pcm.chan_per_frame;
-        stream_in_params->sample_rate = state->connections[index].stream.stream_format.aaf_pcm.sample_rate;
+        stream_in_params->bit_depth = state->input_streams[index].stream_format.aaf_pcm.bit_depth;
+        stream_in_params->channels = state->input_streams[index].stream_format.aaf_pcm.chan_per_frame;
+        stream_in_params->sample_rate = state->input_streams[index].stream_format.aaf_pcm.sample_rate;
     } else { // assume IEC 61883-6 AM824
         stream_in_params->bit_depth = state->config.default_bits_per_sample; // ?
-        stream_in_params->channels = state->connections[index].stream.stream_format.am824.dbs; // ?
+        stream_in_params->channels = state->input_streams[index].stream_format.am824.dbs; // ?
         stream_in_params->sample_rate = state->config.default_sample_rate; // ?
     }
     int samples_per_interval = 0;
-    // Class A (1ms intervals)
-    if (state->connections[index].talker_info.priority == 3) { 
-      samples_per_interval = (stream_in_params->sample_rate / 1000);
-      stream_in_params->interval = 1000;
-    // Class B (4ms intervals)
-    } else { 
+    // Class B (4ms intervals) 
+    if (state->input_streams[index].stream_flags.class_b) { 
       samples_per_interval = (stream_in_params->sample_rate / 250);
       stream_in_params->interval = 4000;
+    // Class A (1ms intervals)
+    } else { 
+      samples_per_interval = (stream_in_params->sample_rate / 1000);
+      stream_in_params->interval = 1000;
     }
     // Calculate the buffer size
     int buffer_size = 0;
@@ -448,7 +453,7 @@ int avb_start_stream_in(avb_state_s *state, unique_id_t *stream_id) {
 
     // Start the stream input task
     xTaskCreate(avb_stream_in_task, "AVB-IN", 6144, (void *)stream_in_params, 20, NULL);
-    state->connections[index].active = true;
+    state->input_streams[index].connected = true;
     return OK;
   }
   avberr("Another instance of AVB-IN is already running");
