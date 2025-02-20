@@ -1803,6 +1803,14 @@ int avb_process_acmp_connect_tx_response(
 
     // send the response to the controller
     ret = avb_send_acmp_response(state, rx_reponse_type, &new_response, status);
+
+    if (status == acmp_status_success) {
+        // stop the l2tap interface
+        //esp_err_t err = esp_l2tap_stop(state->config.eth_handle);
+        //state->l2tap_receive = false;
+        // Register the stack input function with the Ethernet driver
+        ESP_ERROR_CHECK(esp_eth_update_input_path(state->config.eth_handle, my_callback, NULL));
+    }
     return ret;
 }
 
@@ -2086,18 +2094,24 @@ acmp_status_t avb_connect_listener(
     uint16_t index = octets_to_uint(response->listener_uid, 2);
 
     // update the input stream
+    memcpy(&state->input_streams[index].talker_id, response->talker_entity_id, UNIQUE_ID_LEN);
+    memcpy(&state->input_streams[index].talker_uid, response->talker_uid, 2);
+    memcpy(&state->input_streams[index].controller_id, response->controller_entity_id, UNIQUE_ID_LEN);
+    memcpy(&state->input_streams[index].stream_id, response->stream_id, UNIQUE_ID_LEN);
+    memcpy(&state->input_streams[index].stream_dest_addr, response->stream_dest_addr, ETH_ADDR_LEN);
     state->input_streams[index].connected = true;
 
     // send SRP listener ready command
     int ret = avb_send_msrp_listener(
         state, 
-        msrp_attr_event_join_mt, 
+        mrp_attr_event_new, 
         msrp_listener_event_ready,
         false,
-        state->input_streams[index].stream_id);
+        &state->input_streams[index].stream_id);
     if (ret < 0) {
         return acmp_status_listener_misbehaving;
     }
+    
     return status;
 }
 
@@ -2118,10 +2132,10 @@ acmp_status_t avb_disconnect_listener(
     // send SRP listener deregistration command
     int ret = avb_send_msrp_listener(
         state, 
-        msrp_attr_event_join_mt, 
+        mrp_attr_event_lv, 
         msrp_listener_event_ready,
-        true,
-        state->input_streams[index].stream_id);
+        false,
+        &state->input_streams[index].stream_id);
     if (ret < 0) {
         return acmp_status_listener_misbehaving;
     }

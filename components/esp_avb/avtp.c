@@ -16,7 +16,11 @@ static bool avtp_active_stream_in = false;
 static bool avtp_active_stream_out = false;
 
 /* Send MVRP VLAN identifier message */
-int avb_send_mvrp_vlan_id(avb_state_s *state) {
+int avb_send_mvrp_vlan_id(
+    avb_state_s *state,
+    mrp_attr_event_t attr_event,
+    bool leave_all
+) {
   mvrp_vlan_id_message_s msg;
   struct timespec ts;
   int ret;
@@ -27,11 +31,11 @@ int avb_send_mvrp_vlan_id(avb_state_s *state) {
   msg.protocol_ver = 0;
   msg.header.attr_type = mvrp_attr_type_vlan_identifier;
   msg.header.attr_len = 2;
-  msg.header.vechead_leaveall = 0;
+  msg.header.vechead_leaveall = leave_all;
   msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1;
   int_to_octets(&vlan_id, msg.vlan_id, 2);
-  msg.attr_event[0] = int_to_3pe(msrp_attr_event_join_in, 0, 0);
+  msg.attr_event[0] = int_to_3pe(attr_event, 0, 0);
   uint16_t msg_len = 8 + 2 + 2; // all of the above + end mark list and end mark msg
   
   // send the message
@@ -44,7 +48,11 @@ int avb_send_mvrp_vlan_id(avb_state_s *state) {
 }
 
 /* Send MSRP domain message */
-int avb_send_msrp_domain(avb_state_s *state) {
+int avb_send_msrp_domain(
+    avb_state_s *state,
+    mrp_attr_event_t attr_event,
+    bool leave_all
+) {
   msrp_domain_message_s msg;
   struct timespec ts;
   int ret;
@@ -56,13 +64,13 @@ int avb_send_msrp_domain(avb_state_s *state) {
   msg.header.attr_len = 4;
   int attr_list_len = 9; // includes vechead, attr_event and vec end mark
   int_to_octets(&attr_list_len, msg.header.attr_list_len, 2);
-  msg.header.vechead_leaveall = 0;
+  msg.header.vechead_leaveall = leave_all;
   msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1;
   msg.sr_class_id = 6; // class A
   msg.sr_class_priority = 3; // priority 3 for class A
   int_to_octets(&vlan_id, msg.sr_class_vid, vlan_id);
-  msg.attr_event[0] = int_to_3pe(msrp_attr_event_join_in, 0, 0);
+  msg.attr_event[0] = int_to_3pe(attr_event, 0, 0);
 
   // Create an MSRP message buffer
   msrp_msgbuf_s msrp_msg;
@@ -75,6 +83,7 @@ int avb_send_msrp_domain(avb_state_s *state) {
   ret = avb_net_send(state, ethertype_msrp, &msrp_msg, msg_len, &ts);
   if (ret < 0) {
       avberr("send MSRP Domain failed: %d", errno);
+      perror("send MSRP Domain failed");
     }
   return ret;
 }
@@ -82,10 +91,10 @@ int avb_send_msrp_domain(avb_state_s *state) {
 /* Send MSRP talker advertise message with appropriate event */
 int avb_send_msrp_talker(
     avb_state_s *state, 
-    msrp_attr_event_t attr_event, 
+    mrp_attr_event_t attr_event, 
     bool leave_all,
-    unique_id_t stream_id,
-    bool is_failed
+    bool is_failed,
+    unique_id_t *stream_id
 ) {
   msrp_talker_message_u msg;
   struct timespec ts;
@@ -144,18 +153,15 @@ int avb_send_msrp_talker(
 /* Send MSRP listener message with appropriate event */
 int avb_send_msrp_listener(
     avb_state_s *state, 
-    msrp_attr_event_t attr_event, 
+    mrp_attr_event_t attr_event, 
     msrp_listener_event_t listener_event,
     bool leave_all,
-    unique_id_t stream_id
+    unique_id_t *stream_id
 ) {
   msrp_listener_message_s msg;
   struct timespec ts;
   int ret; 
   memset(&msg, 0, sizeof(msg));
-  if (stream_id == NULL) {
-    stream_id = EMPTY_ID;
-  }
 
   // Populate the message
   msg.header.attr_type = msrp_attr_type_listener;

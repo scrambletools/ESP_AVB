@@ -34,10 +34,10 @@
 #include <sys/poll.h>
 #include <esp_eth_driver.h>
 #include <esp_vfs_l2tap.h>
+#include <esp_check.h>
 #include <semaphore.h>
 #include <esp_log.h>
 #include <esp_err.h>
-#include <esp_check.h>
 #include <lwip/prot/ethernet.h> // Ethernet headers
 #include <esp_eth_time.h>
 #include <ptpd.h>
@@ -79,10 +79,13 @@
 #define AVB_MAX_NUM_OUTPUT_STREAMS 1
 
 /* Periodic message intervals */
-#define MSRP_DOMAIN_INTERVAL_MSEC 9000
+#define MSRP_DOMAIN_INTERVAL_MSEC 2000
 #define MVRP_VLAN_ID_INTERVAL_MSEC 10000
-#define MSRP_TALKER_ADV_INTERVAL_MSEC 3000
-#define MSRP_LISTENER_READY_INTERVAL_MSEC 3000
+#define MSRP_TALKER_IDLE_INTERVAL_MSEC 3000 // when idle
+#define MSRP_TALKER_CONN_INTERVAL_MSEC 3000 // when connected
+#define MSRP_LISTENER_IDLE_INTERVAL_MSEC 3000 // when idle
+#define MSRP_LISTENER_CONN_INTERVAL_MSEC 3000 // when connected
+#define MSRP_LEAVEALL_INTERVAL_MSEC 10000  
 #define ADP_ENTITY_AVAIL_INTERVAL_MSEC 5000
 #define MAAP_ANNOUNCE_INTERVAL_MSEC 10000
 #define PTP_STATUS_UPDATE_INTERVAL_MSEC 3000
@@ -105,7 +108,7 @@
 #define MVU_PROTOCOL_ID (uint8_t[6]){0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00}
 
 /* Poll interval for checking for incoming frames on L2TAP FDs */
-#define AVB_POLL_INTERVAL_MS 1000
+#define AVB_POLL_INTERVAL_MS 1
 
 /* Maximum message length */
 #define AVB_MAX_MSG_LEN 600
@@ -214,16 +217,16 @@ typedef enum {
     msrp_attr_type_domain
 } msrp_attr_type_t;
 
-/* MSRP attribute events in enumerated order */
+/* MRP attribute events in enumerated order */
 typedef enum {
-    msrp_attr_event_new,
-    msrp_attr_event_join_in,
-    msrp_attr_event_in,
-    msrp_attr_event_join_mt,
-    msrp_attr_event_mt,
-    msrp_attr_event_lv,
-    msrp_attr_event_none // no event
-} msrp_attr_event_t;
+    mrp_attr_event_new,
+    mrp_attr_event_join_in,
+    mrp_attr_event_in,
+    mrp_attr_event_join_mt,
+    mrp_attr_event_mt,
+    mrp_attr_event_lv,
+    mrp_attr_event_none // no event
+} mrp_attr_event_t;
 
 /* MSRP listener events in enumerated order */
 typedef enum {
@@ -562,12 +565,12 @@ typedef struct {
   uint8_t vechead_padding : 5;  // padding (ignored part of num_vals)
   uint8_t vechead_leaveall : 3; // 0 or 1, if 0 then num_vals is non-zero
   uint8_t vechead_num_vals;     // # of events (div by 3, round up for # of 3pes)
-} mvrp_attr_header_s; // 6 bytes
+} mrp_attr_header_s; // 6 bytes
 
 /* MVRP VLAN identifier message */
 typedef struct {
   uint8_t            protocol_ver;   // protocol version
-  mvrp_attr_header_s header;         // attribute header
+  mrp_attr_header_s  header;         // attribute header
   uint8_t            vlan_id[2];     // vlan ID
   mrp_3pe_event_t    attr_event[20]; // allow up to 20 events, ignore the rest
 } mvrp_vlan_id_message_s; // 23 bytes limit
@@ -1832,7 +1835,8 @@ typedef struct {
   eth_addr_t internal_mac_addr;
   esp_eth_handle_t eth_handle;
   int l2if[AVB_NUM_PROTOCOLS]; // 3 L2TAP interfaces (FDs) for AVTP, MSRP, and MVRP
-
+  bool l2tap_receive;
+  
   /* Our own entity */
   aem_entity_desc_s own_entity;
 
@@ -1889,7 +1893,8 @@ typedef struct {
   struct timespec last_transmitted_mvrp_vlan_id;
   struct timespec last_transmitted_msrp_domain;
   struct timespec last_transmitted_msrp_talker_adv;
-  struct timespec last_transmitted_msrp_listener_ready;
+  struct timespec last_transmitted_msrp_listener;
+  struct timespec last_transmitted_msrp_leaveall;
   struct timespec last_transmitted_maap_announce;
   struct timespec last_ptp_status_update;
   struct timespec last_transmitted_unsol_notif;
@@ -1970,23 +1975,30 @@ void eth_rx_callback(
 /* AVB send functions */
 
 /* MVRP send functions */
-int avb_send_mvrp_vlan_id(avb_state_s *state);
-
+int avb_send_mvrp_vlan_id(
+    avb_state_s *state,
+    mrp_attr_event_t attr_event,
+    bool leave_all
+);
 /* MSRP send functions */
-int avb_send_msrp_domain(avb_state_s *state);
+int avb_send_msrp_domain(
+    avb_state_s *state,
+    mrp_attr_event_t attr_event,
+    bool leave_all
+);
 int avb_send_msrp_talker(
     avb_state_s *state, 
-    msrp_attr_event_t attr_event, 
+    mrp_attr_event_t attr_event, 
     bool leave_all,
-    unique_id_t stream_id,
-    bool is_failed
+    bool is_failed,
+    unique_id_t *stream_id
 );
 int avb_send_msrp_listener(
     avb_state_s *state, 
-    msrp_attr_event_t attr_event, 
+    mrp_attr_event_t attr_event, 
     msrp_listener_event_t listener_event,
     bool leave_all,
-    unique_id_t stream_id
+    unique_id_t *stream_id
 );
 
 /* AVTP send functions */
@@ -2356,5 +2368,6 @@ acmp_status_t avb_connect_talker(
     acmp_message_s *response
 );
 int avb_get_acmp_timeout_ms(acmp_msg_type_t msg_type);
+IRAM_ATTR esp_err_t my_callback(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t length, void *priv);
 
 #endif /* _ESP_AVB_AVB_H_ */

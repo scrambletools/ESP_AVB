@@ -21,7 +21,17 @@ extern const char logo_png_end[] asm("_binary_logo_png_end");
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
-/* Initialize AVB state and create L2TAP FD - FIXME 3 FDs needed */
+
+/* AVB callback function */
+IRAM_ATTR esp_err_t my_callback(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t length, void *priv) {
+    // Process received packet
+    if (buffer[12] == 0x22 && buffer[13] == 0xf0 && buffer[14] == 0x00) {
+        avbinfo("stream frame %lu",length);
+    }
+    return ESP_OK;
+}
+
+/* Initialize AVB state and create L2TAP FDs */
 static int avb_initialize_state(
     avb_state_s *state,
     avb_config_s *config
@@ -138,6 +148,9 @@ if (state->config.listener) {
   // Set stop to false
   state->stop = false;
 
+  // Set unsolicited notifications disabled
+  state->unsol_notif_enabled = false;
+
   // Set global state
   s_state = state;
   return OK;
@@ -167,85 +180,111 @@ static void avb_update_ptp_status(avb_state_s *state) {
 
 /* Send periodic messages */
 static int avb_periodic_send(avb_state_s *state) {
-  struct timespec time_now;
-  struct timespec delta;
-  clock_gettime(CLOCK_MONOTONIC, &time_now);
+    struct timespec time_now;
+    struct timespec delta;
+    clock_gettime(CLOCK_MONOTONIC, &time_now);
 
-  // Send ADP entity available message
-  clock_timespec_subtract(&time_now, &state->last_transmitted_adp_entity_avail, &delta);
-  if (timespec_to_ms(&delta) > ADP_ENTITY_AVAIL_INTERVAL_MSEC) {
-    state->last_transmitted_adp_entity_avail = time_now;
-    avb_send_adp_entity_available(state);
-  }
+    // Send ADP entity available message
+    clock_timespec_subtract(&time_now, &state->last_transmitted_adp_entity_avail, &delta);
+    if (timespec_to_ms(&delta) > ADP_ENTITY_AVAIL_INTERVAL_MSEC) {
+        state->last_transmitted_adp_entity_avail = time_now;
+        avb_send_adp_entity_available(state);
+    }
 
-  // Send MVRP VLAN ID message
-  clock_timespec_subtract(&time_now, &state->last_transmitted_mvrp_vlan_id, &delta);
-  if (timespec_to_ms(&delta) > MVRP_VLAN_ID_INTERVAL_MSEC) {
-    state->last_transmitted_mvrp_vlan_id = time_now;
-    avb_send_mvrp_vlan_id(state);
-  }
+    // Send MVRP VLAN ID message
+    clock_timespec_subtract(&time_now, &state->last_transmitted_mvrp_vlan_id, &delta);
+    if (timespec_to_ms(&delta) > MVRP_VLAN_ID_INTERVAL_MSEC) {
+        state->last_transmitted_mvrp_vlan_id = time_now;
+        avb_send_mvrp_vlan_id(state, mrp_attr_event_join_mt, false);
+    }
 
-  // Send MSRP domain message
-  clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_domain, &delta);
-  if (timespec_to_ms(&delta) > MSRP_DOMAIN_INTERVAL_MSEC) {
-    state->last_transmitted_msrp_domain = time_now;
-    avb_send_msrp_domain(state);
-  }
+    // Send MSRP domain message
+    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_domain, &delta);
+    if (timespec_to_ms(&delta) > MSRP_DOMAIN_INTERVAL_MSEC) {
+        state->last_transmitted_msrp_domain = time_now;
+        avb_send_msrp_domain(state, mrp_attr_event_join_mt, false);
+    }
 
-  // Send MSRP talker and AVTP MAAP announce messages
-  if (state->config.talker) {
-    // clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
-    // if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
-    //   state->last_transmitted_msrp_talker_adv = time_now;
-    //   unique_id_t stream_id = {0};
-    //   avb_send_msrp_talker(state, msrp_attr_event_join_in, stream_id, false);
-    // }
-    // clock_timespec_subtract(&time_now, &state->last_transmitted_maap_announce, &delta);
-    // if (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
-    //   state->last_transmitted_maap_announce = time_now;
-    //   avb_send_maap_announce(state);
-    // }
-  }
+    // Send MSRP talker and AVTP MAAP announce messages
+    if (state->config.talker) {
+        // clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv, &delta);
+        // if (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
+        //   state->last_transmitted_msrp_talker_adv = time_now;
+        //   unique_id_t stream_id = {0};
+        //   avb_send_msrp_talker(state, mrp_attr_event_join_in, stream_id, false);
+        // }
+        // clock_timespec_subtract(&time_now, &state->last_transmitted_maap_announce, &delta);
+        // if (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
+        //   state->last_transmitted_maap_announce = time_now;
+        //   avb_send_maap_announce(state);
+        // }
+    }
 
-  // Send MSRP listener message
-  if (state->config.listener) {
-    // clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener_ready, &delta);
-    // if (timespec_to_ms(&delta) > MSRP_LISTENER_READY_INTERVAL_MSEC) {
-    //     state->last_transmitted_msrp_listener_ready = time_now;
-    //     unique_id_t stream_id = {0};
-    //     avb_send_msrp_listener(state, msrp_attr_event_join_in, msrp_listener_event_ready, stream_id);
-    // }
-  }
+    // Send MSRP listener message
+    if (state->config.listener) {
+        clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener, &delta);
+        for (int i = 0; i < state->num_input_streams; i++) { 
+            // if connected and time to send
+            if (state->input_streams[i].connected && timespec_to_ms(&delta) > MSRP_LISTENER_CONN_INTERVAL_MSEC) {
+                state->last_transmitted_msrp_listener = time_now;
+                avb_send_msrp_listener(
+                    state, 
+                    mrp_attr_event_join_mt, 
+                    msrp_listener_event_ready, 
+                    false,
+                    &state->input_streams[i].stream_id);
+            // if idle and time to send
+            } else if (timespec_to_ms(&delta) > MSRP_LISTENER_IDLE_INTERVAL_MSEC) {
+                state->last_transmitted_msrp_listener = time_now;
+                avb_send_msrp_listener(
+                    state, 
+                    mrp_attr_event_mt, 
+                    msrp_listener_event_ready, 
+                    false,
+                    &state->input_streams[i].stream_id);
+            }
+        }
+    }
 
-  // Send Unsolicited notifications
-  if (state->unsol_notif_enabled) {
+    // if time to send leaveAll
+    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_leaveall, &delta);
+    if (timespec_to_ms(&delta) > MSRP_LEAVEALL_INTERVAL_MSEC) {
+        state->last_transmitted_msrp_leaveall = time_now;
+        avb_send_msrp_domain(state, mrp_attr_event_mt, true);
+    }
 
-    // TODO: this should be done only after specific responses are sent
+    // Send Unsolicited notifications
+    if (state->unsol_notif_enabled) {
 
-    // if (state->config.talker) {
-    //     // Send get counters stream_output notification
-    //     for (int i = 0; i < state->num_output_streams; i++) {
-    //         clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
-    //         if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
-    //             state->last_transmitted_unsol_notif = time_now;
-    //             avb_send_aecp_unsol_get_counters(state, aem_desc_type_stream_output, i);
-    //         }
-    //     }
-    // }
-    // if (state->config.listener) {
-    //     // Send get counters stream_input notification
-    //     for (int i = 0; i < state->num_input_streams; i++) {
-    //         if (state->input_streams[i].stream.flags.connected) {
-    //         clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
-    //         if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
-    //             state->last_transmitted_unsol_notif = time_now;
-    //             avb_send_aecp_unsol_get_counters(state, aem_desc_type_stream_input, i);
-    //         }
-    //     }
-    // }
-  }
-  return OK;
-}
+        if (state->config.talker) {
+            // Send get counters stream_output notification
+            for (int i = 0; i < state->num_output_streams; i++) {
+                // if the output stream is active
+                if (octets_to_uint(state->output_streams[i].connection_count, 2) > 0) {
+                    clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
+                    if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
+                        state->last_transmitted_unsol_notif = time_now;
+                        avb_send_aecp_unsol_get_counters(state, aem_desc_type_stream_output, i);
+                    }
+                }
+            }
+        }
+        if (state->config.listener) {
+            // Send get counters stream_input notification
+            for (int i = 0; i < state->num_input_streams; i++) {
+                // if the input stream is active
+                if (state->input_streams[i].connected) {
+                    clock_timespec_subtract(&time_now, &state->last_transmitted_unsol_notif, &delta);
+                    if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
+                        state->last_transmitted_unsol_notif = time_now;
+                        avb_send_aecp_unsol_get_counters(state, aem_desc_type_stream_input, i);
+                    }
+                }
+            }
+        }
+    }
+    return OK;
+} // avb_periodic_send
 
 /* Determine received message type and process it */
 
@@ -460,9 +499,6 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   return ERROR;
 }
 
-/* Callback on ethernet frame receive */
-//TBD
-
 /* Process status information request */
 static void avb_process_statusreq(avb_state_s *state) {
   avb_status_s *status;
@@ -536,31 +572,55 @@ static void avb_task(void *task_param) {
         continue;
         }
     }
+    // allow receive on L2TAP interfaces
+    state->l2tap_receive = true;
+    //ESP_ERROR_CHECK(esp_eth_update_input_path(state->config.eth_handle, my_callback, NULL));
 
+    bool first_time_receive_off = true;
+    
     // Main AVB loop
     while (!state->stop) {
 
-        /* Wait for a message on any of the L2TAP interfaces */
-        if (poll(pollfds, AVB_NUM_PROTOCOLS, AVB_POLL_INTERVAL_MS)) {
-        /* Check for events on each L2TAP interface */
-        for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
-            if (pollfds[i].revents) {
-                /* Get a message from the L2TAP interface */
-                int ret = avb_net_recv(state->l2if[i], &state->rxbuf[i], AVB_MAX_MSG_LEN, &state->rxtime[i], &state->rxsrc[i]);
-                if (ret > 0) {
-                    /* ignore active streams as they are too fast */
-                    if (i == AVTP
-                    && (state->rxbuf[i].avtp.subtype == avtp_subtype_aaf
-                    || state->rxbuf[i].avtp.subtype == avtp_subtype_61883)) {
-                        break;
-                    } 
-                    /* Process the received message */
-                    avb_process_rx_message(state, i, ret);
-
+        if (state->l2tap_receive) {
+            /* Wait for a message on any of the L2TAP interfaces */
+            if (poll(pollfds, AVB_NUM_PROTOCOLS, AVB_POLL_INTERVAL_MS)) {
+                /* Check for events on each L2TAP interface */
+                for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
+                    if (pollfds[i].revents) {
+                        /* Get a message from the L2TAP interface */
+                        int ret = avb_net_recv(
+                            state->l2if[i], 
+                            &state->rxbuf[i], 
+                            AVB_MAX_MSG_LEN, 
+                            &state->rxtime[i], 
+                            &state->rxsrc[i]);
+                        if (ret > 0) {
+                            /* ignore active streams as they are too fast */
+                            // if (i == AVTP
+                            // && (state->rxbuf[i].avtp.subtype == avtp_subtype_aaf
+                            // || state->rxbuf[i].avtp.subtype == avtp_subtype_61883)) {
+                            //     avbinfo("*");
+                            // } 
+                            //if (i == AVTP) avbinfo("*");
+                            /* Process the received message */
+                            avb_process_rx_message(state, i, ret);
+                        }
+                    }
                 }
             }
         }
+        else {
+            if (first_time_receive_off) {
+                vTaskDelay(100);
+                first_time_receive_off = false;
+                avbinfo("L2TAP receive disabled");
+                char statsbuff[500];
+                vTaskGetRunTimeStats(statsbuff);
+                avbinfo("Run time stats: %s", statsbuff);
+            }
         }
+
+        if (state->l2tap_receive) {
 
         // Get PTP status
         struct timespec time_now;
@@ -568,8 +628,8 @@ static void avb_task(void *task_param) {
         clock_gettime(CLOCK_MONOTONIC, &time_now);
         clock_timespec_subtract(&time_now, &state->last_ptp_status_update, &delta);
         if (timespec_to_ms(&delta) > PTP_STATUS_UPDATE_INTERVAL_MSEC) {
-        state->last_ptp_status_update = time_now;
-        avb_update_ptp_status(state);
+            state->last_ptp_status_update = time_now;
+            avb_update_ptp_status(state);
         }
 
         // Send periodic messages such as announcing entity available, etc
@@ -580,6 +640,7 @@ static void avb_task(void *task_param) {
 
         // Process status requests
         avb_process_statusreq(state);
+        }
     } // while (!state->stop)
 err:
     if (state) {
@@ -602,8 +663,8 @@ int avb_start(avb_config_s *config)
     return ERROR;
   }
   if (s_state == NULL) {
-    xTaskCreate(avb_task, "AVB", 8192,
-              (void *)config, 20, NULL);
+    xTaskCreate(avb_task, "AVB", 12288,
+              (void *)config, 21, NULL);
     return OK;
   }
   avberr("Another instance of AVB is already running");

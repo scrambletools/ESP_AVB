@@ -1,6 +1,36 @@
-# ESP_AVB
+# esp_avb Example
 
- AVB Implementation using ESP-IDF
+ An example AVB talker and listener implementation using the esp_avb component for ESP-IDF.
+
+This implementation is based on the following standards:
+- IEEE 1722-2016 (AVTP)
+- IEEE 1722.1-2021 (ATDECC)
+- IEEE 802.1Q-2022 (MSRP, MVRP)
+- IEEE 802.1AS-2021 (gPTP, based on ESP-IDF PTPd implementation)
+
+Anticipated future support:
+- AVB over Wifi (class B streams)
+- AVB 'lite' (using PTP default profile, works with any switch)
+- AES67 (using either PTP default profile or gPTP)
+
+About this example:
+
+This example application can operate as talker and/or listener. It uses the esp_avb component which is currently limited to supporting the Everest ES8311 mono CODEC up to 24bit/96kHz PCM audio (in either IEC61883-6 or AAF stream format). There was an attempt to leverage the new ESP-IDF codec framework to expand support for more codecs, but unfortunately the new framework seems to have I2C issues.
+
+ESP_AVB: The example is designed to demonstrate the use of the the esp_avb component with very little knowlege of AVB needed. Our hope is that it shows how the ESP_AVB component can be easily dropped into an existing ESP-IDF audio application and provide a simple interface to add AVB connectivity for realtime low-latency audio routing.
+
+CONTROLLER: Currently there is no ATDECC controller functionality in the esp_avb component, so this example is intended to demo the talker and listener functionality only. It has been tested with the Hive AVB controller (open source) as well as the Apple ATDECC controller (part of  MacOS).
+
+HARDWARE: It has been tested on the ESP32-P4 Nano board from Waveshare, and should work with any board using both the ESP32-P4 and the ES8311 codec. Other ESP32 SoCs will not operate correctly due to lack of hardware timestamp in the Ethernet MAC, which the ESP32P4 does have. Comptability testing has been performed with the MOTU AVB Switch, the MOTU 8D audio interface and the Apple virtual AVB endpoint device (part of MacOS).
+
+OPEN SOURCE: This example app and the esp_avb component were initially developed by Scramble Tools LLC, and they are provided as open source software for the AVB/Milan developer community under the MIT software license to encourage further development of low cost products and solutions for AVB audio networking.
+
+FEEDBACK: Please provide feedback or pull requests via the Github repository.
+
+
+--------------------------------
+
+ *** Project notes (just for project maintainer) ***
 
  Formats supported by test devices:
 
@@ -33,7 +63,7 @@
  - JoinEmpty: declared, but not registered.
  - JoinIn: declared and registered.
 
- 8D SRP send pattern:
+ *** 8D SRP send pattern ***
 
  upon talker connection:
    talker ready New twice, then listener In once
@@ -60,6 +90,7 @@
    leaveAll (with T, L and domain) every 25sec (new L and domain with Mt, others with nothing)
    when leaveAll with Mt, then data is populated
 
+*** Interaction between devices ***
 
 Summary of the AVB talker (T), listener (L), controller (C) and bridge (B) interaction:
 [Sequence of frame transmissions by each device type]

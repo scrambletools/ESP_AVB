@@ -35,7 +35,7 @@ typedef struct {
 static const char *TAG = "avb_example";
 static struct timespec s_next_time;
 static bool s_gpio_level;
-esp_eth_handle_t *eth_handles;
+esp_eth_handle_t eth_handle;
 char avb_interface[10];
 
 /* Import music file as buffer */
@@ -62,10 +62,29 @@ static esp_err_t gpio_init(void) {
 
 /* Initialize Ethernet and netif on all available ports */
 void init_ethernet_and_netif(void) {
-    uint8_t eth_port_cnt;
 
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ESP_ERROR_CHECK(example_eth_init(&eth_handles, &eth_port_cnt));
+
+    eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
+
+    // Increase DMA buffer size and count
+    emac_config.dma_burst_len = ETH_DMA_BURST_LEN_32; 
+    emac_config.intr_priority = 0;   // use default priority
+    mac_config.rx_task_stack_size = 12288;
+    mac_config.rx_task_prio = 15;
+    // Set PHY address (usually 0 or 1, check your hardware)
+    phy_config.phy_addr = 1;
+    phy_config.reset_gpio_num = 5;  // GPIO number for PHY reset
+
+    // Create MAC and PHY instances
+    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
+    esp_eth_phy_t *phy = esp_eth_phy_new_ip101(&phy_config);
+
+    // Install Ethernet driver
+    esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
+    ESP_ERROR_CHECK(esp_eth_driver_install(&config, &eth_handle));
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_vfs_l2tap_intf_register(NULL));
 
@@ -74,31 +93,20 @@ void init_ethernet_and_netif(void) {
         .base = &esp_netif_base_config,
         .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH
     };
-    char if_key_str[10];
-    char if_desc_str[10];
-    char num_str[3];
-    for (int i = 0; i < eth_port_cnt; i++) {
-        itoa(i, num_str, 10);
-        strcat(strcpy(if_key_str, "ETH_"), num_str);
-        strcat(strcpy(if_desc_str, "eth"), num_str);
-        esp_netif_base_config.if_key = if_key_str;
-        esp_netif_base_config.if_desc = if_desc_str;
-        esp_netif_base_config.route_prio -= i*5;
-        esp_netif_t *eth_netif = esp_netif_new(&esp_netif_config);
+    esp_netif_base_config.if_key = "ETH_0";
+    esp_netif_base_config.if_desc = "eth0";
+    esp_netif_base_config.route_prio = 50;
+    esp_netif_t *eth_netif = esp_netif_new(&esp_netif_config);
 
-        // attach Ethernet driver to TCP/IP stack
-        ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handles[i])));
+    // attach Ethernet driver to TCP/IP stack
+    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
 
-        // Set the first interface as the AVB interface
-        if (i == 0) {
-            memcpy(avb_interface, if_key_str, sizeof(if_key_str));
-            ESP_LOGI(TAG, "AVB interface: %s", avb_interface);
-        }
-    }
+    // Set the first interface as the AVB interface
+    memcpy(avb_interface, esp_netif_base_config.if_key, strlen(esp_netif_base_config.if_key));
+    ESP_LOGI(TAG, "AVB interface: %s", avb_interface);
+
     // Start Ethernet
-    for (int i = 0; i < eth_port_cnt; i++) {
-        ESP_ERROR_CHECK(esp_eth_start(eth_handles[i]));
-    }
+    ESP_ERROR_CHECK(esp_eth_start(eth_handle));
 }
 
 /* Callback function to toggle the output pin for time pulse indicator LED */
@@ -133,6 +141,7 @@ void app_main(void) {
 
     /* Start Ethernet */
     init_ethernet_and_netif();
+    ESP_LOGI(TAG, "Ethernet started");
 
     /* Start PTP */
     int pid = ptpd_start(avb_interface);
@@ -152,7 +161,16 @@ void app_main(void) {
 #endif
 
     /* Set the Ethernet handle in the AVB config */
-    avb_config.eth_handle = eth_handles[0];
+    avb_config.eth_handle = eth_handle;
+
+    /* Set ethernet to promiscuous mode */
+    esp_eth_io_cmd_t cmd = ETH_CMD_S_PROMISCUOUS;
+    bool promiscuous = true;
+    esp_err_t err = esp_eth_ioctl(eth_handle, cmd, &promiscuous);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set ethernet to promiscuous mode");
+        abort();
+    }
 
     /* Set the Ethernet interface in the AVB config */
     avb_config.eth_interface = "ETH_0";
