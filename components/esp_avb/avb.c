@@ -552,14 +552,25 @@ static void avb_task(void *task_param) {
         goto err;
     }
 
-    /* Initialize i2s interface to codec */
-    if (avb_config_i2s(state) != ESP_OK) {
-        avberr("I2S init failed");
-        goto err;
-    }
+    state->codec_enabled = false;
 
-    /* Initialize codec */
-    ESP_ERROR_CHECK(avb_config_codec(state));
+    if (state->config.listener || state->config.talker) {
+
+        /* Initialize i2s interface to codec */
+        if (avb_config_i2s(state) != ESP_OK) {
+            avberr("I2S init failed");
+            goto err;
+        }
+
+        /* Initialize codec */
+        if (avb_config_codec(state) != ESP_OK) {
+            avberr("Codec init failed");
+            goto err;
+        }
+        else {
+            state->codec_enabled = true;
+        }
+    }
 
     // Set up pollfds for each L2TAP interface
     struct pollfd pollfds[AVB_NUM_PROTOCOLS];
@@ -622,24 +633,26 @@ static void avb_task(void *task_param) {
 
         if (state->l2tap_receive) {
 
-        // Get PTP status
-        struct timespec time_now;
-        struct timespec delta;
-        clock_gettime(CLOCK_MONOTONIC, &time_now);
-        clock_timespec_subtract(&time_now, &state->last_ptp_status_update, &delta);
-        if (timespec_to_ms(&delta) > PTP_STATUS_UPDATE_INTERVAL_MSEC) {
-            state->last_ptp_status_update = time_now;
-            avb_update_ptp_status(state);
-        }
+            if (state->config.listener || state->config.talker) {
+                // Get PTP status
+                struct timespec time_now;
+                struct timespec delta;
+                clock_gettime(CLOCK_MONOTONIC, &time_now);
+                clock_timespec_subtract(&time_now, &state->last_ptp_status_update, &delta);
+                if (timespec_to_ms(&delta) > PTP_STATUS_UPDATE_INTERVAL_MSEC) {
+                    state->last_ptp_status_update = time_now;
+                    avb_update_ptp_status(state);
+                }
+            }
 
-        // Send periodic messages such as announcing entity available, etc
-        avb_periodic_send(state);
+            // Send periodic messages such as announcing entity available, etc
+            avb_periodic_send(state);
 
-        // do validation checking for timed out connections, etc
-        // TBD
+            // do validation checking for timed out connections, etc
+            // TBD
 
-        // Process status requests
-        avb_process_statusreq(state);
+            // Process status requests
+            avb_process_statusreq(state);
         }
     } // while (!state->stop)
 err:
@@ -709,5 +722,8 @@ int avb_stop()
 
 /* Get the codec handle */
 void *avb_get_codec_handle() {
-  return s_state->config.codec_handle;
+    if (!s_state->codec_enabled) {
+        return NULL;
+    }
+    return s_state->config.codec_handle;
 }

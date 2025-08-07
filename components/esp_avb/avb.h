@@ -1815,6 +1815,27 @@ typedef struct {
   bool             inbound;       // indicates if the command is inbound
 } atdecc_inflight_command_s;
 
+/* Stream Input params */
+struct stream_in_params_s {
+  i2s_chan_handle_t i2s_tx_handle; // handle to i2s tx channel
+  uint16_t buffer_size; // buffer size
+  uint16_t interval; // interval in microseconds
+  uint8_t l2if; // layer2 interface
+  unique_id_t stream_id; // stream ID
+  uint8_t bit_depth; // bit depth
+  uint8_t channels; // channels
+  uint8_t sample_rate; // sample rate
+  uint8_t format; // aaf format
+};
+
+/* Stream Output params */
+struct stream_out_params_s {
+  i2s_chan_handle_t i2s_rx_handle; // handle to i2s rx channel
+  uint16_t buffer_size; // buffer size
+  uint16_t interval; // interval in microseconds
+  uint8_t l2if; // layer2 interface
+};
+
 /* Carrier structure for querying AVB status */
 typedef struct {
   sem_t *        done;
@@ -1835,7 +1856,8 @@ typedef struct {
   eth_addr_t internal_mac_addr;
   esp_eth_handle_t eth_handle;
   int l2if[AVB_NUM_PROTOCOLS]; // 3 L2TAP interfaces (FDs) for AVTP, MSRP, and MVRP
-  bool l2tap_receive;
+  bool l2tap_receive; // receive L2TAP frames
+  bool codec_enabled; // codec enabled
   
   /* Our own entity */
   aem_entity_desc_s own_entity;
@@ -1909,27 +1931,6 @@ typedef struct {
   uint32_t logo_length;
 
 } avb_state_s;
-
-/* Stream Input params */
-struct stream_in_params_s {
-  i2s_chan_handle_t i2s_tx_handle; // handle to i2s tx channel
-  uint16_t buffer_size; // buffer size
-  uint16_t interval; // interval in microseconds
-  uint8_t l2if; // layer2 interface
-  unique_id_t stream_id; // stream ID
-  uint8_t bit_depth; // bit depth
-  uint8_t channels; // channels
-  uint8_t sample_rate; // sample rate
-  uint8_t format; // aaf format
-};
-
-/* Stream Output params */
-struct stream_out_params_s {
-  i2s_chan_handle_t i2s_rx_handle; // handle to i2s rx channel
-  uint16_t buffer_size; // buffer size
-  uint16_t interval; // interval in microseconds
-  uint8_t l2if; // layer2 interface
-};
 
 /* AVB Functions */
 

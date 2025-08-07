@@ -23,7 +23,7 @@
 #include <ptpd.h>
 #include "esp_avb.h"
 
-/* Example configurations */
+/* Example config variables */
 #define AVB_SPEAKER_VOLUME  CONFIG_EXAMPLE_AVB_SPEAKER_VOLUME
 #define AVB_MIC_GAIN        CONFIG_EXAMPLE_AVB_MIC_GAIN
 
@@ -71,7 +71,7 @@ void init_ethernet_and_netif(void) {
 
     // Increase DMA buffer size and count
     emac_config.dma_burst_len = ETH_DMA_BURST_LEN_32; 
-    emac_config.intr_priority = 0;   // use default priority
+    emac_config.intr_priority = 0;   // 0 = use default priority
     mac_config.rx_task_stack_size = 12288;
     mac_config.rx_task_prio = 15;
     // Set PHY address (usually 0 or 1, check your hardware)
@@ -111,22 +111,7 @@ void init_ethernet_and_netif(void) {
 
 /* Callback function to toggle the output pin for time pulse indicator LED */
 IRAM_ATTR bool ts_callback(esp_eth_mediator_t *eth, void *user_args) {
-    gpio_set_level(CONFIG_EXAMPLE_AVB_PULSE_GPIO, s_gpio_level ^= 1);
-
-    // Set the next target time
-    struct timespec interval = {
-        .tv_sec = 0,
-        .tv_nsec = CONFIG_EXAMPLE_AVB_PULSE_WIDTH_NS
-    };
-    timespecadd(&s_next_time, &interval, &s_next_time);
-
-    struct timespec curr_time;
-    esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &curr_time);
-
-    // check that the next time is in the future
-    if (timespeccmp(&s_next_time, &curr_time, >)) {
-        esp_eth_clock_set_target_time(CLOCK_PTP_SYSTEM, &s_next_time);
-    }
+    // Do something with the PTP status
     return false;
 }
 
@@ -193,14 +178,9 @@ void app_main(void) {
     /* Register callback function for time pulse indicator LED */
     esp_eth_clock_register_target_cb(CLOCK_PTP_SYSTEM, ts_callback);
 
-    bool first_pass = true;
-    bool clock_source_valid = false;
-    bool clock_source_valid_last = false;
-    int32_t clock_source_valid_cnt = 0;
-
     /* Task handles for memory consumption monitoring */
-    static const uint period = 1000; // wait between checks in ms
-    static const uint threshold = 1000; // size of high watermark
+    static const uint task_monitor_period = 1000; // wait between checks in ms
+    static const uint task_monitor_threshold = 1000; // size of high watermark
     char t0_name[] = "main_task";  // usually under 16 chars
     char t1_name[] = "AVB";
     char t2_name[] = "PTPD";
@@ -211,59 +191,17 @@ void app_main(void) {
     /* Main loop */
     while (1) {
         struct ptpd_status_s ptp_status;
-        // if valid PTP status then increment the valid counter
+        // If valid PTP status
         if (ptpd_status(pid, &ptp_status) == 0) {
-            if (ptp_status.clock_source_valid) {
-                clock_source_valid_cnt++;
-            } else {
-                clock_source_valid_cnt = 0;
-            }
-        // if PTP status is not valid then decrement the valid counter
-        } else {
-            if (clock_source_valid_cnt > 0) {
-                clock_source_valid_cnt--;
-            }
+            // Do something with the PTP status
         }
-        // consider the clock source valid only after n consequent intervals to be sure clock was synced
-        if (clock_source_valid_cnt > 2) {
-            clock_source_valid = true;
-        } else {
-            clock_source_valid = false;
-        }
-        // source validity changed => resync the pulse for ptp slave OR when the first pass to PTP master
-        // starts generating its pulses
-        if ((clock_source_valid == true && clock_source_valid_last == false) || first_pass) {
-            first_pass = false;
-
-            // get the current time (now synced)
-            esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &cur_time);
-
-            // compute the next pulse time
-            s_next_time.tv_sec = 1;
-            timespecadd(&s_next_time, &cur_time, &s_next_time);
-            s_next_time.tv_nsec = CONFIG_EXAMPLE_AVB_PULSE_WIDTH_NS;
-
-            // set the output pin (functionality disabled for now)
-            // ESP_LOGI(TAG, "Starting Pulse train");
-            // ESP_LOGI(TAG, "curr time: %llu.%09lu", cur_time.tv_sec, cur_time.tv_nsec);
-            // ESP_LOGI(TAG, "next time: %llu.%09lu", s_next_time.tv_sec, s_next_time.tv_nsec);
-            // s_gpio_level = 0;
-            // gpio_set_level(CONFIG_EXAMPLE_AVB_PULSE_GPIO, s_gpio_level);
-
-            // set the next pulse time
-            esp_eth_clock_set_target_time(CLOCK_PTP_SYSTEM, &s_next_time);
-        }
-        else {
-            //ESP_LOGW(TAG, "PTP clock not synced (count %ld)", clock_source_valid_cnt);
-        }   
-        clock_source_valid_last = clock_source_valid;
 
         // Check memory consumption of tasks periodically, report any tasks with high watermark under threshold
-        if (uxTaskGetStackHighWaterMark(t0) < threshold)
+        if (uxTaskGetStackHighWaterMark(t0) < task_monitor_threshold)
             ESP_LOGI(TAG, "TASK %s high water mark = %d", t0_name, uxTaskGetStackHighWaterMark(t0));
-        if (uxTaskGetStackHighWaterMark(t1) < threshold)
+        if (uxTaskGetStackHighWaterMark(t1) < task_monitor_threshold)
             ESP_LOGI(TAG, "TASK %s high water mark = %d", t1_name, uxTaskGetStackHighWaterMark(t1));
-        if (uxTaskGetStackHighWaterMark(t2) < threshold)
+        if (uxTaskGetStackHighWaterMark(t2) < task_monitor_threshold)
             ESP_LOGI(TAG, "TASK %s high water mark = %d", t2_name, uxTaskGetStackHighWaterMark(t2));
     }
 }
