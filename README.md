@@ -181,7 +181,7 @@ PTP/MSRP observed messages:
     pri1 248, class248, acc 0x21, variance 17258, pri2 235
 
 Summary of connection setup:
-
+```
 Controller          Talker              Network Bridges         Listener
     |                  |                       |                    |
     |--CONNECT_TX_CMD->|                       |                    |
@@ -195,3 +195,4 @@ Controller          Talker              Network Bridges         Listener
     |<-----------------------------------CONNECT_RX_RSP-------------|
     |                  |                       |                    |
     |              [ Stream flows from Talker to Listener ]         |
+```
