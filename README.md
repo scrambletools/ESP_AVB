@@ -179,3 +179,19 @@ PTP/MSRP observed messages:
 ...
 - apple: announce: domain 0, seq 333, flags 0008, ctrfield other(5), period 0
     pri1 248, class248, acc 0x21, variance 17258, pri2 235
+
+Summary of connection setup:
+
+Controller          Talker              Network Bridges         Listener
+    |                  |                       |                    |
+    |--CONNECT_TX_CMD->|                       |                    |
+    |                  |--MSRP Talker Adv. --->|                    |
+    |                  |                       |<--MSRP Talker Adv--|
+    |<-CONNECT_TX_RSP--|                       |                    |
+    |                  |                       |                    |
+    |------------------------------------CONNECT_RX_CMD------------>|
+    |                  |                       |<--MSRP Lstnr Rdy---|
+    |                  |<------- MSRP Listener Ready ---------------|
+    |<-----------------------------------CONNECT_RX_RSP-------------|
+    |                  |                       |                    |
+    |              [ Stream flows from Talker to Listener ]         |
