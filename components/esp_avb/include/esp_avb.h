@@ -18,6 +18,7 @@
 
 #include <stdbool.h>
 #include <time.h>
+#include <esp_eth.h>
 
 /****************************************************************************
  * Compiler Definitions
@@ -92,6 +93,8 @@ typedef struct {
     uint8_t                num_channels_output;       // number of output channels
     avb_sample_rates_s     supported_sample_rates;    // supported sample rates
     avb_bit_rates_s        supported_bits_per_sample; // supported bits per sample
+    const uint8_t *        pcm_data;                  // pointer to embedded PCM file data
+    uint32_t               pcm_data_length;           // length of PCM data in bytes
 } avb_config_s;
 
 /* AVB status information structure */

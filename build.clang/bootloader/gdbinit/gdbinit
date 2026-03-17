@@ -1,0 +1,2 @@
+source /home/user/Development/ESP_AVB/build.clang/bootloader/gdbinit/symbols
+source /home/user/Development/ESP_AVB/build.clang/bootloader/gdbinit/connect

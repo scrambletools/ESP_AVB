@@ -85,7 +85,7 @@ struct timeval timeval_divide_by_int(struct timeval tv, int divisor);
 int compare_timeval(struct timeval t1, struct timeval t2);
 esp_err_t add_to_list_front(void *item_to_add, void *list, size_t item_size, size_t list_size);
 int8_t msec_to_log_period(uint16_t msec_period);
-uint16_t log_period_to_msec(int8_t log_period);
+uint32_t log_period_to_msec(int8_t log_period);
 double scaled_to_ppm(int32_t scaled_value);
 int32_t ppm_to_scaled(double ppm_value);
 int64_t timespec_to_ms(const struct timespec *ts);

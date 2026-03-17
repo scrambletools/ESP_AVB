@@ -31,16 +31,6 @@ menu "AVB Configuration"
         help
             Set the priority for the AVB task.
 
-    config ESP_AVB_MSRP_DOMAIN
-        int "MSRP domain"
-        default 1
-        range 0 4095
-        depends on ESP_AVB
-        help
-            Set MSRP domain for AVB stream registration.
-            According to IEEE 802.1Q-2018, the default MSRP domain for AVB is 1.
-            Values 0-4095 are valid, but domain 1 is reserved for AVB usage.
-
     config ESP_AVB_VLAN_ID
         int "AVB VLAN ID"
         default 2

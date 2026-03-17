@@ -1,0 +1,92 @@
+Command: ninja all
+CMake Warning at /home/user/Development/esp-idf/tools/cmake/build.cmake:693 (message):
+  WARNING: The following Kconfig variables were used in "if" clauses, but not
+  found in any Kconfig file:
+
+      ETHERNET_PHY_USE_DP83848, introduced by espressif/dp83848, defined in (unknown)
+      ETHERNET_PHY_USE_IP101, introduced by espressif/ip101, defined in (unknown)
+      ETHERNET_PHY_USE_KSZ80XX, introduced by espressif/ksz80xx, defined in (unknown)
+      ETHERNET_PHY_USE_LAN867X, introduced by espressif/lan867x, defined in (unknown)
+      ETHERNET_PHY_USE_LAN87XX, introduced by espressif/lan87xx, defined in (unknown)
+      ETHERNET_PHY_USE_RTL8201, introduced by espressif/rtl8201, defined in (unknown)
+      ETHERNET_SPI_USE_CH390, introduced by espressif/ch390, defined in (unknown)
+      ETHERNET_SPI_USE_DM9051, introduced by espressif/dm9051, defined in (unknown)
+      ETHERNET_SPI_USE_ENC28J60, introduced by espressif/enc28j60, defined in (unknown)
+      ETHERNET_SPI_USE_KSZ8851SNL, introduced by espressif/ksz8851snl, defined in (unknown)
+      ETHERNET_SPI_USE_LAN865X, introduced by espressif/lan865x, defined in (unknown)
+      ETHERNET_SPI_USE_W5500, introduced by espressif/w5500, defined in (unknown)
+
+
+
+Call Stack (most recent call first):
+  /home/user/Development/esp-idf/tools/cmake/project.cmake:742 (idf_build_process)
+  CMakeLists.txt:6 (project)
+
+
+Configuration Report                                                            
+ ────────────────────────────────────────────────────────────────────────────── 
+   Parser Version: 1                                                            
+   Verbosity: default                                                           
+   Defaults policy: sdkconfig                                                   
+   Status: Finished with notifications                                          
+                                                                                
+  Default Value Mismatch                                                        
+   ──────────────────────────────────────────────────────────────────────────   
+    Using sdkconfig default values                                              
+    Choice symbols with different default selection between sdkconfig and       
+    Kconfig                                                                     
+    COMPILER_CXX_GLIBCXX_CONSTEXPR: Kconfig default selection: choice           
+    deselected, sdkconfig default selection:                                    
+    COMPILER_CXX_GLIBCXX_CONSTEXPR_NO_CHANGE                                    
+    COMPILER_RT_LIB: Kconfig default selection: COMPILER_RT_LIB_CLANGRT,        
+    sdkconfig default selection: COMPILER_RT_LIB_GCCLIB                         
+   ──────────────────────────────────────────────────────────────────────────   
+  Disabled Symbols/Choices With User-Set Value                                  
+   ──────────────────────────────────────────────────────────────────────────   
+    * IDF_TARGET (defined at /home/user/Development/esp-idf/Kconfig:68) with    
+    user-set value esp32p4 from /tmp/kconfgen_tmp591omp8f                       
+    * ESPTOOLPY_FLASHSIZE (defined at                                           
+    /home/user/Development/esp-idf/components/esptool_py/Kconfig.projbuild:…    
+    with user-set value 16MB from /tmp/kconfgen_tmp591omp8f                     
+   ──────────────────────────────────────────────────────────────────────────   
+ ────────────────────────────────────────────────────────────────────────────── 
+CMake Warning at /home/user/Development/esp-idf/tools/cmake/project.cmake:755 (message):
+  Missing kconfig option.  Re-run the build process...
+Call Stack (most recent call first):
+  CMakeLists.txt:6 (project)
+
+
+Configuration Report                                                            
+ ────────────────────────────────────────────────────────────────────────────── 
+   Parser Version: 1                                                            
+   Verbosity: default                                                           
+   Defaults policy: sdkconfig                                                   
+   Status: Finished with notifications                                          
+                                                                                
+  Default Value Mismatch                                                        
+   ──────────────────────────────────────────────────────────────────────────   
+    Using sdkconfig default values                                              
+    Choice symbols with different default selection between sdkconfig and       
+    Kconfig                                                                     
+    COMPILER_RT_LIB: Kconfig default selection: COMPILER_RT_LIB_CLANGRT,        
+    sdkconfig default selection: COMPILER_RT_LIB_GCCLIB                         
+   ──────────────────────────────────────────────────────────────────────────   
+  Disabled Symbols/Choices With User-Set Value                                  
+   ──────────────────────────────────────────────────────────────────────────   
+    * IDF_TARGET (defined at /home/user/Development/esp-idf/Kconfig:68) with    
+    user-set value esp32p4 from /tmp/kconfgen_tmpgie7yimb                       
+    * ESPTOOLPY_FLASHSIZE (defined at                                           
+    /home/user/Development/esp-idf/components/esptool_py/Kconfig.projbuild:…    
+    with user-set value 16MB from /tmp/kconfgen_tmpgie7yimb                     
+   ──────────────────────────────────────────────────────────────────────────   
+ ────────────────────────────────────────────────────────────────────────────── 
+CMake Warning at /home/user/Development/esp-idf/components/esp_common/project_include.cmake:16 (message):
+  Building ESP-IDF with clang is an experimental feature and is not yet
+  officially supported.
+Call Stack (most recent call first):
+  /home/user/Development/esp-idf/tools/cmake/build.cmake:517 (include)
+  /home/user/Development/esp-idf/tools/cmake/build.cmake:791 (__build_process_project_includes)
+  /home/user/Development/esp-idf/tools/cmake/project.cmake:742 (idf_build_process)
+  CMakeLists.txt:6 (project)
+
+

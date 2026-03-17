@@ -91,16 +91,4 @@ menu "AVB Example Configuration"
         help
             Allow an AVB Controller to control this device via ATDECC protocol.
 
-    config EXAMPLE_AVB_PULSE_GPIO
-        int "GPIO for pulse indicator LED"
-        default 20
-        help
-            GPIO to use for pulse indicator LED.
-
-    config EXAMPLE_AVB_PULSE_WIDTH_NS
-        int "Pulse width"
-        default 250000000
-        help
-            Pulse width for pulse indicator LED.
-
 endmenu
