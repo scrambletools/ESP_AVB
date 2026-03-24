@@ -115,13 +115,12 @@ int avb_send_aecp_rsp_get_stream_info(avb_state_s *state,
   static const uint8_t zero_lat[4] = {0};
 
   if (is_output) {
+    // output stream info
     avb_talker_stream_s *s = &state->output_streams[index];
     aem_stream_info_flags_s flags = s->stream_info_flags;
-    flags.stream_vlan_id_valid = 1;
     flags.stream_id_valid = memcmp(s->stream_id, zero_id, UNIQUE_ID_LEN) != 0;
     flags.stream_dest_mac_valid =
         memcmp(s->stream_dest_addr, zero_mac, ETH_ADDR_LEN) != 0;
-    flags.stream_format_valid = 1;
     flags.msrp_acc_lat_valid =
         memcmp(s->msrp_accumulated_latency, zero_lat, 4) != 0;
     flags.msrp_failure_valid = s->msrp_failure_code[0] != 0;
@@ -137,13 +136,11 @@ int avb_send_aecp_rsp_get_stream_info(avb_state_s *state,
     memcpy(&response.stream.msrp_failure_code, &s->msrp_failure_code, 2);
     memcpy(&response.vlan_id, &s->vlan_id, 2);
   } else {
+    // input stream info
     avb_listener_stream_s *s = &state->input_streams[index];
     aem_stream_info_flags_s flags = s->stream_info_flags;
-    flags.stream_vlan_id_valid = 1;
-    flags.stream_id_valid = 1; // stream id could be zero and valid
     flags.stream_dest_mac_valid =
         memcmp(s->stream_dest_addr, zero_mac, ETH_ADDR_LEN) != 0;
-    flags.stream_format_valid = 1;
     flags.msrp_acc_lat_valid =
         memcmp(s->msrp_accumulated_latency, zero_lat, 4) != 0;
     flags.msrp_failure_valid = s->msrp_failure_code[0] != 0;
@@ -2692,7 +2689,7 @@ acmp_status_t avb_disconnect_listener(avb_state_s *state,
 
   // reset the input stream data
   memset(&state->input_streams[index], 0, sizeof(avb_listener_stream_s));
-  uint16_t vlan_id = DEFAULT_VLAN_ID;
+  uint16_t vlan_id = CONFIG_ESP_AVB_STREAM_VLAN_ID;
   avtp_stream_format_s format = state->default_format;
   memcpy(&state->input_streams[index].stream_format, &format,
          sizeof(avtp_stream_format_s));

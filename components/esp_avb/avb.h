@@ -51,12 +51,13 @@
  ****************************************************************************/
 
 /* Number of protocols to use for L2TAP (AVTP, MSRP, MVRP) */
-#define AVB_NUM_PROTOCOLS 3
+#define AVB_NUM_PROTOCOLS 4
 
 /* Protocol indexes */
 #define AVTP 0
 #define MSRP 1
 #define MVRP 2
+#define VLAN 3
 
 /* Maximum number of endpoints to remember */
 #define AVB_MAX_NUM_TALKERS 10
@@ -85,9 +86,6 @@
 #define MAAP_ANNOUNCE_INTERVAL_MSEC 10000
 #define PTP_STATUS_UPDATE_INTERVAL_MSEC 3000
 #define UNSOL_NOTIF_INTERVAL_MSEC 2000
-
-/* Default VLAN ID */
-#define DEFAULT_VLAN_ID 0
 
 // Commonly used mac addresses
 #define BCAST_MAC_ADDR                                                         \
@@ -194,6 +192,7 @@
 typedef enum {
   ethertype_msrp = 0x22ea,
   ethertype_avtp = 0x22f0,
+  ethertype_vlan = 0x8100,
   ethertype_mvrp = 0x88f5,
   ethertype_gptp = 0x88f7
 } ethertype_t;
@@ -2203,6 +2202,8 @@ struct stream_out_params_s {
   uint16_t stream_index;           // output stream index (talker_uid)
   uint8_t l2if;                    // layer2 interface
   unique_id_t stream_id;           // stream ID
+  eth_addr_t dest_addr;            // stream destination MAC address
+  uint8_t vlan_id[2];              // stream VLAN ID
   uint8_t bit_depth;               // bit depth
   uint8_t channels;                // channels per frame
   uint32_t sample_rate;            // sample rate
@@ -2320,10 +2321,13 @@ typedef struct {
 int avb_net_init(avb_state_s *state);
 void avb_create_eth_frame(uint8_t *eth_frame, eth_addr_t *dest_addr,
                           avb_state_s *state, ethertype_t ethertype, void *msg,
-                          uint16_t msg_len);
+                          uint16_t msg_len, uint8_t *vlan_id);
 int avb_net_send_to(avb_state_s *state, ethertype_t ethertype, void *msg,
                     uint16_t msg_len, struct timespec *ts,
                     eth_addr_t *dest_addr);
+int avb_net_send_to_vlan(avb_state_s *state, ethertype_t ethertype, void *msg,
+                         uint16_t msg_len, struct timespec *ts,
+                         eth_addr_t *dest_addr, uint8_t *vlan_id);
 int avb_net_send(avb_state_s *state, ethertype_t ethertype, void *msg,
                  uint16_t msg_len, struct timespec *t);
 int avb_net_recv(int l2if, void *msg, uint16_t msg_len, struct timespec *ts,
@@ -2340,8 +2344,8 @@ int avb_send_mvrp_vlan_id(avb_state_s *state, mrp_attr_event_t attr_event,
 int avb_send_msrp_domain(avb_state_s *state, mrp_attr_event_t attr_event,
                          bool leave_all);
 int avb_send_msrp_talker(avb_state_s *state, mrp_attr_event_t attr_event,
-                         bool leave_all, bool is_failed,
-                         unique_id_t *stream_id);
+                         bool leave_all, bool is_failed, unique_id_t *stream_id,
+                         eth_addr_t *stream_dest_addr, uint8_t *vlan_id);
 int avb_send_msrp_listener(avb_state_s *state, mrp_attr_event_t attr_event,
                            msrp_listener_event_t listener_event, bool leave_all,
                            unique_id_t *stream_id);

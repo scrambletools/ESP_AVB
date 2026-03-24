@@ -82,7 +82,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   state->msrp_mappings_count = 2;
   state->msrp_mappings[0].traffic_class = 1;
   state->msrp_mappings[0].priority = CONFIG_ESP_AVB_VLAN_PRIO_CLASS_A;
-  uint16_t msrp_vlan_id = CONFIG_ESP_AVB_VLAN_ID;
+  uint16_t msrp_vlan_id = CONFIG_ESP_AVB_STREAM_VLAN_ID;
   int_to_octets(&msrp_vlan_id, state->msrp_mappings[0].vlan_id, 2);
   state->msrp_mappings[1].traffic_class = 0;
   state->msrp_mappings[1].priority = CONFIG_ESP_AVB_VLAN_PRIO_CLASS_B;
@@ -166,9 +166,12 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   // stream format
   avb_listener_stream_flags_s flags = {0};
   // set any flags here
-  aem_stream_info_flags_s info_flags = {.stream_format_valid = 1};
-  // set any info flags here
-  uint16_t vlan_id = DEFAULT_VLAN_ID;
+  aem_stream_info_flags_s info_flags = {.stream_vlan_id_valid = 1,
+                                        .stream_format_valid = 1,
+                                        .stream_id_valid = 1,
+                                        .stream_dest_mac_valid = 1,
+                                        .msrp_failure_valid = 1,
+                                        .msrp_acc_lat_valid = 1};
 
   // Build input streams
   if (state->config.listener) {
@@ -178,7 +181,9 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
            sizeof(avb_listener_stream_flags_s));
     memcpy(&input_stream.stream_info_flags, &info_flags,
            sizeof(aem_stream_info_flags_s));
-    int_to_octets(&vlan_id, input_stream.vlan_id, 2);
+    int mapping_index = input_stream.stream_info_flags.class_b ? 1 : 0;
+    memcpy(input_stream.vlan_id, state->msrp_mappings[mapping_index].vlan_id,
+           2);
     memcpy(&input_stream.stream_format, &format, sizeof(avtp_stream_format_s));
     for (int i = 0; i < state->num_input_streams; i++) {
       memcpy(&state->input_streams[i], &input_stream,
@@ -193,7 +198,9 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
 
     memcpy(&output_stream.stream_info_flags, &info_flags,
            sizeof(aem_stream_info_flags_s));
-    int_to_octets(&vlan_id, output_stream.vlan_id, 2);
+    int mapping_index = output_stream.stream_info_flags.class_b ? 1 : 0;
+    memcpy(output_stream.vlan_id, state->msrp_mappings[mapping_index].vlan_id,
+           2);
     memcpy(&output_stream.stream_format, &format, sizeof(avtp_stream_format_s));
     for (int i = 0; i < state->num_output_streams; i++) {
       memcpy(&state->output_streams[i], &output_stream,
@@ -283,19 +290,32 @@ static int avb_periodic_send(avb_state_s *state) {
 
   // Send MSRP talker and AVTP MAAP announce messages
   if (state->config.talker) {
-    // clock_timespec_subtract(&time_now,
-    // &state->last_transmitted_msrp_talker_adv, &delta); if
-    // (timespec_to_ms(&delta) > MSRP_TALKER_ADV_INTERVAL_MSEC) {
-    //   state->last_transmitted_msrp_talker_adv = time_now;
-    //   unique_id_t stream_id = {0};
-    //   avb_send_msrp_talker(state, mrp_attr_event_join_in, stream_id, false);
-    // }
-    // clock_timespec_subtract(&time_now,
-    // &state->last_transmitted_maap_announce, &delta); if
-    // (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
-    //   state->last_transmitted_maap_announce = time_now;
-    //   avb_send_maap_announce(state);
-    // }
+    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv,
+                            &delta);
+    for (int i = 0; i < state->num_output_streams; i++) {
+      // if connected and time to send
+      if (octets_to_uint(state->output_streams[i].connection_count, 2) > 0 &&
+          timespec_to_ms(&delta) > MSRP_TALKER_CONN_INTERVAL_MSEC) {
+        state->last_transmitted_msrp_talker_adv = time_now;
+        avb_send_msrp_talker(state, mrp_attr_event_join_in, false, false,
+                             &state->output_streams[i].stream_id,
+                             &state->output_streams[i].stream_dest_addr,
+                             state->output_streams[i].vlan_id);
+        // if idle and time to send
+      } else if (timespec_to_ms(&delta) > MSRP_TALKER_IDLE_INTERVAL_MSEC) {
+        state->last_transmitted_msrp_talker_adv = time_now;
+        avb_send_msrp_talker(state, mrp_attr_event_join_mt, false, false,
+                             &state->output_streams[i].stream_id,
+                             &state->output_streams[i].stream_dest_addr,
+                             state->output_streams[i].vlan_id);
+      }
+    }
+    clock_timespec_subtract(&time_now, &state->last_transmitted_maap_announce,
+                            &delta);
+    if (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
+      state->last_transmitted_maap_announce = time_now;
+      avb_send_maap_announce(state);
+    }
   }
 
   // Send MSRP listener message
