@@ -1,4 +1,5 @@
 build/
+build.clang/
 managed_components/
 reference/
 .vscode/
