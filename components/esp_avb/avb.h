@@ -2181,10 +2181,11 @@ typedef struct {
 
 /* Stream Input params */
 struct stream_in_params_s {
+  void *state;                     // pointer to AVB state (avb_state_s *)
   i2s_chan_handle_t i2s_tx_handle; // handle to i2s tx channel
   uint16_t buffer_size;            // buffer size
   uint16_t interval;               // interval in microseconds
-  uint8_t l2if;                    // layer2 interface
+  int l2if;                        // layer2 interface file descriptor
   unique_id_t stream_id;           // stream ID
   uint8_t bit_depth;               // bit depth
   uint8_t channels;                // channels
@@ -2209,6 +2210,9 @@ struct stream_out_params_s {
   uint32_t sample_rate;            // sample rate
   bool use_sine_wave; // generate sine wave instead of reading codec
   float sine_freq;    // sine wave frequency in Hz
+  uint8_t format_subtype;          // 0 = IEC 61883 (AM824), 2 = AAF
+  uint8_t cip_sfc;                 // CIP SFC code (for AM824 format)
+  uint8_t dbs;                     // data block size (for AM824 format)
 };
 
 /* Carrier structure for querying AVB status */
@@ -2233,7 +2237,13 @@ typedef struct {
   int l2if[AVB_NUM_PROTOCOLS]; // 3 L2TAP interfaces (FDs) for AVTP, MSRP, and
                                // MVRP
   bool l2tap_receive;          // receive L2TAP frames
+  bool stream_in_active;       // stream input task is reading AVTP fd
   bool codec_enabled;          // codec enabled
+
+  // PTP clock snapshot for stream out media clock PLL (updated by main task
+  // on core 0, read by stream out task on core 1)
+  volatile uint32_t ptp_avtp_ts;    // AVTP-format timestamp (lower 32b of PTP ns)
+  volatile int64_t ptp_snapshot_us; // esp_timer_get_time() at moment of read
 
   /* Our own entity */
   aem_entity_desc_s own_entity;

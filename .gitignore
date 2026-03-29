@@ -7,3 +7,6 @@ reference/
 sdkconfig
 .DS_Store
 *.old
+CLAUDE.md
+.claude/
+sdkconfig.old

@@ -21,4 +21,14 @@ CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 
 CONFIG_FREERTOS_ISR_STACKSIZE=6144
 
+# Disable task WDT for CPU1 idle task — AVB-OUT runs at max priority on
+# core 1 and starves IDLE1 by design during real-time streaming.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# Disable Ethernet transmit mutex — AVB sockets use the non-timestamped
+# transmit path (microsecond DMA descriptor setup only). The PTP daemon
+# still uses timestamped transmit on its own socket, but the brief overlap
+# risk is acceptable vs the priority inversion caused by the mutex.
+CONFIG_ETH_TRANSMIT_MUTEX=n
+
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y

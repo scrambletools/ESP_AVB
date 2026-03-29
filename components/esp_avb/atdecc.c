@@ -2179,6 +2179,14 @@ int avb_process_acmp_connect_tx_response(avb_state_s *state,
     // if succcessful connect tx response then connect the listener
     if (response->header.status_valtime == acmp_status_success) {
       status = avb_connect_listener(state, response);
+      // Start the stream input task for audio playback
+      avbinfo("ConnTX rsp: listener_uid=%d, connect_status=%d", listener_uid, status);
+      if (status == acmp_status_success) {
+        int stream_ret = avb_start_stream_in(state, listener_uid);
+        avbinfo("avb_start_stream_in returned %d", stream_ret);
+      }
+    } else {
+      avbwarn("ConnTX rsp: talker returned status %d", response->header.status_valtime);
     }
     // update input stream
     state->input_streams[listener_uid].pending_connection = false;

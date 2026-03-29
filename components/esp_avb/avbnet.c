@@ -70,12 +70,10 @@ int avb_net_init(avb_state_s *state) {
       return ERROR;
     }
 
-    // Enable time stamping in L2TAP (clock already initialized by PTPd)
-    if (ioctl(state->l2if[i], L2TAP_S_TIMESTAMP_EN) < 0) {
-      avberr("Failed to enable time stamping in L2TAP fd %d: errno %d", fd,
-             errno);
-      return ERROR;
-    }
+    // TX timestamps intentionally NOT enabled on AVB sockets. The timestamped
+    // transmit path (esp_eth_transmit_ctrl_vargs) busy-waits for DMA completion
+    // while holding the EMAC TX mutex, blocking the real-time AVB-OUT task on
+    // core 1. Only the PTP daemon (which has its own socket) needs TX timestamps.
     avbinfo("Initialized L2TAP fd %d for ethertype %x", fd, ethertype);
   }
 
@@ -124,25 +122,6 @@ int avb_net_send_to(avb_state_s *state, ethertype_t ethertype, void *msg,
   avb_create_eth_frame(eth_frame, dest_addr, state, ethertype, msg, msg_len,
                        NULL);
 
-  // wrap "Info Records Buffer" into union to ensure proper alignment of data
-  // (this is typically needed when accessing double word variables or structs
-  // containing double word variables)
-  union {
-    uint8_t info_recs_buff[L2TAP_IREC_SPACE(sizeof(struct timespec))];
-    l2tap_irec_hdr_t align;
-  } u;
-
-  l2tap_extended_buff_t msg_ext_buff;
-
-  msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
-  msg_ext_buff.info_recs_buff = u.info_recs_buff;
-  msg_ext_buff.buff = eth_frame;
-  msg_ext_buff.buff_len = sizeof(eth_frame);
-
-  l2tap_irec_hdr_t *ts_info = L2TAP_IREC_FIRST(&msg_ext_buff);
-  ts_info->len = L2TAP_IREC_LEN(sizeof(struct timespec));
-  ts_info->type = L2TAP_IREC_TIME_STAMP;
-
   // Get the L2IF for the given ethertype
   switch (ethertype) {
   case ethertype_avtp:
@@ -162,14 +141,7 @@ int avb_net_send_to(avb_state_s *state, ethertype_t ethertype, void *msg,
     return ERROR;
   }
 
-  int ret = write(l2if, &msg_ext_buff, 0);
-
-  // check if write was successful, ts exists and ts_info is valid
-  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP) {
-    *ts = *(struct timespec *)ts_info->data;
-    // avbinfo( "avb_net_send: ts is %lld.%09ld", (long long)ts->tv_sec,
-    // ts->tv_nsec);
-  }
+  int ret = write(l2if, eth_frame, sizeof(eth_frame));
   return ret;
 }
 
@@ -183,22 +155,6 @@ int avb_net_send_to_vlan(avb_state_s *state, ethertype_t ethertype, void *msg,
   // Create the Ethernet frame
   avb_create_eth_frame(eth_frame, dest_addr, state, ethertype, msg, msg_len,
                        vlan_id);
-
-  union {
-    uint8_t info_recs_buff[L2TAP_IREC_SPACE(sizeof(struct timespec))];
-    l2tap_irec_hdr_t align;
-  } u;
-
-  l2tap_extended_buff_t msg_ext_buff;
-
-  msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
-  msg_ext_buff.info_recs_buff = u.info_recs_buff;
-  msg_ext_buff.buff = eth_frame;
-  msg_ext_buff.buff_len = sizeof(eth_frame);
-
-  l2tap_irec_hdr_t *ts_info = L2TAP_IREC_FIRST(&msg_ext_buff);
-  ts_info->len = L2TAP_IREC_LEN(sizeof(struct timespec));
-  ts_info->type = L2TAP_IREC_TIME_STAMP;
 
   switch (ethertype) {
   case ethertype_avtp:
@@ -218,11 +174,7 @@ int avb_net_send_to_vlan(avb_state_s *state, ethertype_t ethertype, void *msg,
     return ERROR;
   }
 
-  int ret = write(l2if, &msg_ext_buff, 0);
-
-  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP) {
-    *ts = *(struct timespec *)ts_info->data;
-  }
+  int ret = write(l2if, eth_frame, sizeof(eth_frame));
   return ret;
 }
 
@@ -259,38 +211,20 @@ int avb_net_recv(int l2if, void *msg, uint16_t msg_len, struct timespec *ts,
                  eth_addr_t *src_addr) {
   uint8_t eth_frame[msg_len + ETH_HEADER_LEN];
 
-  // wrap "Info Records Buffer" into union to ensure proper alignment of data
-  // (this is typically needed when accessing double word variables or structs
-  // containing double word variables)
-  union {
-    uint8_t info_recs_buff[L2TAP_IREC_SPACE(sizeof(struct timespec))];
-    l2tap_irec_hdr_t align;
-  } u;
-  l2tap_extended_buff_t msg_ext_buff;
-
-  msg_ext_buff.info_recs_len = sizeof(u.info_recs_buff);
-  msg_ext_buff.info_recs_buff = u.info_recs_buff;
-  msg_ext_buff.buff = eth_frame;
-  msg_ext_buff.buff_len = sizeof(eth_frame);
-
-  l2tap_irec_hdr_t *ts_info = L2TAP_IREC_FIRST(&msg_ext_buff);
-  ts_info->len = L2TAP_IREC_LEN(sizeof(struct timespec));
-  ts_info->type = L2TAP_IREC_TIME_STAMP;
-
-  int ret = read(l2if, &msg_ext_buff, 0);
-
-  // check if read was successful, ts exists and ts_info is valid
-  if (ret > 0 && ts && ts_info->type == L2TAP_IREC_TIME_STAMP) {
-    *ts = *(struct timespec *)ts_info->data;
-    // avbinfo("avb_net_recv: ts is %lld.%09ld", (long long)ts->tv_sec,
-    // ts->tv_nsec);
+  int ret = read(l2if, eth_frame, sizeof(eth_frame));
+  if (ret <= 0) {
+    return ret;
   }
+
   // copy source address from the frame
   memcpy(src_addr, &eth_frame[ETH_ADDR_LEN], ETH_ADDR_LEN);
 
-  // copy the message from the frame
-  memcpy(msg, &eth_frame[ETH_HEADER_LEN], ret);
-  return ret;
+  // copy the message from the frame (subtract Ethernet header)
+  int payload_len = ret - ETH_HEADER_LEN;
+  if (payload_len > 0 && payload_len <= msg_len) {
+    memcpy(msg, &eth_frame[ETH_HEADER_LEN], payload_len);
+  }
+  return payload_len;
 }
 
 // Ethernet RX callback

@@ -155,6 +155,17 @@ int avb_stop();
  **/
 void *avb_get_codec_handle();
 
+/* @brief Test codec playback with a sine wave directly to I2S
+ *
+ * Generates a 1kHz sine wave and plays it through the ES8311 codec
+ * for the specified duration. Used to verify I2S/codec hardware
+ * independently of AVB networking.
+ *
+ * @param duration_ms duration in milliseconds (0 = play for 3 seconds)
+ * @return ESP_OK on success
+ **/
+esp_err_t avb_test_codec_playback(uint32_t duration_ms);
+
 #undef EXTERN
 #ifdef __cplusplus
 }
