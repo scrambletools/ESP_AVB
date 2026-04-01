@@ -9,7 +9,9 @@
  * This file provides the main entry point for the AVB task.
  */
 
-#include "avb.h" // Internal API
+#include "avb.h"
+#include <esp_task_wdt.h>
+
 #include "esp_codec_dev.h"
 #include "esp_timer.h"
 
@@ -23,16 +25,6 @@ extern const char logo_png_end[] asm("_binary_logo_png_end");
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
-
-/* AVB callback function */
-esp_err_t my_callback(esp_eth_handle_t eth_handle, uint8_t *buffer,
-                      uint32_t length, void *priv) {
-  // Process received packet
-  if (buffer[12] == 0x22 && buffer[13] == 0xf0 && buffer[14] == 0x00) {
-    avbinfo("stream frame %lu", length);
-  }
-  return ESP_OK;
-}
 
 /* Initialize AVB state and create L2TAP FDs */
 static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
@@ -279,20 +271,22 @@ static int avb_periodic_send(avb_state_s *state) {
     avb_send_adp_entity_available(state);
   }
 
-  // Send MVRP VLAN ID message
+  // Send MVRP VLAN ID message — always JoinIn so the switch registers
+  // VLAN membership on this port from boot. Required for MSRP Listener
+  // registrations to be accepted by the switch.
   clock_timespec_subtract(&time_now, &state->last_transmitted_mvrp_vlan_id,
                           &delta);
   if (timespec_to_ms(&delta) > MVRP_VLAN_ID_INTERVAL_MSEC) {
     state->last_transmitted_mvrp_vlan_id = time_now;
-    avb_send_mvrp_vlan_id(state, mrp_attr_event_join_mt, false);
+    avb_send_mvrp_vlan_id(state, mrp_attr_event_join_in, false);
   }
 
-  // Send MSRP domain message
+  // Send MSRP domain message — use JoinIn when connected
   clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_domain,
                           &delta);
   if (timespec_to_ms(&delta) > MSRP_DOMAIN_INTERVAL_MSEC) {
     state->last_transmitted_msrp_domain = time_now;
-    avb_send_msrp_domain(state, mrp_attr_event_join_mt, false);
+    avb_send_msrp_domain(state, mrp_attr_event_join_in, false);
   }
 
   // Send MSRP talker and AVTP MAAP announce messages
@@ -330,25 +324,12 @@ static int avb_periodic_send(avb_state_s *state) {
     clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener,
                             &delta);
     for (int i = 0; i < state->num_input_streams; i++) {
-      // if connected and time to send
       if (state->input_streams[i].connected &&
           timespec_to_ms(&delta) > MSRP_LISTENER_CONN_INTERVAL_MSEC) {
         state->last_transmitted_msrp_listener = time_now;
         avb_send_msrp_listener(state, mrp_attr_event_join_in,
                                msrp_listener_event_ready, false,
                                &state->input_streams[i].stream_id);
-        // if idle and time to send
-      } else if (timespec_to_ms(&delta) > MSRP_LISTENER_IDLE_INTERVAL_MSEC) {
-        // Only send idle Listener Mt if we have a valid (non-zero) stream ID.
-        // Sending with a null stream ID confuses MSRP state machines on bridges.
-        unique_id_t zero_id = {0};
-        if (memcmp(&state->input_streams[i].stream_id, &zero_id,
-                   sizeof(unique_id_t)) != 0) {
-          state->last_transmitted_msrp_listener = time_now;
-          avb_send_msrp_listener(state, mrp_attr_event_mt,
-                                 msrp_listener_event_ready, false,
-                                 &state->input_streams[i].stream_id);
-        }
       }
     }
   }
@@ -381,7 +362,8 @@ static int avb_periodic_send(avb_state_s *state) {
                                  &state->input_streams[i].stream_id);
         }
       }
-      state->last_transmitted_msrp_listener = time_now;
+      // Don't reset last_transmitted_msrp_listener here — let the periodic
+      // path manage its own timer independently from LeaveAll.
     }
     // Re-declare MVRP VLAN registration
     avb_send_mvrp_vlan_id(state, mrp_attr_event_join_in, false);
@@ -429,8 +411,8 @@ static int avb_periodic_send(avb_state_s *state) {
 
 static int avb_process_rx_message(avb_state_s *state, int protocol_idx,
                                   ssize_t length) {
-  // Check if the message length is valid
-  if (length <= ETH_HEADER_LEN) {
+  // Length is payload only (ETH header already stripped by EMAC dispatcher)
+  if (length <= 0) {
     avbwarn("Ignoring invalid message, length only %d bytes", (int)length);
     return OK;
   }
@@ -511,301 +493,14 @@ static int avb_process_rx_message(avb_state_s *state, int protocol_idx,
     }
     break;
   }
+  /* VLAN stream data is handled directly by the EMAC RX dispatcher
+   * via the registered stream handler — never reaches this function. */
   }
   return OK;
 }
 
-/* AVB Stream input task */
-static void avb_stream_in_task(void *task_param) {
-  avbinfo("Starting stream in task");
-
-  avb_state_s *state = NULL;
-  uint8_t *stream_in_data = NULL;
-  uint8_t *i2s_buf = NULL;
-
-  struct stream_in_params_s *stream_in_params =
-      (struct stream_in_params_s *)task_param;
-  if (stream_in_params == NULL) {
-    goto err;
-  }
-  state = (avb_state_s *)stream_in_params->state;
-
-  // Open the codec for 16-bit stereo output (ES8311 works reliably at 16-bit;
-  // 24-bit has bit alignment issues on this platform). AVTP 24-bit audio will
-  // be downconverted to 16-bit before writing to I2S.
-  if (state->codec_enabled && state->config.codec_handle) {
-    esp_codec_dev_sample_info_t fs = {
-        .bits_per_sample = 16,
-        .channel = 2,
-        .sample_rate = 48000,
-        .mclk_multiple = 384,
-    };
-    int codec_ret = esp_codec_dev_open(state->config.codec_handle, &fs);
-    if (codec_ret != ESP_CODEC_DEV_OK) {
-      avbwarn("Stream in: codec_dev_open returned %d, continuing", codec_ret);
-    }
-    esp_codec_dev_set_out_vol(state->config.codec_handle, 50.0);
-  }
-
-  // Receive buffer must hold a full AVTP packet (header + max payload)
-  size_t recv_buf_size = sizeof(iec_61883_6_message_s); // largest format
-  stream_in_data = calloc(1, recv_buf_size);
-  if (!stream_in_data) {
-    avberr("Stream in: No memory for receive buffer");
-    goto err;
-  }
-
-  // I2S output buffer — convert from AVTP big-endian 24-bit to 16-bit stereo.
-  // Max 6 samples per packet, downmixed to stereo, 16-bit per sample.
-  size_t i2s_buf_size = 6 * 2 * 2; // 6 samples * stereo * 16-bit
-  i2s_buf = calloc(1, i2s_buf_size);
-  if (!i2s_buf) {
-    avberr("Stream in: No memory for I2S buffer");
-    goto err;
-  }
-
-  int ret = 0;
-  struct timespec ts;
-  eth_addr_t src_addr;
-  size_t bytes_write = 0;
-  size_t timeout_ms = 1000;
-
-  if (stream_in_params->l2if < 0) {
-    avberr("Invalid file descriptor for VLAN interface");
-    goto err;
-  }
-
-  // Disable the VLAN fd in the main loop's pollfds so this task owns it.
-  // The main loop checks stream_in_active to skip VLAN reads.
-  state->stream_in_active = true;
-
-  // Brief delay to let the main loop finish any in-progress VLAN read
-  vTaskDelay(pdMS_TO_TICKS(100));
-  avbinfo("Stream in: listening for stream %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
-          stream_in_params->stream_id[0], stream_in_params->stream_id[1],
-          stream_in_params->stream_id[2], stream_in_params->stream_id[3],
-          stream_in_params->stream_id[4], stream_in_params->stream_id[5],
-          stream_in_params->stream_id[6], stream_in_params->stream_id[7]);
-
-  while (1) {
-    /* Read directly from the VLAN L2TAP fd (blocking).
-     * This task owns the fd — the main loop skips it via stream_in_active. */
-    ret = avb_net_recv(stream_in_params->l2if, stream_in_data, recv_buf_size,
-                       &ts, &src_addr);
-    if (ret <= 0) {
-      continue;
-    }
-
-    // Log first few packets for debugging
-    static int dbg_count = 0;
-    if (dbg_count < 5) {
-      avbinfo("Stream in: recv %d bytes, first 8: %02x %02x %02x %02x %02x %02x %02x %02x",
-              ret, stream_in_data[0], stream_in_data[1], stream_in_data[2],
-              stream_in_data[3], stream_in_data[4], stream_in_data[5],
-              stream_in_data[6], stream_in_data[7]);
-      dbg_count++;
-    }
-
-    // VLAN-tagged frames: after ETH header strip by avb_net_recv, the payload
-    // starts with VLAN TCI(2) + inner ethertype(2) + AVTP data.
-    // Skip the 4-byte VLAN+ethertype prefix to get to AVTP.
-    uint8_t *avtp_data = stream_in_data;
-    int avtp_len = ret;
-    if (ret > 4 && stream_in_data[2] == 0x22 && stream_in_data[3] == 0xf0) {
-      avtp_data = stream_in_data + 4;
-      avtp_len = ret - 4;
-    }
-
-    if (avtp_len < 24) continue;
-
-    uint8_t subtype = avtp_data[0] & 0x7F;
-    uint8_t *pcm_data = NULL;
-    int pcm_len = 0;
-    int channels = 0;
-    int samples = 0;
-
-    if (dbg_count <= 5) {
-      avbinfo("Stream in: subtype=0x%02x, stream_id=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
-              subtype, avtp_data[4], avtp_data[5], avtp_data[6], avtp_data[7],
-              avtp_data[8], avtp_data[9], avtp_data[10], avtp_data[11]);
-    }
-
-    if (subtype == avtp_subtype_aaf) {
-      /* AAF format */
-      aaf_pcm_message_s *aaf_msg = (aaf_pcm_message_s *)avtp_data;
-      if (memcmp(aaf_msg->stream_id, stream_in_params->stream_id,
-                 UNIQUE_ID_LEN) != 0) {
-        continue;
-      }
-      uint16_t stream_data_len =
-          (aaf_msg->stream_data_len[0] << 8) | aaf_msg->stream_data_len[1];
-      if (stream_data_len == 0 || stream_data_len > AVTP_STREAM_DATA_PER_MSG) {
-        continue;
-      }
-      channels = aaf_msg->chan_per_frame;
-      if (channels == 0) channels = 8;
-      int stride = 4; // 32-bit container
-      samples = stream_data_len / (channels * stride);
-      pcm_data = aaf_msg->stream_data;
-      pcm_len = stream_data_len;
-
-    } else if (subtype == avtp_subtype_61883) {
-      /* IEC 61883-6 AM824 format */
-      iec_61883_6_message_s *iec_msg = (iec_61883_6_message_s *)avtp_data;
-      if (memcmp(iec_msg->stream_id, stream_in_params->stream_id,
-                 UNIQUE_ID_LEN) != 0) {
-        continue;
-      }
-      uint16_t stream_data_len =
-          (iec_msg->stream_data_len[0] << 8) | iec_msg->stream_data_len[1];
-      if (stream_data_len <= 8) continue; // need at least CIP header
-      // Skip 8-byte CIP header, remaining is AM824 quadlets
-      uint8_t dbs = iec_msg->stream_data[1]; // DBS from CIP header
-      channels = dbs;
-      if (channels == 0) channels = 8;
-      int data_bytes = stream_data_len - 8;
-      samples = data_bytes / (channels * 4);
-      pcm_data = iec_msg->stream_data + 8; // skip CIP header
-      pcm_len = data_bytes;
-    } else {
-      continue;
-    }
-
-    if (samples <= 0 || !pcm_data) continue;
-
-    // Convert AVTP 24-bit audio to 16-bit stereo for I2S output.
-    // AVTP AAF: big-endian [MSB, MID, LSB, pad] per channel
-    // AVTP AM824: [label, MSB, MID, LSB] per channel
-    // I2S output: native-endian 16-bit interleaved stereo (L, R, L, R...)
-    // Downmix multi-channel to stereo: ch0 -> L, ch1 -> R
-    int i2s_offset = 0;
-    for (int s = 0; s < samples && i2s_offset + 4 <= (int)i2s_buf_size; s++) {
-      for (int ch = 0; ch < 2; ch++) {
-        int src_ch = (ch < channels) ? ch : 0;
-        int16_t sample_16 = 0;
-
-        if (subtype == avtp_subtype_aaf) {
-          int src_offset = (s * channels + src_ch) * 4;
-          if (src_offset + 1 < pcm_len) {
-            // Take top 16 bits of 24-bit left-justified: bytes [MSB, MID, ...]
-            sample_16 = (int16_t)((pcm_data[src_offset] << 8) |
-                                   pcm_data[src_offset + 1]);
-          }
-        } else {
-          // AM824: [label, MSB, MID, LSB]
-          int src_offset = (s * channels + src_ch) * 4;
-          if (src_offset + 2 < pcm_len) {
-            sample_16 = (int16_t)((pcm_data[src_offset + 1] << 8) |
-                                   pcm_data[src_offset + 2]);
-          }
-        }
-
-        // Write native-endian 16-bit
-        i2s_buf[i2s_offset + 0] = (uint8_t)(sample_16 & 0xFF);
-        i2s_buf[i2s_offset + 1] = (uint8_t)((sample_16 >> 8) & 0xFF);
-        i2s_offset += 2;
-      }
-    }
-
-    /* Write stereo PCM to I2S for codec playback */
-    if (i2s_offset > 0) {
-      ret = i2s_channel_write(stream_in_params->i2s_tx_handle, i2s_buf,
-                              i2s_offset, &bytes_write, timeout_ms);
-      if (ret != ESP_OK) {
-        avbwarn("I2S write failed: %s",
-                ret == ESP_ERR_TIMEOUT ? "timeout" : "error");
-        // Don't exit on failure — keep trying
-      }
-    }
-  }
-err:
-  if (state) {
-    state->stream_in_active = false;
-  }
-  if (state && state->codec_enabled && state->config.codec_handle) {
-    esp_codec_dev_close(state->config.codec_handle);
-  }
-  avberr("Stream in task stopped");
-  free(stream_in_data);
-  free(i2s_buf);
-  free(stream_in_params);
-  vTaskDelete(NULL);
-}
-
-/* Start the AVB stream input task */
-int avb_start_stream_in(avb_state_s *state, uint16_t index) {
-
-  if (!state->stream_in_active) {
-    // Setup the stream input params
-    struct stream_in_params_s *stream_in_params;
-    stream_in_params = calloc(1, sizeof(struct stream_in_params_s));
-    stream_in_params->state = state;
-    stream_in_params->i2s_tx_handle = state->i2s_tx_handle;
-
-    // Open a dedicated L2TAP socket for the listener to receive VLAN-tagged
-    // AVTP stream packets. This must be separate from the main loop's VLAN fd
-    // because two tasks cannot share reads on the same fd.
-    int stream_fd = open("/dev/net/tap", 0);
-    if (stream_fd < 0) {
-      avberr("Stream in: failed to open L2TAP: %d", errno);
-      free(stream_in_params);
-      return ERROR;
-    }
-    ioctl(stream_fd, L2TAP_S_INTF_DEVICE, state->config.eth_interface);
-    uint16_t vlan_etype = 0x8100;
-    ioctl(stream_fd, L2TAP_S_RCV_FILTER, &vlan_etype);
-    stream_in_params->l2if = stream_fd;
-    memcpy(&stream_in_params->stream_id, state->input_streams[index].stream_id,
-           UNIQUE_ID_LEN);
-    stream_in_params->format =
-        state->input_streams[index].stream_format.subtype;
-    if (stream_in_params->format == 0x02) { // AAF
-      stream_in_params->bit_depth =
-          state->input_streams[index].stream_format.aaf_pcm.bit_depth;
-      stream_in_params->channels =
-          state->input_streams[index].stream_format.aaf_pcm.chan_per_frame;
-      stream_in_params->sample_rate =
-          state->input_streams[index].stream_format.aaf_pcm.sample_rate;
-    } else { // assume IEC 61883-6 AM824
-      stream_in_params->bit_depth = state->config.default_bits_per_sample; // ?
-      stream_in_params->channels =
-          state->input_streams[index].stream_format.am824.dbs;           // ?
-      stream_in_params->sample_rate = state->config.default_sample_rate; // ?
-    }
-    int samples_per_interval = 0;
-    // Class B (4ms intervals)
-    if (state->input_streams[index].stream_flags.class_b) {
-      samples_per_interval = (stream_in_params->sample_rate / 250);
-      stream_in_params->interval = 4000;
-      // Class A (1ms intervals)
-    } else {
-      samples_per_interval = (stream_in_params->sample_rate / 1000);
-      stream_in_params->interval = 1000;
-    }
-    // Calculate the buffer size
-    int buffer_size = 0;
-    if (stream_in_params->format == 0x02) { // AAF
-      buffer_size = samples_per_interval * stream_in_params->channels *
-                    (stream_in_params->bit_depth / 8);
-    } else { // assume IEC 61883-6 AM824
-      buffer_size = samples_per_interval * stream_in_params->channels *
-                    (stream_in_params->bit_depth / 8);
-    }
-    stream_in_params->buffer_size = buffer_size;
-    if (!stream_in_params) {
-      avberr("I2S: No memory for stream in params");
-      return ERROR;
-    }
-
-    // Start the stream input task
-    xTaskCreate(avb_stream_in_task, "AVB-IN", 6144, (void *)stream_in_params,
-                20, NULL);
-    state->input_streams[index].connected = true;
-    return OK;
-  }
-  avberr("Another instance of AVB-IN is already running");
-  return ERROR;
-}
+/* Stream-in code is in avtp.c (avb_start_stream_in, avb_stop_stream_in).
+ * Diagnostics accessor declared there as avb_stream_in_get_ctx(). */
 
 /* Process status information request */
 static void avb_process_statusreq(avb_state_s *state) {
@@ -878,84 +573,49 @@ static void avb_task(void *task_param) {
     }
   }
 
-  // Set up pollfds for each L2TAP interface
-  struct pollfd pollfds[AVB_NUM_PROTOCOLS];
-  for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
-    pollfds[i].events = POLLIN;
-    pollfds[i].fd = state->l2if[i];
-    // Validate file descriptor
-    if (pollfds[i].fd < 0) {
-      avberr("Invalid file descriptor for interface %d: fd=%d", i,
-             pollfds[i].fd);
-      continue;
-    }
-  }
-  // allow receive on L2TAP interfaces
-  state->l2tap_receive = true;
-  // ESP_ERROR_CHECK(esp_eth_update_input_path(state->config.eth_handle,
-  // my_callback, NULL));
-
-  bool first_time_receive_off = true;
-
-  // Main AVB loop
+  // Main AVB loop — receive control frames from EMAC RX dispatcher queue,
+  // process them, and handle periodic tasks. VLAN stream data is handled
+  // directly by the registered stream handler in the EMAC RX task.
   while (!state->stop) {
-
-    if (state->l2tap_receive) {
-      /* Wait for a message on any of the L2TAP interfaces */
-      if (poll(pollfds, AVB_NUM_PROTOCOLS, AVB_POLL_INTERVAL_MS)) {
-        /* Check for events on each L2TAP interface */
-        for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
-          if (pollfds[i].revents) {
-            // Skip AVTP fd when a stream input task is actively reading it
-            if (i == AVTP && state->stream_in_active) {
-              continue;
-            }
-            /* Get a message from the L2TAP interface */
-            int ret =
-                avb_net_recv(state->l2if[i], &state->rxbuf[i], AVB_MAX_MSG_LEN,
-                             &state->rxtime[i], &state->rxsrc[i]);
-            if (ret > 0) {
-              /* Process the received message */
-              avb_process_rx_message(state, i, ret);
-            }
-          }
-        }
+    int protocol_idx;
+    eth_addr_t src_addr;
+    /* Use max(AVB_POLL_INTERVAL_MS, one tick) to guarantee yield.
+     * With 100Hz ticks, pdMS_TO_TICKS(1) = 0 which busy-loops. */
+    int ret = avb_net_recv_ctrl(state, &protocol_idx,
+                                &state->rxbuf[0], AVB_MAX_MSG_LEN,
+                                &src_addr, portTICK_PERIOD_MS);
+    if (ret > 0 && protocol_idx >= 0 && protocol_idx < AVB_NUM_PROTOCOLS) {
+      /* Copy payload and source addr into the protocol-indexed slot so
+       * avb_process_rx_message can access them at state->rxbuf[idx] */
+      if (protocol_idx != 0) {
+        memmove(&state->rxbuf[protocol_idx], &state->rxbuf[0], ret);
       }
-    } else {
-      if (first_time_receive_off) {
-        vTaskDelay(100);
-        first_time_receive_off = false;
-        avbinfo("L2TAP receive disabled");
-        char statsbuff[500];
-        vTaskGetRunTimeStats(statsbuff);
-        avbinfo("Run time stats: %s", statsbuff);
+      memcpy(&state->rxsrc[protocol_idx], &src_addr, ETH_ADDR_LEN);
+      avb_process_rx_message(state, protocol_idx, ret);
+    }
+
+    if (state->config.listener || state->config.talker) {
+      // Get PTP status
+      struct timespec time_now;
+      struct timespec delta;
+      clock_gettime(CLOCK_MONOTONIC, &time_now);
+      clock_timespec_subtract(&time_now, &state->last_ptp_status_update,
+                              &delta);
+      if (timespec_to_ms(&delta) > PTP_STATUS_UPDATE_INTERVAL_MSEC) {
+        state->last_ptp_status_update = time_now;
+        avb_update_ptp_status(state);
       }
     }
 
-    if (state->l2tap_receive) {
+    // Send periodic messages such as announcing entity available, etc
+    avb_periodic_send(state);
 
-      if (state->config.listener || state->config.talker) {
-        // Get PTP status
-        struct timespec time_now;
-        struct timespec delta;
-        clock_gettime(CLOCK_MONOTONIC, &time_now);
-        clock_timespec_subtract(&time_now, &state->last_ptp_status_update,
-                                &delta);
-        if (timespec_to_ms(&delta) > PTP_STATUS_UPDATE_INTERVAL_MSEC) {
-          state->last_ptp_status_update = time_now;
-          avb_update_ptp_status(state);
-        }
-      }
+    // Stream-in diagnostics — avb_stream_in_print_diag (avtp.c) prints
+    // one-shot first-packet info, safe to call from main loop context.
+    avb_stream_in_print_diag();
 
-      // Send periodic messages such as announcing entity available, etc
-      avb_periodic_send(state);
-
-      // do validation checking for timed out connections, etc
-      // TBD
-
-      // Process status requests
-      avb_process_statusreq(state);
-    }
+    // Process status requests
+    avb_process_statusreq(state);
   } // while (!state->stop)
 err:
   if (state) {
@@ -977,7 +637,7 @@ int avb_start(avb_config_s *config) {
     return ERROR;
   }
   if (s_state == NULL) {
-    xTaskCreate(avb_task, "AVB", 12288, (void *)config, 21, NULL);
+    xTaskCreate(avb_task, "AVB", 16384, (void *)config, 21, NULL);
     return OK;
   }
   avberr("Another instance of AVB is already running");

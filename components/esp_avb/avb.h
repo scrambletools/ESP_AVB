@@ -75,12 +75,12 @@
 #define AVB_MAX_NUM_OUTPUT_STREAMS 1
 
 /* Periodic message intervals */
-#define MSRP_DOMAIN_INTERVAL_MSEC 2000
-#define MVRP_VLAN_ID_INTERVAL_MSEC 10000
-#define MSRP_TALKER_IDLE_INTERVAL_MSEC 3000   // when idle
-#define MSRP_TALKER_CONN_INTERVAL_MSEC 3000   // when connected
-#define MSRP_LISTENER_IDLE_INTERVAL_MSEC 3000 // when idle
-#define MSRP_LISTENER_CONN_INTERVAL_MSEC 3000 // when connected
+#define MSRP_DOMAIN_INTERVAL_MSEC 500
+#define MVRP_VLAN_ID_INTERVAL_MSEC 500
+#define MSRP_TALKER_IDLE_INTERVAL_MSEC 1000   // when idle
+#define MSRP_TALKER_CONN_INTERVAL_MSEC 500    // when connected (must be < MRP Leave timer ~1s)
+#define MSRP_LISTENER_IDLE_INTERVAL_MSEC 1000 // when idle
+#define MSRP_LISTENER_CONN_INTERVAL_MSEC 500  // when connected (must be < MRP Leave timer ~1s)
 #define MSRP_LEAVEALL_INTERVAL_MSEC 10000
 #define ADP_ENTITY_AVAIL_INTERVAL_MSEC 5000
 #define MAAP_ANNOUNCE_INTERVAL_MSEC 10000
@@ -2179,36 +2179,40 @@ typedef struct {
   bool inbound;             // indicates if the command is inbound
 } atdecc_inflight_command_s;
 
-/* Stream Input params */
-struct stream_in_params_s {
-  void *state;                     // pointer to AVB state (avb_state_s *)
-  i2s_chan_handle_t i2s_tx_handle; // handle to i2s tx channel
-  uint16_t buffer_size;            // buffer size
-  uint16_t interval;               // interval in microseconds
-  int l2if;                        // layer2 interface file descriptor
-  unique_id_t stream_id;           // stream ID
-  uint8_t bit_depth;               // bit depth
-  uint8_t channels;                // channels
-  uint8_t sample_rate;             // sample rate
-  uint8_t format;                  // aaf format
-};
+/* Stream Input — handled by avb_stream_rx_handler callback registered
+ * via avb_net_set_stream_rx_handler. Runs inline in EMAC RX task. */
+
+/* Control frame queue item — used by EMAC RX dispatcher to forward
+ * non-stream frames (AVTP control, MSRP, MVRP) to the AVB main loop */
+typedef struct {
+  uint8_t protocol_idx;              // AVTP=0, MSRP=1, MVRP=2
+  uint8_t src_addr[ETH_ADDR_LEN];   // source MAC address
+  uint16_t length;                   // payload length (ETH header stripped)
+  uint8_t data[AVB_MAX_MSG_LEN];    // payload data
+} ctrl_rx_pkt_t;
+
+/* Stream RX handler callback — called inline from EMAC RX task for
+ * VLAN-tagged AVTP stream data. Must return quickly (<2ms).
+ * Receives raw AVTP data (ETH+VLAN headers already stripped). */
+typedef void (*avb_stream_rx_handler_t)(uint8_t *avtp_data, uint16_t len,
+                                        void *ctx);
 
 /* Stream Output params */
 struct stream_out_params_s {
   void *state;                     // pointer to AVB state (avb_state_s *)
   i2s_chan_handle_t i2s_rx_handle; // handle to i2s rx channel
+  esp_eth_handle_t eth_handle;     // EMAC handle for esp_eth_transmit
   uint16_t buffer_size;            // buffer size in bytes
   uint16_t samples_per_packet;     // samples per AVTP packet
   uint16_t interval;               // interval in microseconds
   uint16_t stream_index;           // output stream index (talker_uid)
-  uint8_t l2if;                    // layer2 interface
   unique_id_t stream_id;           // stream ID
   eth_addr_t dest_addr;            // stream destination MAC address
   uint8_t vlan_id[2];              // stream VLAN ID
   uint8_t bit_depth;               // bit depth
   uint8_t channels;                // channels per frame
   uint32_t sample_rate;            // sample rate
-  bool use_sine_wave; // generate sine wave instead of reading codec
+  bool use_sine_wave; // generate sine wave instead of reading mic
   float sine_freq;    // sine wave frequency in Hz
   uint8_t format_subtype;          // 0 = IEC 61883 (AM824), 2 = AAF
   uint8_t cip_sfc;                 // CIP SFC code (for AM824 format)
@@ -2236,8 +2240,8 @@ typedef struct {
   esp_eth_handle_t eth_handle;
   int l2if[AVB_NUM_PROTOCOLS]; // 3 L2TAP interfaces (FDs) for AVTP, MSRP, and
                                // MVRP
-  bool l2tap_receive;          // receive L2TAP frames
-  bool stream_in_active;       // stream input task is reading AVTP fd
+  QueueHandle_t ctrl_rx_queue; // control frame queue from EMAC dispatcher
+  bool stream_in_active;       // stream-in handler is registered
   bool codec_enabled;          // codec enabled
 
   // PTP clock snapshot for stream out media clock PLL (updated by main task
@@ -2340,10 +2344,10 @@ int avb_net_send_to_vlan(avb_state_s *state, ethertype_t ethertype, void *msg,
                          eth_addr_t *dest_addr, uint8_t *vlan_id);
 int avb_net_send(avb_state_s *state, ethertype_t ethertype, void *msg,
                  uint16_t msg_len, struct timespec *t);
-int avb_net_recv(int l2if, void *msg, uint16_t msg_len, struct timespec *ts,
-                 eth_addr_t *src_addr);
-void eth_rx_callback(void *arg, esp_eth_handle_t eth_handle, uint8_t *buffer,
-                     uint32_t length);
+int avb_net_recv_ctrl(avb_state_s *state, int *protocol_idx,
+                      void *msg, uint16_t msg_len,
+                      eth_addr_t *src_addr, int timeout_ms);
+void avb_net_set_stream_rx_handler(avb_stream_rx_handler_t handler, void *ctx);
 
 /* AVB send functions */
 
@@ -2525,7 +2529,9 @@ int avb_process_acmp_get_tx_connection_command(avb_state_s *state,
 
 /* Stream functions */
 int avb_start_stream_in(avb_state_s *state, uint16_t index);
-int avb_stop_stream_in(avb_state_s *state, uint16_t index);
+void avb_stop_stream_in(avb_state_s *state);
+void avb_stream_in_print_diag(void);
+uint32_t aaf_code_to_sample_rate(uint8_t code);
 int avb_start_stream_out(avb_state_s *state, uint16_t index);
 int avb_stop_stream_out(avb_state_s *state, uint16_t index);
 
@@ -2563,7 +2569,5 @@ acmp_status_t avb_disconnect_listener(avb_state_s *state,
                                       acmp_message_s *response);
 acmp_status_t avb_connect_talker(avb_state_s *state, acmp_message_s *response);
 int avb_get_acmp_timeout_ms(acmp_msg_type_t msg_type);
-IRAM_ATTR esp_err_t my_callback(esp_eth_handle_t eth_handle, uint8_t *buffer,
-                                uint32_t length, void *priv);
 
 #endif /* _ESP_AVB_AVB_H_ */

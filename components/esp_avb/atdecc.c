@@ -2179,7 +2179,6 @@ int avb_process_acmp_connect_tx_response(avb_state_s *state,
     // if succcessful connect tx response then connect the listener
     if (response->header.status_valtime == acmp_status_success) {
       status = avb_connect_listener(state, response);
-      // Start the stream input task for audio playback
       avbinfo("ConnTX rsp: listener_uid=%d, connect_status=%d", listener_uid, status);
       if (status == acmp_status_success) {
         int stream_ret = avb_start_stream_in(state, listener_uid);
@@ -2220,12 +2219,8 @@ int avb_process_acmp_connect_tx_response(avb_state_s *state,
   ret = avb_send_acmp_response(state, rx_reponse_type, &new_response, status);
 
   if (status == acmp_status_success) {
-    // stop the l2tap interface
-    // esp_err_t err = esp_l2tap_stop(state->config.eth_handle);
-    // state->l2tap_receive = false;
-    // Register the stack input function with the Ethernet driver
-    ESP_ERROR_CHECK(
-        esp_eth_update_input_path(state->config.eth_handle, my_callback, NULL));
+    /* Stream-in now handled by the unified EMAC RX dispatcher via
+     * avb_net_set_stream_rx_handler — no EMAC callback change needed here. */
   }
   return ret;
 }
@@ -2694,6 +2689,9 @@ acmp_status_t avb_disconnect_listener(avb_state_s *state,
                                       acmp_message_s *response) {
   acmp_status_t status = acmp_status_success;
   uint16_t index = octets_to_uint(response->listener_uid, 2);
+
+  // Stop stream-in handler if active
+  avb_stop_stream_in(state);
 
   // reset the input stream data
   memset(&state->input_streams[index], 0, sizeof(avb_listener_stream_s));

@@ -671,7 +671,7 @@ static uint32_t cip_sfc_to_sample_rate(uint8_t sfc) {
 }
 
 /* Map AAF sample rate enum to Hz */
-static uint32_t aaf_code_to_sample_rate(uint8_t code) {
+uint32_t aaf_code_to_sample_rate(uint8_t code) {
   switch (code) {
   case aaf_pcm_sample_rate_8k:
     return 8000;
@@ -735,74 +735,196 @@ static uint8_t sample_rate_to_aaf_code(uint32_t sample_rate) {
  * For Class A streams: 125us intervals, 6 samples/packet at 48kHz
  * For Class B streams: 250us intervals, 12 samples/packet at 48kHz
  */
+/* Convert I2S stereo 24-bit (3 bytes/sample) to multi-channel AVTP.
+ * I2S Philips format on ESP32: MSB-first on wire, stored in DMA as
+ * little-endian 24-bit: byte[0]=LSB, byte[1]=MID, byte[2]=MSB.
+ * ES8311 is mono — L channel has mic data, R channel duplicated or silence.
+ * Writes L channel data to ch0+ch1, pads remaining channels with silence.
+ *
+ * AM824: [0x40, MSB, MID, LSB] per channel (4 bytes)
+ * AAF:   [MSB, MID, LSB, 0x00] per channel (4 bytes)
+ */
+static void i2s24_to_am824_mono(const uint8_t *in, uint8_t *out,
+                                  int num_samples, int stream_channels) {
+  for (int s = 0; s < num_samples; s++) {
+    /* L channel from I2S — byte[0]=LSB, byte[1]=MID, byte[2]=MSB */
+    uint8_t lsb = in[0], mid = in[1], msb = in[2];
+    in += 3; /* skip L */
+    in += 3; /* skip R (mono codec, same or silence) */
+    for (int ch = 0; ch < stream_channels; ch++) {
+      if (ch < 2) {
+        /* Duplicate mono mic to ch0 and ch1 */
+        out[0] = 0x40; out[1] = msb; out[2] = mid; out[3] = lsb;
+      } else {
+        out[0] = 0x40; out[1] = 0; out[2] = 0; out[3] = 0;
+      }
+      out += 4;
+    }
+  }
+}
+
+static void i2s24_to_aaf_mono(const uint8_t *in, uint8_t *out,
+                                int num_samples, int stream_channels) {
+  for (int s = 0; s < num_samples; s++) {
+    uint8_t lsb = in[0], mid = in[1], msb = in[2];
+    in += 3; /* skip L */
+    in += 3; /* skip R */
+    for (int ch = 0; ch < stream_channels; ch++) {
+      if (ch < 2) {
+        out[0] = msb; out[1] = mid; out[2] = lsb; out[3] = 0;
+      } else {
+        out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+      }
+      out += 4;
+    }
+  }
+}
+
+/* Sine LUT 32-bit BE [MSB,MID,LSB,pad] (4 bytes) → AM824 [0x40,MSB,MID,LSB] */
+static inline void be32_to_am824(const uint8_t *in, uint8_t *out, int n) {
+  for (int i = 0; i < n; i++) {
+    out[0] = 0x40; out[1] = in[0]; out[2] = in[1]; out[3] = in[2];
+    in += 4; out += 4;
+  }
+}
+
+/* Sine LUT 32-bit BE [MSB,MID,LSB,pad] (4 bytes) → AAF (same layout, copy) */
+static inline void be32_to_aaf(const uint8_t *in, uint8_t *out, int n) {
+  memcpy(out, in, n * 4);
+}
+
+/* Frame layout constants for ETH+VLAN+AVTP */
+#define TX_ETH_HDR_LEN     14  /* dst(6) + src(6) + ethertype(2) */
+#define TX_VLAN_TAG_LEN     4  /* TCI(2) + inner ethertype(2) */
+#define TX_AVTP_HDR_LEN    24  /* AVTP common header */
+#define TX_CIP_HDR_LEN      8  /* IEC 61883 CIP header */
+#define TX_HDR_LEN_AAF     (TX_ETH_HDR_LEN + TX_VLAN_TAG_LEN + TX_AVTP_HDR_LEN)
+#define TX_HDR_LEN_61883   (TX_HDR_LEN_AAF + TX_CIP_HDR_LEN)
+
 static void avb_stream_out_task(void *task_param) {
   avbinfo("Starting stream out task");
 
-  uint8_t *pcm_buf = NULL;
   uint8_t *sine_lut = NULL;
   uint32_t lut_samples = 0;
   uint32_t lut_pos = 0;
+  uint8_t *pcm_buf = NULL;
+  uint8_t *i2s_buf = NULL;
+  uint8_t *i2s_ring = NULL;
+  uint8_t *tx_frame = NULL;
   esp_task_wdt_user_handle_t wdt_handle = NULL;
   struct stream_out_params_s *params = (struct stream_out_params_s *)task_param;
-  if (params == NULL) {
-    goto err;
-  }
+  if (params == NULL) goto err;
 
   avb_state_s *state = (avb_state_s *)params->state;
-  esp_codec_dev_handle_t codec_dev = state->config.codec_handle;
   uint8_t seq_num = 0;
-  uint16_t dbc = 0; // data block counter for IEC 61883
-  uint32_t pcm_offset = 0;
+  uint16_t dbc = 0;
   uint8_t sample_rate_code = sample_rate_to_aaf_code(params->sample_rate);
+  bool is_am824 = (params->format_subtype == avtp_subtype_61883);
 
-  // Precompute sine wave LUT for constant-time sample generation
-  lut_samples = build_sine_lut(&sine_lut, params->channels, params->bit_depth,
-                               params->sample_rate, params->sine_freq);
-  if (!sine_lut) {
-    avberr("Stream out: Failed to build sine LUT");
-    goto err;
-  }
-  avbinfo("Stream out: sine LUT built with %lu samples/cycle", lut_samples);
+  /* I2S reads stereo (2ch) regardless of stream channel count.
+   * Extra channels (ch2-7) are zero-padded in the AVTP conversion.
+   * Codec configures I2S with 24-bit data / 24-bit slot = 3 bytes/sample. */
+  int i2s_channels = 2; /* ES8311 mic is stereo */
+  int i2s_bytes_per_sample = 3; /* 24-bit slot */
+  int i2s_read_size = params->samples_per_packet * i2s_channels * i2s_bytes_per_sample;
 
-  // Calculate bytes per sample frame (all channels)
-  int bytes_per_sample =
-      (params->bit_depth == 24) ? 4 : (params->bit_depth / 8);
-  int frame_size = bytes_per_sample * params->channels;
-  int pcm_buf_size = params->samples_per_packet * frame_size;
-
-  // Allocate PCM buffer for one AVTP packet's worth of samples
-  pcm_buf = calloc(1, pcm_buf_size);
-  if (!pcm_buf) {
-    avberr("Stream out: No memory for PCM buffer (%d bytes)", pcm_buf_size);
+  i2s_buf = calloc(1, i2s_read_size);
+  if (!i2s_buf) {
+    avberr("Stream out: no memory for I2S buffer");
     goto err;
   }
 
-  // Use esp_codec_dev to open the codec for output (this configures the ES8311
-  // and I2S clocking even though we're generating data, not reading from mic)
-  if (codec_dev) {
-    esp_codec_dev_sample_info_t fs = {
-        .bits_per_sample = params->bit_depth,
-        .channel = params->channels,
-        .sample_rate = params->sample_rate,
-        .mclk_multiple = 384,
-    };
-    int ret = esp_codec_dev_open(codec_dev, &fs);
-    if (ret != ESP_CODEC_DEV_OK) {
-      avbwarn(
-          "Stream out: codec_dev_open returned %d, continuing without codec",
-          ret);
+  /* Sine wave fallback */
+  if (params->use_sine_wave) {
+    lut_samples = build_sine_lut(&sine_lut, params->channels, params->bit_depth,
+                                 params->sample_rate, params->sine_freq);
+    if (!sine_lut) {
+      avberr("Stream out: Failed to build sine LUT");
+      goto err;
     }
+    int bps = (params->bit_depth == 24) ? 4 : (params->bit_depth / 8);
+    pcm_buf = calloc(1, params->samples_per_packet * params->channels * bps);
+    if (!pcm_buf) goto err;
   }
 
-  avbinfo("Stream out: rate=%luHz depth=%d ch=%d samples/pkt=%d interval=%dus",
-          params->sample_rate, params->bit_depth, params->channels,
-          params->samples_per_packet, params->interval);
+  /* Pre-build the TX frame — constant fields filled once.
+   * Audio data offset depends on format (AAF vs AM824). */
+  int audio_data_len = params->samples_per_packet * params->channels * 4;
+  int stream_data_len = is_am824 ? (TX_CIP_HDR_LEN + audio_data_len) : audio_data_len;
+  int audio_offset = is_am824 ? TX_HDR_LEN_61883 : TX_HDR_LEN_AAF;
+  int frame_len = audio_offset + audio_data_len;
+  tx_frame = calloc(1, frame_len);
+  if (!tx_frame) {
+    avberr("Stream out: no memory for TX frame");
+    goto err;
+  }
+
+  /* ETH header: dst MAC + src MAC + 0x8100 (VLAN ethertype) */
+  memcpy(tx_frame, &params->dest_addr, ETH_ADDR_LEN);
+  memcpy(tx_frame + ETH_ADDR_LEN, state->internal_mac_addr, ETH_ADDR_LEN);
+  tx_frame[12] = 0x81; tx_frame[13] = 0x00; /* VLAN ethertype */
+
+  /* VLAN tag: PCP + VID, inner ethertype 0x22F0 */
+  uint16_t vid = (params->vlan_id[0] << 8) | params->vlan_id[1];
+  uint16_t pcp = state->msrp_mappings[0].priority;
+  uint16_t tci = (pcp << 13) | (vid & 0x0FFF);
+  tx_frame[14] = (tci >> 8) & 0xFF;
+  tx_frame[15] = tci & 0xFF;
+  tx_frame[16] = 0x22; tx_frame[17] = 0xF0; /* inner AVTP ethertype */
+
+  /* AVTP header (starts at offset 18) */
+  uint8_t *avtp = tx_frame + TX_ETH_HDR_LEN + TX_VLAN_TAG_LEN;
+  avtp[0] = is_am824 ? avtp_subtype_61883 : avtp_subtype_aaf;
+  avtp[1] = 0x81; /* sv=1, version=0, mr=1 (first pkt), tv=1 */
+  /* avtp[2] = seq_num — set per-packet */
+  avtp[3] = 0x00; /* tu=0 */
+  memcpy(avtp + 4, &params->stream_id, UNIQUE_ID_LEN); /* stream_id at [4..11] */
+  /* avtp[12..15] = avtp_ts — set per-packet */
+
+  if (is_am824) {
+    /* IEC 61883 specific fields */
+    avtp[16] = 0x00; avtp[17] = 0x00; avtp[18] = 0x00; avtp[19] = 0x00; /* gateway */
+    avtp[20] = (stream_data_len >> 8) & 0xFF;
+    avtp[21] = stream_data_len & 0xFF;
+    avtp[22] = (1 << 6) | 31; /* tag=1 (CIP present), channel=31 (AVTP native) */
+    avtp[23] = (0x0A << 4); /* tcode=1010, sy=0 */
+
+    /* CIP header (at avtp + 24) */
+    uint8_t *cip = avtp + TX_AVTP_HDR_LEN;
+    cip[0] = 0x3F; /* SID=0x3F */
+    cip[1] = params->dbs;
+    cip[2] = 0x00; /* FN=0, QPC=0, SPH=0 */
+    /* cip[3] = DBC — set per-packet */
+    cip[4] = 0x90; /* EOH=1, FMT=0x10 (AM824) */
+    cip[5] = params->cip_sfc & 0x07;
+    cip[6] = 0xFF; cip[7] = 0xFF; /* SYT=0xFFFF */
+  } else {
+    /* AAF specific fields */
+    avtp[16] = (params->bit_depth <= 16) ? 0x02 : 0x04; /* format */
+    avtp[17] = (sample_rate_code << 4); /* sample_rate in upper nibble, padding=0 */
+    /* Actually need to check AAF header layout more carefully */
+    avtp[16] = (params->bit_depth <= 16) ? aaf_format_int_16bit : aaf_format_int_32bit;
+    avtp[17] = (sample_rate_code & 0x0F); /* nsr in lower 4 bits, padding in upper */
+    /* Rewriting properly using struct knowledge */
+    avtp[16] = (params->bit_depth <= 16) ? aaf_format_int_16bit : aaf_format_int_32bit;
+    avtp[17] = ((sample_rate_code & 0x0F) << 4); /* sample rate in upper nibble */
+    avtp[18] = params->channels;
+    avtp[19] = params->bit_depth;
+    avtp[20] = (audio_data_len >> 8) & 0xFF;
+    avtp[21] = audio_data_len & 0xFF;
+    avtp[22] = 0x00; /* evt=0, sparse_ts=0 */
+    avtp[23] = 0x00; /* reserved */
+  }
+
+  avbinfo("Stream out: rate=%luHz ch=%d samples/pkt=%d interval=%dus "
+          "frame=%d bytes audio@%d %s",
+          params->sample_rate, params->channels, params->samples_per_packet,
+          params->interval, frame_len, audio_offset,
+          params->use_sine_wave ? "sine" : "mic");
 
   int64_t next_send_time = esp_timer_get_time();
 
-  // Initialize AVTP media clock from PTP. Double-read loop validates that
-  // the seconds register didn't roll over between the HAL's non-atomic
-  // sec + nsec reads. Retries up to 5 times to get a consistent reading.
+  // Initialize AVTP media clock from PTP (double-read consistency check)
   uint32_t avtp_media_ts = 0;
   for (int init_try = 0; init_try < 5; init_try++) {
     struct timespec ptp_a, ptp_b;
@@ -813,146 +935,184 @@ static void avb_stream_out_task(void *task_param) {
       uint32_t ts_b = (uint32_t)((uint64_t)ptp_b.tv_sec * 1000000000ULL +
                                   (uint64_t)ptp_b.tv_nsec);
       int32_t diff = (int32_t)(ts_b - ts_a);
-      if (diff >= 0 && diff < 500000) { // consistent reads
+      if (diff >= 0 && diff < 500000) {
         avtp_media_ts = ts_a;
         break;
       }
     }
   }
-  // Per-packet timestamp increment in nanoseconds
-  // For Class A 48kHz: 6 samples / 48000 Hz = 125us = 125000ns
+
   uint32_t avtp_ts_increment =
       (uint32_t)((uint64_t)params->samples_per_packet * 1000000000ULL /
                  params->sample_rate);
-  // Software PLL (PI controller): measures drift vs PTP and applies a
-  // filtered correction to the per-packet increment so timestamps stay locked.
-  // Uses fixed-point (16.16) arithmetic to eliminate integer quantization
-  // artifacts that cause periodic rate wobble.
-  #define PLL_MEASURE_FAST  500   // fast lock: measure every ~62.5ms
-  #define PLL_MEASURE_SLOW  4000  // steady-state: measure every ~500ms
-  #define PLL_FAST_DURATION 80000 // use fast interval for first ~10s (80000 pkts)
-  #define PLL_SPREAD        16000 // spread correction over ~2s of packets
-  #define PLL_FILTER_SHIFT  4    // IIR filter: blend 1/16 new + 15/16 old
-  #define PLL_FP_SHIFT      16   // fixed-point fractional bits
-  #define PLL_KI_SHIFT      8    // integral gain = 1/256 of proportional
-  int64_t pll_correction_fp = 0; // filtered correction in 16.16 fixed-point ns
-  int64_t pll_frac_accum = 0;    // fractional accumulator for sub-ns distribution
-  int64_t pll_integral_fp = 0;   // integral accumulator for steady-state error
-  // PLL diagnostics
+
+  // Software PLL (unchanged)
+  #define PLL_MEASURE_FAST  500
+  #define PLL_MEASURE_SLOW  4000
+  #define PLL_FAST_DURATION 80000
+  #define PLL_SPREAD        16000
+  #define PLL_FILTER_SHIFT  4
+  #define PLL_FP_SHIFT      16
+  #define PLL_KI_SHIFT      8
+  int64_t pll_correction_fp = 0;
+  int64_t pll_frac_accum = 0;
+  int64_t pll_integral_fp = 0;
   int32_t pll_offset_max = 0, pll_offset_min = 0;
   uint32_t pll_measure_count = 0, pll_skip_count = 0;
 
-  // Register a WDT user handle and feed it explicitly from the spin loop.
-  // IDLE1 WDT check is disabled via sdkconfig since AVB-OUT starves it.
   esp_task_wdt_add_user("AVB-OUT", &wdt_handle);
+  esp_log_level_set("ptpd", ESP_LOG_NONE);
+  esp_log_level_set("esp.emac", ESP_LOG_NONE);
 
-  // Suppress all UART logging while streaming — any ESP_LOG call takes a
-  // global spinlock that stalls this real-time loop on core 1. PTP daemon
-  // logs sync/follow-up every ~1s which causes audible glitches.
-  esp_log_level_set("*", ESP_LOG_NONE);
-
-  // Timing instrumentation
-  int64_t t_gen_total = 0, t_write_total = 0, t_send_total = 0;
-  int64_t t_gen_max = 0, t_write_max = 0, t_send_max = 0;
   uint32_t loop_count = 0;
   uint32_t overrun_count = 0;
   int64_t overrun_max = 0;
   uint32_t send_fail_count = 0;
+  bool mcr_cleared = false;
+  uint32_t i2s_zero_reads = 0;   /* reads that returned 0 bytes */
+  uint32_t i2s_nonzero_audio = 0; /* reads with non-zero audio data */
+
+  /* I2S RX local ring — absorbs DMA buffer timing mismatch.
+   * Read larger chunks when available, consume i2s_read_size per packet. */
+  #define I2S_RING_SIZE 2048  /* ~5ms at 48kHz stereo 24-bit */
+  int i2s_ring_head = 0, i2s_ring_tail = 0;
+  if (!params->use_sine_wave) {
+    i2s_ring = calloc(1, I2S_RING_SIZE);
+    if (!i2s_ring) {
+      avberr("Stream out: no memory for I2S ring");
+      goto err;
+    }
+    /* Ensure I2S RX channel is enabled (codec open may have reconfigured it) */
+    i2s_channel_enable(params->i2s_rx_handle); /* no-op if already enabled */
+
+    /* Pre-fill the I2S ring with blocking reads to establish buffer level.
+     * I2S DMA returns in chunks larger than requested (driver adjusts
+     * dma_frame_num), so we fill as much as we can. */
+    int prefill_target = I2S_RING_SIZE / 2; /* ~2.5ms of audio */
+    while (i2s_ring_head < prefill_target) {
+      int write_pos = i2s_ring_head % I2S_RING_SIZE;
+      int space = I2S_RING_SIZE - i2s_ring_head;
+      int chunk = I2S_RING_SIZE - write_pos;
+      if (chunk > space) chunk = space;
+      size_t got = 0;
+      i2s_channel_read(params->i2s_rx_handle,
+                       i2s_ring + write_pos, chunk, &got, 100);
+      if (got == 0) break; /* timeout — give up pre-fill */
+      i2s_ring_head += got;
+    }
+    avbinfo("Stream out: I2S ring pre-filled %d bytes", i2s_ring_head);
+    /* Log pre-fill status */
+  }
 
   while (octets_to_uint(
              state->output_streams[params->stream_index].connection_count, 2) >
          0) {
-    // Pure busy-wait until next transmission time. No yielding — this task
-    // is pinned to a dedicated core at max priority for real-time streaming.
-    // The task watchdog is fed explicitly below instead of relying on IDLE.
-    while (esp_timer_get_time() < next_send_time) {
-    }
+    /* Busy-wait until next send time */
+    while (esp_timer_get_time() < next_send_time) { }
 
-    // Detect overruns (late wakeup from interrupt preemption)
     int64_t now = esp_timer_get_time();
     int64_t overrun = now - next_send_time;
     if (overrun > params->interval / 2) {
       overrun_count++;
-      if (overrun > overrun_max)
-        overrun_max = overrun;
+      if (overrun > overrun_max) overrun_max = overrun;
     }
-    // If we've fallen more than 10 packet intervals behind, snap forward
-    // instead of bursting back-to-back packets to catch up, which would
-    // produce a gap followed by a burst on the wire.
     if (overrun > params->interval * 10) {
       next_send_time = now + params->interval;
     } else {
       next_send_time += params->interval;
     }
 
-    // Advance the AVTP media clock with PLL-corrected increment.
-    // Uses fixed-point accumulator to distribute sub-nanosecond corrections
-    // evenly across packets, avoiding integer quantization wobble.
+    /* Advance AVTP media clock with PLL correction */
     pll_frac_accum += pll_correction_fp;
     int32_t correction_ns = (int32_t)(pll_frac_accum >> PLL_FP_SHIFT);
     pll_frac_accum -= (int64_t)correction_ns << PLL_FP_SHIFT;
     avtp_media_ts += (uint32_t)((int32_t)avtp_ts_increment + correction_ns);
 
-    // Copy samples from precomputed sine LUT (constant time)
-    int64_t t0 = esp_timer_get_time();
-    copy_sine_from_lut(pcm_buf, params->samples_per_packet, params->channels,
-                       params->bit_depth, sine_lut, lut_samples, &lut_pos);
-    int64_t t1 = esp_timer_get_time();
+    /* Update per-packet fields in tx_frame */
+    avtp[1] = mcr_cleared ? 0x81 : 0x89; /* sv=1, tv=1, mr=1 on first pkt */
+    if (!mcr_cleared) { avtp[1] = 0x89; mcr_cleared = true; }
+    else { avtp[1] = 0x81; }
+    avtp[2] = seq_num++;
+    uint32_t presentation_ts = avtp_media_ts + (is_am824 ? 2000000 : 4000000);
+    avtp[12] = (presentation_ts >> 24) & 0xFF;
+    avtp[13] = (presentation_ts >> 16) & 0xFF;
+    avtp[14] = (presentation_ts >> 8) & 0xFF;
+    avtp[15] = presentation_ts & 0xFF;
 
-    // Read PCM data from embedded file
-    // read_pcm_file(pcm_buf, params->samples_per_packet, params->channels,
-    //              params->bit_depth, state->config.pcm_data,
-    //              state->config.pcm_data_length, &pcm_offset);
-
-    int64_t t2 = t1; // I2S write disabled
-
-    // Send the PCM data as AVTP packets over Ethernet
-    int offset = 0;
-    while (offset < pcm_buf_size) {
-      int chunk = pcm_buf_size - offset;
-      if (chunk > AVTP_STREAM_DATA_PER_MSG) {
-        chunk = AVTP_STREAM_DATA_PER_MSG;
-      }
-      int send_ret;
-      if (params->format_subtype == avtp_subtype_61883) {
-        send_ret = avb_send_iec_61883_packet(
-            state, &params->stream_id, pcm_buf + offset, chunk, seq_num++,
-            params->dbs, params->cip_sfc, params->channels,
-            &params->dest_addr, params->vlan_id, avtp_media_ts, dbc);
-        dbc += params->samples_per_packet; // advance DBC by number of data blocks
-      } else {
-        send_ret = avb_send_aaf_pcm_packet(
-            state, &params->stream_id, pcm_buf + offset, chunk, seq_num++,
-            sample_rate_code, params->channels, params->bit_depth,
-            &params->dest_addr, params->vlan_id, avtp_media_ts);
-      }
-      if (send_ret <= 0) send_fail_count++;
-      offset += chunk;
+    if (is_am824) {
+      /* Update DBC in CIP header */
+      uint8_t *cip = avtp + TX_AVTP_HDR_LEN;
+      cip[3] = (uint8_t)(dbc & 0xFF);
+      dbc += params->samples_per_packet;
     }
-    int64_t t3 = esp_timer_get_time();
 
-    int64_t dt_gen = t1 - t0;
-    int64_t dt_write = t2 - t1;
-    int64_t dt_send = t3 - t2;
-    t_gen_total += dt_gen;
-    t_write_total += dt_write;
-    t_send_total += dt_send;
-    if (dt_gen > t_gen_max)
-      t_gen_max = dt_gen;
-    if (dt_write > t_write_max)
-      t_write_max = dt_write;
-    if (dt_send > t_send_max)
-      t_send_max = dt_send;
+    /* Get audio data and convert directly into tx_frame */
+    uint8_t *audio_dst = tx_frame + audio_offset;
+    int total_samples = params->samples_per_packet * params->channels;
+
+    if (params->use_sine_wave) {
+      copy_sine_from_lut(pcm_buf, params->samples_per_packet, params->channels,
+                         params->bit_depth, sine_lut, lut_samples, &lut_pos);
+      if (is_am824) be32_to_am824(pcm_buf, audio_dst, total_samples);
+      else          be32_to_aaf(pcm_buf, audio_dst, total_samples);
+    } else {
+      /* Read mic audio via local ring — refill from I2S when low,
+       * consume i2s_read_size bytes per packet */
+      int ring_avail = i2s_ring_head - i2s_ring_tail;
+      if (ring_avail < i2s_read_size) {
+        /* Refill: read as much as possible from I2S into ring */
+        int ring_space = I2S_RING_SIZE - ring_avail;
+        int write_pos = i2s_ring_head % I2S_RING_SIZE;
+        int chunk = I2S_RING_SIZE - write_pos; /* to end of buffer */
+        if (chunk > ring_space) chunk = ring_space;
+        size_t bytes_read = 0;
+        /* Use short timeout — I2S DMA buffers arrive periodically.
+         * If no data now, the ring has buffered audio from previous fills. */
+        i2s_channel_read(params->i2s_rx_handle,
+                         i2s_ring + write_pos, chunk, &bytes_read, 0);
+        if (bytes_read > 0) {
+          i2s_ring_head += bytes_read;
+          i2s_nonzero_audio++;
+        } else {
+          i2s_zero_reads++;
+        }
+        ring_avail = i2s_ring_head - i2s_ring_tail;
+      }
+      /* Consume i2s_read_size bytes from ring */
+      if (ring_avail >= i2s_read_size) {
+        int read_pos = i2s_ring_tail % I2S_RING_SIZE;
+        int first = I2S_RING_SIZE - read_pos;
+        if (first >= i2s_read_size) {
+          memcpy(i2s_buf, i2s_ring + read_pos, i2s_read_size);
+        } else {
+          memcpy(i2s_buf, i2s_ring + read_pos, first);
+          memcpy(i2s_buf + first, i2s_ring, i2s_read_size - first);
+        }
+        i2s_ring_tail += i2s_read_size;
+      } else {
+        memset(i2s_buf, 0, i2s_read_size); /* underrun — silence */
+        i2s_zero_reads++;
+      }
+      /* One-shot: dump I2S input and AM824 output */
+      if (is_am824) i2s24_to_am824_mono(i2s_buf, audio_dst,
+                                        params->samples_per_packet, params->channels);
+      else          i2s24_to_aaf_mono(i2s_buf, audio_dst,
+                                       params->samples_per_packet, params->channels);
+    } /* end else (mic path) */
+
+    /* Transmit directly via EMAC — single copy into DMA ring */
+    if (esp_eth_transmit(params->eth_handle, tx_frame, frame_len) != ESP_OK) {
+      send_fail_count++;
+    }
+
     loop_count++;
 
-    // Feed the task watchdog every ~125ms (1000 cycles at 125us)
+    /* Feed WDT every ~125ms */
     if (wdt_handle && loop_count % 1000 == 0) {
       esp_task_wdt_reset_user(wdt_handle);
     }
 
-    // Software PLL (PI controller): read PTP clock directly and compute
-    // drift correction. Double-read guards against the HAL's non-atomic
-    // seconds/nanoseconds register read at second boundaries.
+    /* Software PLL (unchanged) */
 #if !PLL_DISABLED
     uint32_t pll_interval = (loop_count < PLL_FAST_DURATION)
                                 ? PLL_MEASURE_FAST : PLL_MEASURE_SLOW;
@@ -962,48 +1122,29 @@ static void avb_stream_out_task(void *task_param) {
         uint32_t ptp_now_ts =
             (uint32_t)((uint64_t)ptp_now.tv_sec * 1000000000ULL +
                        (uint64_t)ptp_now.tv_nsec);
-        // Re-read to verify the HAL's non-atomic sec+nsec read was consistent.
-        // Compare full nanosecond values instead of just seconds, so we don't
-        // skip every measurement that lands near the PTP second boundary.
         struct timespec ptp_check;
         if (esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &ptp_check) == 0) {
           uint32_t check_ts =
               (uint32_t)((uint64_t)ptp_check.tv_sec * 1000000000ULL +
                          (uint64_t)ptp_check.tv_nsec);
-          // Both reads should be within ~10μs of each other. A bad HAL read
-          // at the second boundary produces ~1s error in the uint32 domain.
           int32_t read_diff = (int32_t)(check_ts - ptp_now_ts);
-          if (read_diff >= 0 && read_diff < 500000) { // 0-500μs apart = good
-            // Signed offset: positive = we're behind PTP, negative = ahead
+          if (read_diff >= 0 && read_diff < 500000) {
             int32_t offset = (int32_t)(ptp_now_ts - avtp_media_ts);
-
-            // Track PLL diagnostics
             pll_measure_count++;
             if (offset > pll_offset_max) pll_offset_max = offset;
             if (offset < pll_offset_min) pll_offset_min = offset;
-
-            // Reject outliers: offsets > 50ms indicate a bad HAL read or PTP
-            // clock step — feeding these into the PI controller would cause a
-            // massive transient that takes seconds to recover from.
-            #define PLL_OUTLIER_NS 50000000 // 50ms
+            #define PLL_OUTLIER_NS 50000000
             if (offset > PLL_OUTLIER_NS || offset < -PLL_OUTLIER_NS) {
               pll_skip_count++;
               goto pll_skip;
             }
-
-            // Proportional term in 16.16 fixed-point ns/packet
             int64_t prop_corr_fp =
                 ((int64_t)offset << PLL_FP_SHIFT) / PLL_SPREAD;
-
-            // Integral term: eliminates steady-state error from crystal offset.
-            // Anti-windup clamp at ~100 ppm (125 ns/pkt at 125000 ns nominal).
             pll_integral_fp +=
                 ((int64_t)offset << PLL_FP_SHIFT) / (PLL_SPREAD << PLL_KI_SHIFT);
             int64_t integral_max = (int64_t)125 << PLL_FP_SHIFT;
             if (pll_integral_fp > integral_max) pll_integral_fp = integral_max;
             if (pll_integral_fp < -integral_max) pll_integral_fp = -integral_max;
-
-            // Combined PI correction, then IIR low-pass filter
             int64_t new_corr_fp = prop_corr_fp + pll_integral_fp;
             int64_t filter_n = (1 << PLL_FILTER_SHIFT);
             pll_correction_fp =
@@ -1013,51 +1154,384 @@ static void avb_stream_out_task(void *task_param) {
         }
       }
     }
-#endif // !PLL_DISABLED
-
-    // Reset stats every 8000 iterations (~1 second at Class A rate).
-    // No logging here — UART output blocks the real-time loop.
-    if (loop_count % 8000 == 0) {
-      t_gen_total = t_write_total = t_send_total = 0;
-      t_gen_max = t_write_max = t_send_max = 0;
-      overrun_count = 0;
-      overrun_max = 0;
-    }
+#endif
   }
 
-  // Log stream summary before cleanup (variables are in scope here)
   esp_log_level_set("*", ESP_LOG_INFO);
-  avbinfo("Stream out task stopped: %lu packets sent, %lu send failures, "
-          "%lu overruns (max %lldus)",
-          loop_count, send_fail_count, overrun_count, overrun_max);
-  avbinfo("PLL: %lu measurements, %lu skipped, offset range [%ldns, %ldns], "
-          "correction=%lld (fp16.16)",
+  avbinfo("Stream out stopped: %lu pkts, %lu fails, %lu overruns (max %lldus), "
+          "i2s: %lu zero_reads, %lu nonzero_audio",
+          loop_count, send_fail_count, overrun_count, overrun_max,
+          i2s_zero_reads, i2s_nonzero_audio);
+  avbinfo("PLL: %lu measures, %lu skipped, offset [%ldns, %ldns]",
           pll_measure_count, pll_skip_count,
-          (long)pll_offset_min, (long)pll_offset_max,
-          (long long)pll_correction_fp);
+          (long)pll_offset_min, (long)pll_offset_max);
 
 err:
-  // Restore default logging now that real-time streaming has stopped
   esp_log_level_set("*", ESP_LOG_INFO);
-
-  if (wdt_handle) {
-    esp_task_wdt_delete_user(wdt_handle);
-  }
-  if (sine_lut) {
-    free(sine_lut);
-  }
-  if (pcm_buf) {
-    free(pcm_buf);
-  }
-  if (params && params->state) {
-    avb_state_s *s = (avb_state_s *)params->state;
-    if (s->config.codec_handle) {
-      esp_codec_dev_close(s->config.codec_handle);
-    }
-  }
+  if (wdt_handle) esp_task_wdt_delete_user(wdt_handle);
+  free(sine_lut);
+  free(pcm_buf);
+  free(i2s_buf);
+  free(i2s_ring);
+  free(tx_frame);
   free(params);
   vTaskDelete(NULL);
 }
+
+/****************************************************************************
+ * Stream Input (Listener) — Jitter-buffered AVTP → I2S
+ *
+ * Architecture:
+ *   EMAC RX handler → ring_write (non-blocking)
+ *   esp_timer 1ms   → ring_read → i2s_channel_write
+ *
+ * The SPSC lock-free ring buffer decouples bursty EMAC packet arrival
+ * from steady I2S DMA consumption. Milan-compliant: buffers ≥2.126ms.
+ ****************************************************************************/
+
+#include <stdatomic.h>
+
+/* Lock-free single-producer single-consumer ring buffer.
+ * Capacity MUST be a power of 2 for fast index masking. */
+typedef struct {
+  uint8_t *buf;
+  uint32_t capacity;          /* power of 2 */
+  _Atomic uint32_t head;      /* write position (producer only) */
+  _Atomic uint32_t tail;      /* read position (consumer only) */
+} jitter_ring_t;
+
+#define JITTER_RING_SIZE 2048 /* ~5.3ms at 48kHz stereo 24-bit */
+#define JITTER_PREFILL   576  /* ~2ms of silence pre-fill */
+
+static inline uint32_t ring_readable(const jitter_ring_t *r) {
+  return atomic_load_explicit(&r->head, memory_order_acquire) -
+         atomic_load_explicit(&r->tail, memory_order_relaxed);
+}
+
+static inline uint32_t ring_writable(const jitter_ring_t *r) {
+  return r->capacity - ring_readable(r);
+}
+
+static inline uint32_t ring_write(jitter_ring_t *r,
+                                   const uint8_t *data, uint32_t len) {
+  uint32_t avail = ring_writable(r);
+  if (len > avail) len = avail;
+  if (len == 0) return 0;
+  uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+  uint32_t mask = r->capacity - 1;
+  uint32_t first = r->capacity - (h & mask);
+  if (first > len) first = len;
+  memcpy(r->buf + (h & mask), data, first);
+  if (len > first)
+    memcpy(r->buf, data + first, len - first);
+  atomic_store_explicit(&r->head, h + len, memory_order_release);
+  return len;
+}
+
+static inline uint32_t ring_read(jitter_ring_t *r,
+                                  uint8_t *dst, uint32_t len) {
+  uint32_t avail = ring_readable(r);
+  if (len > avail) len = avail;
+  if (len == 0) return 0;
+  uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+  uint32_t mask = r->capacity - 1;
+  uint32_t first = r->capacity - (t & mask);
+  if (first > len) first = len;
+  memcpy(dst, r->buf + (t & mask), first);
+  if (len > first)
+    memcpy(dst + first, r->buf, len - first);
+  atomic_store_explicit(&r->tail, t + len, memory_order_release);
+  return len;
+}
+
+/* Stream RX handler context — file-static, accessed by EMAC task and
+ * esp_timer task. Allocated by avb_start_stream_in. */
+typedef struct {
+  i2s_chan_handle_t i2s_tx_handle;
+  uint8_t *i2s_drain_buf;     /* buffer for drain callback reads */
+  size_t i2s_drain_buf_size;
+  uint8_t *i2s_convert_buf;   /* buffer for AVTP→PCM conversion in handler */
+  size_t i2s_convert_buf_size;
+  jitter_ring_t ring;
+  esp_timer_handle_t drain_timer;
+  /* diagnostics */
+  uint32_t pkt_count;
+  uint32_t ring_write_fail;   /* ring full — packets dropped */
+  uint32_t ring_write_ok;
+  uint32_t drain_count;
+  uint32_t drain_underrun;    /* drain found ring empty */
+  /* first-packet snapshot (written by handler, printed by main loop) */
+  uint8_t diag_subtype;
+  uint16_t diag_sdl;
+  uint8_t diag_channels;
+  uint8_t diag_samples;
+  uint16_t diag_i2s_bytes;
+  uint8_t diag_first_audio[8];
+  uint8_t diag_captured; /* 0=waiting, 1=pending print, 2=printed */
+} stream_rx_ctx_t;
+
+static stream_rx_ctx_t *s_stream_rx_ctx = NULL;
+
+/* Drain timer callback — reads from ring, writes to I2S.
+ * Runs in esp_timer task context (prio 22), fired every 1ms. */
+static void stream_in_drain_cb(void *arg) {
+  stream_rx_ctx_t *c = (stream_rx_ctx_t *)arg;
+  c->drain_count++;
+
+  uint32_t avail = ring_readable(&c->ring);
+  if (avail == 0) {
+    c->drain_underrun++;
+    return;
+  }
+
+  uint32_t to_read = avail;
+  if (to_read > c->i2s_drain_buf_size) to_read = c->i2s_drain_buf_size;
+  /* Align to frame boundary (6 bytes per stereo 24-bit frame) */
+  to_read = (to_read / 6) * 6;
+  if (to_read == 0) return;
+
+  uint32_t got = ring_read(&c->ring, c->i2s_drain_buf, to_read);
+  size_t bytes_written = 0;
+  i2s_channel_write(c->i2s_tx_handle, c->i2s_drain_buf, got,
+                    &bytes_written, 1);
+}
+
+/* Stream RX handler — called inline from EMAC RX task for each
+ * VLAN-tagged AVTP packet. Parses AVTP, converts audio to 24-bit
+ * stereo, writes to jitter ring buffer. Must return quickly. */
+static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
+                                   void *ctx) {
+  stream_rx_ctx_t *c = (stream_rx_ctx_t *)ctx;
+  if (!c || len < 24) return;
+
+  uint8_t subtype = avtp_data[0] & 0x7F;
+  uint8_t *pcm_data = NULL;
+  int pcm_len = 0;
+  int channels = 0;
+  int samples = 0;
+
+  if (subtype == avtp_subtype_aaf) {
+    aaf_pcm_message_s *aaf_msg = (aaf_pcm_message_s *)avtp_data;
+    uint16_t stream_data_len =
+        (aaf_msg->stream_data_len[0] << 8) | aaf_msg->stream_data_len[1];
+    if (stream_data_len == 0 || stream_data_len > AVTP_STREAM_DATA_PER_MSG)
+      return;
+    channels = aaf_msg->chan_per_frame;
+    if (channels == 0) channels = 8;
+    samples = stream_data_len / (channels * 4);
+    pcm_data = aaf_msg->stream_data;
+    pcm_len = stream_data_len;
+
+  } else if (subtype == avtp_subtype_61883) {
+    iec_61883_6_message_s *iec_msg = (iec_61883_6_message_s *)avtp_data;
+    uint16_t stream_data_len =
+        (iec_msg->stream_data_len[0] << 8) | iec_msg->stream_data_len[1];
+    if (stream_data_len <= 8) return;
+    uint8_t dbs = iec_msg->stream_data[1];
+    channels = dbs;
+    if (channels == 0) channels = 8;
+    int data_bytes = stream_data_len - 8;
+    samples = data_bytes / (channels * 4);
+    pcm_data = iec_msg->stream_data + 8;
+    pcm_len = data_bytes;
+  } else {
+    return;
+  }
+
+  if (samples <= 0 || !pcm_data) return;
+
+  /* Capture first packet diagnostics (main loop prints) */
+  if (c->diag_captured == 0) {
+    c->diag_subtype = subtype;
+    c->diag_sdl = (subtype == avtp_subtype_61883) ?
+        ((iec_61883_6_message_s *)avtp_data)->stream_data_len[0] << 8 |
+        ((iec_61883_6_message_s *)avtp_data)->stream_data_len[1] : 0;
+    c->diag_channels = channels;
+    c->diag_samples = samples;
+    int copy = pcm_len < 8 ? pcm_len : 8;
+    memcpy(c->diag_first_audio, pcm_data, copy);
+    c->diag_captured = 1;
+  }
+
+  /* Convert AVTP 24-bit audio to 24-bit stereo for I2S.
+   * I2S slot config: 24-bit data, 24-bit slot (3 bytes/sample, little-endian)
+   * Downmix multi-channel to stereo: ch0 → L, ch1 → R */
+  uint8_t *buf = c->i2s_convert_buf;
+  int offset = 0;
+  for (int s = 0; s < samples && offset + 6 <= (int)c->i2s_convert_buf_size; s++) {
+    for (int ch = 0; ch < 2; ch++) {
+      int src_ch = (ch < channels) ? ch : 0;
+      int src_offset = (s * channels + src_ch) * 4;
+
+      if (subtype == avtp_subtype_aaf) {
+        if (src_offset + 2 < pcm_len) {
+          buf[offset + 0] = pcm_data[src_offset + 2]; // LSB
+          buf[offset + 1] = pcm_data[src_offset + 1]; // MID
+          buf[offset + 2] = pcm_data[src_offset + 0]; // MSB
+        } else {
+          buf[offset + 0] = 0; buf[offset + 1] = 0; buf[offset + 2] = 0;
+        }
+      } else {
+        if (src_offset + 3 < pcm_len) {
+          buf[offset + 0] = pcm_data[src_offset + 3]; // LSB
+          buf[offset + 1] = pcm_data[src_offset + 2]; // MID
+          buf[offset + 2] = pcm_data[src_offset + 1]; // MSB
+        } else {
+          buf[offset + 0] = 0; buf[offset + 1] = 0; buf[offset + 2] = 0;
+        }
+      }
+      offset += 3;
+    }
+  }
+
+  /* Write converted PCM into jitter ring — non-blocking */
+  if (offset > 0) {
+    uint32_t written = ring_write(&c->ring, buf, offset);
+    if (written < (uint32_t)offset) {
+      c->ring_write_fail++;
+    } else {
+      c->ring_write_ok++;
+    }
+    if (!c->diag_i2s_bytes) c->diag_i2s_bytes = offset;
+  }
+  c->pkt_count++;
+}
+
+/* Print stream-in diagnostics — called from AVB main loop (safe for UART).
+ * One-shot: prints first-packet info once, then suppressed. */
+void avb_stream_in_print_diag(void) {
+  stream_rx_ctx_t *c = s_stream_rx_ctx;
+  if (!c || c->diag_captured != 1) return;
+  c->diag_captured = 2;
+  avbinfo("STREAM: ok=%lu rfail=%lu drain=%lu underrun=%lu fill=%lu "
+          "sub=%d sdl=%d ch=%d samp=%d i2s=%d "
+          "audio=[%02x %02x %02x %02x %02x %02x %02x %02x]",
+          c->ring_write_ok, c->ring_write_fail,
+          c->drain_count, c->drain_underrun,
+          ring_readable(&c->ring),
+          c->diag_subtype, c->diag_sdl, c->diag_channels,
+          c->diag_samples, c->diag_i2s_bytes,
+          c->diag_first_audio[0], c->diag_first_audio[1],
+          c->diag_first_audio[2], c->diag_first_audio[3],
+          c->diag_first_audio[4], c->diag_first_audio[5],
+          c->diag_first_audio[6], c->diag_first_audio[7]);
+}
+
+/* Start AVB stream input — opens codec, creates jitter buffer,
+ * starts drain timer, registers stream RX handler. */
+int avb_start_stream_in(avb_state_s *state, uint16_t index) {
+
+  if (state->stream_in_active) {
+    avberr("Another instance of stream-in is already running");
+    return ERROR;
+  }
+
+  // Codec already opened at startup by avb_config_codec (ADC+DAC active).
+  // No per-stream open needed — avoids killing the other direction.
+
+  // Allocate stream handler context
+  stream_rx_ctx_t *ctx = calloc(1, sizeof(stream_rx_ctx_t));
+  if (!ctx) {
+    avberr("Stream in: no memory for context");
+    return ERROR;
+  }
+  ctx->i2s_tx_handle = state->i2s_tx_handle;
+
+  // Conversion buffer — used by handler to build stereo PCM per packet
+  ctx->i2s_convert_buf_size = (AVTP_STREAM_DATA_PER_MSG / 4) * 2 * 3;
+  ctx->i2s_convert_buf = calloc(1, ctx->i2s_convert_buf_size);
+
+  // Drain buffer — used by timer callback to read from ring
+  ctx->i2s_drain_buf_size = 512; /* ~85 frames, well above 1ms worth */
+  ctx->i2s_drain_buf = calloc(1, ctx->i2s_drain_buf_size);
+
+  if (!ctx->i2s_convert_buf || !ctx->i2s_drain_buf) {
+    avberr("Stream in: no memory for buffers");
+    free(ctx->i2s_convert_buf);
+    free(ctx->i2s_drain_buf);
+    free(ctx);
+    return ERROR;
+  }
+
+  // Allocate jitter ring buffer (internal RAM for speed)
+  ctx->ring.buf = calloc(1, JITTER_RING_SIZE);
+  if (!ctx->ring.buf) {
+    avberr("Stream in: no memory for ring buffer");
+    free(ctx->i2s_convert_buf);
+    free(ctx->i2s_drain_buf);
+    free(ctx);
+    return ERROR;
+  }
+  ctx->ring.capacity = JITTER_RING_SIZE;
+  atomic_store(&ctx->ring.head, JITTER_PREFILL); /* pre-fill silence */
+  atomic_store(&ctx->ring.tail, 0);
+  /* Ring buf is calloc'd (zeros) so pre-fill region is already silence */
+
+  // Create and start drain timer (1ms period)
+  esp_timer_create_args_t timer_args = {
+      .callback = stream_in_drain_cb,
+      .arg = ctx,
+      .dispatch_method = ESP_TIMER_TASK,
+      .name = "avb_drain",
+  };
+  if (esp_timer_create(&timer_args, &ctx->drain_timer) != ESP_OK) {
+    avberr("Stream in: failed to create drain timer");
+    free(ctx->ring.buf);
+    free(ctx->i2s_convert_buf);
+    free(ctx->i2s_drain_buf);
+    free(ctx);
+    return ERROR;
+  }
+  esp_timer_start_periodic(ctx->drain_timer, 1000); /* 1000μs = 1ms */
+
+  s_stream_rx_ctx = ctx;
+  state->stream_in_active = true;
+  state->input_streams[index].connected = true;
+
+  // Register the stream handler — VLAN AVTP frames dispatched to handler
+  avb_net_set_stream_rx_handler(avb_stream_rx_handler, ctx);
+
+  avbinfo("Stream in started (jitter buffer %d bytes, pre-fill %d bytes)",
+          JITTER_RING_SIZE, JITTER_PREFILL);
+  return OK;
+}
+
+/* Stop AVB stream input — unregisters handler, stops timer, frees resources */
+void avb_stop_stream_in(avb_state_s *state) {
+  if (!state->stream_in_active) return;
+
+  // Unregister handler first to stop new packets
+  avb_net_set_stream_rx_handler(NULL, NULL);
+
+  state->stream_in_active = false;
+
+  if (s_stream_rx_ctx) {
+    // Stop and delete drain timer
+    esp_timer_stop(s_stream_rx_ctx->drain_timer);
+    esp_timer_delete(s_stream_rx_ctx->drain_timer);
+
+    avbinfo("Stream in stopped: %lu pkts, ring ok=%lu fail=%lu, "
+            "drain=%lu underrun=%lu, ring fill=%lu",
+            s_stream_rx_ctx->pkt_count,
+            s_stream_rx_ctx->ring_write_ok,
+            s_stream_rx_ctx->ring_write_fail,
+            s_stream_rx_ctx->drain_count,
+            s_stream_rx_ctx->drain_underrun,
+            ring_readable(&s_stream_rx_ctx->ring));
+
+    free(s_stream_rx_ctx->ring.buf);
+    free(s_stream_rx_ctx->i2s_convert_buf);
+    free(s_stream_rx_ctx->i2s_drain_buf);
+    free(s_stream_rx_ctx);
+    s_stream_rx_ctx = NULL;
+  }
+
+  // Codec stays open — shared with talker stream-out. Closed at AVB shutdown.
+}
+
+/****************************************************************************
+ * Stream Output (Talker)
+ ****************************************************************************/
 
 /* Start the AVB stream output task (talker)
  *
@@ -1085,7 +1559,7 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
   params->state = state;
   params->stream_index = index;
   params->i2s_rx_handle = state->i2s_rx_handle;
-  params->l2if = state->l2if[VLAN];
+  params->eth_handle = state->config.eth_handle;
   memcpy(&params->stream_id, state->output_streams[index].stream_id,
          UNIQUE_ID_LEN);
   memcpy(&params->dest_addr, &state->output_streams[index].stream_dest_addr,
@@ -1111,9 +1585,9 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
     params->sample_rate = aaf_code_to_sample_rate(fmt->aaf_pcm.sample_rate);
   }
 
-  // Sine wave configuration
-  params->use_sine_wave = true;
-  params->sine_freq = 1000.0f; // 1 kHz test tone
+  // Audio source: mic input by default, sine wave for testing
+  params->use_sine_wave = false;
+  params->sine_freq = 1000.0f; // 1 kHz test tone (if sine enabled)
 
   // Calculate samples per packet based on stream class
   // Class A: 125us (8000 packets/sec), Class B: 250us (4000 packets/sec)
@@ -1137,8 +1611,8 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
       octets_to_uint(state->output_streams[index].connection_count, 2) + 1;
   int_to_octets(&count, state->output_streams[index].connection_count, 2);
 
-  avbinfo("Stream out %d started: sine wave %0.0f Hz -> AVTP %s", index,
-          params->sine_freq,
+  avbinfo("Stream out %d started: %s -> AVTP %s", index,
+          params->use_sine_wave ? "sine wave" : "mic input",
           params->format_subtype == avtp_subtype_61883 ? "IEC 61883" : "AAF");
   return OK;
 }

@@ -57,8 +57,8 @@ void init_ethernet_and_netif(void) {
   // Increase DMA buffer size and count
   emac_config.dma_burst_len = ETH_DMA_BURST_LEN_32;
   emac_config.intr_priority = 0; // 0 = use default priority
-  mac_config.rx_task_stack_size = 12288;
-  mac_config.rx_task_prio = 15;
+  mac_config.rx_task_stack_size = 16384; // Room for I2S writes in EMAC RX callback
+  mac_config.rx_task_prio = 22;         // Above AVB main task (21)
   // Set PHY address (usually 0 or 1, check your hardware)
   phy_config.phy_addr = 1;
   phy_config.reset_gpio_num = 5; // GPIO number for PHY reset
@@ -139,6 +139,8 @@ void app_main(void) {
   /* Start AVB*/
   avb_start(&avb_config);
 
+  vTaskDelay(pdMS_TO_TICKS(3000));
+
   /* After AVB is started, you can set additional codec options */
   // MUST USE EVENT TO MAKE SURE CODEC IS INITIALIZED, THEN USE STATUS TO GET
   // CODEC HANDLE void *codec_handle = avb_get_codec_handle(); if (codec_handle)
@@ -166,18 +168,22 @@ void app_main(void) {
 
   /* Main loop */
   while (1) {
+    vTaskDelay(pdMS_TO_TICKS(task_monitor_period));
+
     struct ptpd_status_s ptp_status;
     // If valid PTP status
     if (ptpd_status(pid, &ptp_status) == 0) {
       // Do something with the PTP status
     }
 
+    ESP_LOGI(TAG, "heartbeat");
+
     // Check memory consumption of tasks periodically, report any tasks with
     // high watermark under threshold
     if (uxTaskGetStackHighWaterMark(t0) < task_monitor_threshold)
       ESP_LOGI(TAG, "TASK %s high water mark = %d", t0_name,
                uxTaskGetStackHighWaterMark(t0));
-    if (uxTaskGetStackHighWaterMark(t1) < task_monitor_threshold)
+    if (t1 && uxTaskGetStackHighWaterMark(t1) < task_monitor_threshold)
       ESP_LOGI(TAG, "TASK %s high water mark = %d", t1_name,
                uxTaskGetStackHighWaterMark(t1));
     if (uxTaskGetStackHighWaterMark(t2) < task_monitor_threshold)

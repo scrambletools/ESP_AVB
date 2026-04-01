@@ -4,9 +4,9 @@
 // Extended configuration options for ESP_AVB
 #define CONFIG_ESP_AVB_ASSOCIATION_ID 0xffffffffffffffff // uint64_t
 #define CONFIG_ESP_AVB_PORT_ID 0x0001                    // uint16_t
-#define CONFIG_ESP_AVB_ENTITY_NAME "Simple Talker"
+#define CONFIG_ESP_AVB_ENTITY_NAME "Simple Talker/Listener"
 #define CONFIG_ESP_AVB_VENDOR_NAME "ACME"
-#define CONFIG_ESP_AVB_MODEL_NAME "ESP_AVB Simple Talker"
+#define CONFIG_ESP_AVB_MODEL_NAME "ESP_AVB Simple Talker/Listener"
 #define CONFIG_ESP_AVB_GROUP_NAME ""
 #define CONFIG_ESP_AVB_FIRMWARE_VERSION "1.0.0"
 #define CONFIG_ESP_AVB_SERIAL_NUMBER "12345678"
