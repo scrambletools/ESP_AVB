@@ -1,6 +1,5 @@
+version: "0.9.0"
 dependencies:
   idf: ^6.0
-  ptpd:
-    path: ${IDF_PATH}/examples/ethernet/ptp/components/ptpd
+  scrambletools/esp_ptp: "*"
   espressif/esp_codec_dev: "*"
-version: 0.9.0
