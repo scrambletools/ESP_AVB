@@ -10,10 +10,9 @@
  */
 
 #include "avb.h"
-#include <esp_task_wdt.h>
-
 #include "esp_codec_dev.h"
 #include "esp_timer.h"
+#include <esp_task_wdt.h>
 
 /* Global state */
 avb_state_s *s_state;
@@ -493,8 +492,8 @@ static int avb_process_rx_message(avb_state_s *state, int protocol_idx,
     }
     break;
   }
-  /* VLAN stream data is handled directly by the EMAC RX dispatcher
-   * via the registered stream handler — never reaches this function. */
+    /* VLAN stream data is handled directly by the EMAC RX dispatcher
+     * via the registered stream handler — never reaches this function. */
   }
   return OK;
 }
@@ -581,9 +580,8 @@ static void avb_task(void *task_param) {
     eth_addr_t src_addr;
     /* Use max(AVB_POLL_INTERVAL_MS, one tick) to guarantee yield.
      * With 100Hz ticks, pdMS_TO_TICKS(1) = 0 which busy-loops. */
-    int ret = avb_net_recv_ctrl(state, &protocol_idx,
-                                &state->rxbuf[0], AVB_MAX_MSG_LEN,
-                                &src_addr, portTICK_PERIOD_MS);
+    int ret = avb_net_recv_ctrl(state, &protocol_idx, &state->rxbuf[0],
+                                AVB_MAX_MSG_LEN, &src_addr, portTICK_PERIOD_MS);
     if (ret > 0 && protocol_idx >= 0 && protocol_idx < AVB_NUM_PROTOCOLS) {
       /* Copy payload and source addr into the protocol-indexed slot so
        * avb_process_rx_message can access them at state->rxbuf[idx] */
@@ -706,16 +704,16 @@ static void test_playback_task(void *param) {
   }
   esp_codec_dev_set_out_vol(codec, 50.0);
 
-  // Pre-compute one full cycle of the sine wave (48 samples for 1kHz @ 48kHz)
-  #define TEST_LUT_LEN 48
-  #define TEST_AMP 16000
+// Pre-compute one full cycle of the sine wave (48 samples for 1kHz @ 48kHz)
+#define TEST_LUT_LEN 48
+#define TEST_AMP 16000
   int16_t lut[TEST_LUT_LEN];
   for (int i = 0; i < TEST_LUT_LEN; i++) {
     lut[i] = (int16_t)(sinf(2.0f * 3.14159265f * i / TEST_LUT_LEN) * TEST_AMP);
   }
 
-  // Write buffer: 10ms = 480 stereo samples
-  #define TEST_BUF_LEN 480
+// Write buffer: 10ms = 480 stereo samples
+#define TEST_BUF_LEN 480
   int16_t buf[TEST_BUF_LEN * 2];
   int lut_pos = 0;
 
@@ -745,7 +743,8 @@ esp_err_t avb_test_codec_playback(uint32_t duration_ms) {
     avberr("Codec not initialized");
     return ESP_ERR_INVALID_STATE;
   }
-  if (duration_ms == 0) duration_ms = 3000;
+  if (duration_ms == 0)
+    duration_ms = 3000;
 
   xTaskCreatePinnedToCore(test_playback_task, "CODEC-TEST", 8192,
                           (void *)(uintptr_t)duration_ms,

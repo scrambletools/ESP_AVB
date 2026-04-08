@@ -43,9 +43,8 @@ static esp_netif_t *s_eth_netif = NULL;
  *   0x88f5 (MVRP) → ctrl_rx_queue (protocol_idx = MVRP)
  *   default        → esp_netif_receive (IP stack for PTP, ARP, etc.)
  */
-static esp_err_t avb_unified_rx_cb(esp_eth_handle_t eth_handle,
-                                    uint8_t *buf, uint32_t len,
-                                    void *priv, void *info) {
+static esp_err_t avb_unified_rx_cb(esp_eth_handle_t eth_handle, uint8_t *buf,
+                                   uint32_t len, void *priv, void *info) {
   if (len < ETH_HEADER_LEN) {
     free(buf);
     return ESP_OK;
@@ -71,16 +70,25 @@ static esp_err_t avb_unified_rx_cb(esp_eth_handle_t eth_handle,
       ctrl_rx_pkt_t pkt;
       /* Map ethertype to protocol index */
       switch (ethertype) {
-      case 0x22f0: pkt.protocol_idx = AVTP; break;
-      case 0x22ea: pkt.protocol_idx = MSRP; break;
-      case 0x88f5: pkt.protocol_idx = MVRP; break;
-      default: pkt.protocol_idx = AVTP; break;
+      case 0x22f0:
+        pkt.protocol_idx = AVTP;
+        break;
+      case 0x22ea:
+        pkt.protocol_idx = MSRP;
+        break;
+      case 0x88f5:
+        pkt.protocol_idx = MVRP;
+        break;
+      default:
+        pkt.protocol_idx = AVTP;
+        break;
       }
       /* Copy source MAC from offset 6 */
       memcpy(pkt.src_addr, buf + ETH_ADDR_LEN, ETH_ADDR_LEN);
       /* Copy payload (strip ETH header) */
       uint32_t payload_len = len - ETH_HEADER_LEN;
-      if (payload_len > AVB_MAX_MSG_LEN) payload_len = AVB_MAX_MSG_LEN;
+      if (payload_len > AVB_MAX_MSG_LEN)
+        payload_len = AVB_MAX_MSG_LEN;
       pkt.length = payload_len;
       memcpy(pkt.data, buf + ETH_HEADER_LEN, payload_len);
       /* Non-blocking send — drop if queue full rather than stalling EMAC */
@@ -98,7 +106,7 @@ static esp_err_t avb_unified_rx_cb(esp_eth_handle_t eth_handle,
      * (eb_handle=NULL path calls free(buf) internally), so we must NOT
      * free buf ourselves when frame_len==0. */
     size_t frame_len = len;
-    esp_vfs_l2tap_eth_filter_frame(eth_handle, buf, &frame_len, NULL);
+    esp_vfs_l2tap_eth_filter_frame(eth_handle, buf, &frame_len, info);
     if (frame_len > 0) {
       return esp_netif_receive(s_eth_netif, buf, frame_len, NULL);
     }
@@ -163,7 +171,8 @@ int avb_net_init(avb_state_s *state) {
     // TX timestamps intentionally NOT enabled on AVB sockets. The timestamped
     // transmit path (esp_eth_transmit_ctrl_vargs) busy-waits for DMA completion
     // while holding the EMAC TX mutex, blocking the real-time AVB-OUT task on
-    // core 1. Only the PTP daemon (which has its own socket) needs TX timestamps.
+    // core 1. Only the PTP daemon (which has its own socket) needs TX
+    // timestamps.
     avbinfo("Initialized L2TAP fd %d for ethertype %x", fd, ethertype);
   }
 
@@ -190,7 +199,7 @@ int avb_net_init(avb_state_s *state) {
    * they reach L2TAP or the IP stack. */
   s_eth_netif = esp_netif_get_handle_from_ifkey(state->config.eth_interface);
   esp_eth_update_input_path_info(state->config.eth_handle, avb_unified_rx_cb,
-                                  s_eth_netif);
+                                 s_eth_netif);
   avbinfo("Unified EMAC RX dispatcher registered");
 
   return OK;
@@ -203,9 +212,9 @@ void avb_create_eth_frame(uint8_t *eth_frame, eth_addr_t *dest_addr,
   struct eth_hdr eth_hdr = {.type = htons(ethertype)};
   uint16_t vid = vlan_id ? octets_to_uint(vlan_id, 2) : 0;
   uint16_t prio = state->msrp_mappings[0].priority;
-  struct eth_vlan_hdr eth_vlan_hdr = {
-      .prio_vid = htons((prio << 13) | (vid & 0x0FFF)),
-      .tpid = htons(ethertype_avtp)};
+  struct eth_vlan_hdr eth_vlan_hdr = {.prio_vid =
+                                          htons((prio << 13) | (vid & 0x0FFF)),
+                                      .tpid = htons(ethertype_avtp)};
   memcpy(&eth_hdr.dest.addr, dest_addr, ETH_ADDR_LEN);
   memcpy(&eth_hdr.src.addr, state->internal_mac_addr, ETH_ADDR_LEN);
   memcpy(eth_frame, &eth_hdr, sizeof(eth_hdr));
@@ -315,12 +324,11 @@ int avb_net_send(avb_state_s *state, ethertype_t ethertype, void *msg,
 /* Receive next control frame from the unified EMAC RX dispatcher.
  * Blocks up to timeout_ms. Returns payload length, or 0 on timeout.
  * protocol_idx is set to AVTP/MSRP/MVRP. */
-int avb_net_recv_ctrl(avb_state_s *state, int *protocol_idx,
-                      void *msg, uint16_t msg_len,
-                      eth_addr_t *src_addr, int timeout_ms) {
+int avb_net_recv_ctrl(avb_state_s *state, int *protocol_idx, void *msg,
+                      uint16_t msg_len, eth_addr_t *src_addr, int timeout_ms) {
   ctrl_rx_pkt_t pkt;
-  if (xQueueReceive(s_ctrl_rx_queue, &pkt,
-                    pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+  if (xQueueReceive(s_ctrl_rx_queue, &pkt, pdMS_TO_TICKS(timeout_ms)) !=
+      pdTRUE) {
     return 0; /* timeout — no frame available */
   }
   *protocol_idx = pkt.protocol_idx;

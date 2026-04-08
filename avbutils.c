@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 Scramble Tools
+ * Copyright 2026-2024 Scramble Tools
  * License: MIT
  *
  * ESP_AVB Component

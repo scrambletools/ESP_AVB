@@ -18,13 +18,13 @@
 #include "avbutils.h"
 #include "config.h"
 #include "esp_avb.h"
+#include "esp_eth_clock.h"
 #include <arpa/inet.h>
 #include <driver/i2c_master.h>
 #include <driver/i2s_std.h>
 #include <esp_check.h>
 #include <esp_err.h>
 #include <esp_eth_driver.h>
-#include <esp_eth_time.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_vfs_l2tap.h>
@@ -43,6 +43,7 @@
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/time.h>
+#include <sys/timex.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -77,10 +78,12 @@
 /* Periodic message intervals */
 #define MSRP_DOMAIN_INTERVAL_MSEC 500
 #define MVRP_VLAN_ID_INTERVAL_MSEC 500
-#define MSRP_TALKER_IDLE_INTERVAL_MSEC 1000   // when idle
-#define MSRP_TALKER_CONN_INTERVAL_MSEC 500    // when connected (must be < MRP Leave timer ~1s)
+#define MSRP_TALKER_IDLE_INTERVAL_MSEC 1000 // when idle
+#define MSRP_TALKER_CONN_INTERVAL_MSEC                                         \
+  500 // when connected (must be < MRP Leave timer ~1s)
 #define MSRP_LISTENER_IDLE_INTERVAL_MSEC 1000 // when idle
-#define MSRP_LISTENER_CONN_INTERVAL_MSEC 500  // when connected (must be < MRP Leave timer ~1s)
+#define MSRP_LISTENER_CONN_INTERVAL_MSEC                                       \
+  500 // when connected (must be < MRP Leave timer ~1s)
 #define MSRP_LEAVEALL_INTERVAL_MSEC 10000
 #define ADP_ENTITY_AVAIL_INTERVAL_MSEC 5000
 #define MAAP_ANNOUNCE_INTERVAL_MSEC 10000
@@ -816,19 +819,19 @@ typedef struct {
 typedef struct {
   uint8_t multiple_ptp_instances : 1; // The Entity has multiple PTP Instances
                                       // using an interface.
-  uint8_t
-      aem_config_index_valid : 1; // The current_configuration_index field
-                                  // contains a valid index of an AEM
-                                  // CONFIGURATION descriptor for the current
-                                  // Configuration. This flag shall only be set
-                                  // if the AEM_SUPPORTED flag is set.
-  uint8_t reserved : 6;           // Reserved for future use
+  uint8_t aem_config_index_valid
+      : 1;              // The current_configuration_index field
+                        // contains a valid index of an AEM
+                        // CONFIGURATION descriptor for the current
+                        // Configuration. This flag shall only be set
+                        // if the AEM_SUPPORTED flag is set.
+  uint8_t reserved : 6; // Reserved for future use
   uint8_t general_controller_ignore : 1; // General purpose ATDECC Controllers
                                          // ignore the presence of this ATDECC
                                          // Entity when this flag is set.
-  uint8_t
-      entity_not_ready : 1; // The ATDECC Entity is not ready to be enumerated
-                            // or connected by an ATDECC Controller.
+  uint8_t entity_not_ready
+      : 1; // The ATDECC Entity is not ready to be enumerated
+           // or connected by an ATDECC Controller.
   uint8_t acmp_acquire_with_aem : 1; // ACMP respects any acquisition made with
                                      // the ACQUIRE_ENTITY command.
   uint8_t acmp_auth_with_aem : 1;    // ACMP requires that the ATDECC Controller
@@ -844,8 +847,8 @@ typedef struct {
                                         // AVTP over UDP using IPv6.
   uint8_t class_a : 1; // Supports sending and/or receiving Class A streams.
   uint8_t class_b : 1; // Supports sending and/or receiving Class B streams.
-  uint8_t
-      gptp_supported : 1; // The ATDECC Entity implements IEEE Std 802.1AS-2020.
+  uint8_t gptp_supported
+      : 1; // The ATDECC Entity implements IEEE Std 802.1AS-2020.
   uint8_t aem_auth_supported : 1; // Supports using AEM Authentication via the
                                   // AUTHENTICATE command as defined in 7.4.66.
                                   // This flag shall only be set if the
@@ -854,53 +857,53 @@ typedef struct {
                                   // the AUTHENTICATE command as defined
                                   // in 7.4.66. This flag shall only be set if
                                   // the AEM_SUPPORTED flag is set.
-  uint8_t
-      aem_persistent_acquire_supported : 1; // Supports the use of the
-                                            // PERSISTENT flag in the ACQUIRE
-                                            // command as defined in 7.4.1. This
-                                            // flag shall only be set if the
-                                            // AEM_SUPPORTED flag is set.
-  uint8_t
-      aem_identify_control_index_valid : 1; // The identify_control_index field
-                                            // contains a valid index of an AEM
-                                            // CONTROL descriptor for the
-                                            // primary IDENTIFY control in the
-                                            // current Configuration. This flag
-                                            // shall only be set if the
-                                            // AEM_SUPPORTED flag is set.
-  uint8_t
-      aem_interface_index_valid : 1; // The interface_index field contains a
-                                     // valid index of an AEM AVB_INTERFACE
-                                     // descriptor for interface in the current
-                                     // Configuration which is transmitting the
-                                     // ADPDU. This flag shall only be set if
-                                     // the AEM_SUPPORTED flag is set.
-  uint8_t
-      efu_mode : 1; // Entity Firmware Upgrade mode is enabled on the ATDECC
-                    // Entity. When this flag is set, the ATDECC Entity is in
-                    // the mode to perform an ATDECC Entity firmware upgrade.
+  uint8_t aem_persistent_acquire_supported
+      : 1; // Supports the use of the
+           // PERSISTENT flag in the ACQUIRE
+           // command as defined in 7.4.1. This
+           // flag shall only be set if the
+           // AEM_SUPPORTED flag is set.
+  uint8_t aem_identify_control_index_valid
+      : 1; // The identify_control_index field
+           // contains a valid index of an AEM
+           // CONTROL descriptor for the
+           // primary IDENTIFY control in the
+           // current Configuration. This flag
+           // shall only be set if the
+           // AEM_SUPPORTED flag is set.
+  uint8_t aem_interface_index_valid
+      : 1; // The interface_index field contains a
+           // valid index of an AEM AVB_INTERFACE
+           // descriptor for interface in the current
+           // Configuration which is transmitting the
+           // ADPDU. This flag shall only be set if
+           // the AEM_SUPPORTED flag is set.
+  uint8_t efu_mode
+      : 1; // Entity Firmware Upgrade mode is enabled on the ATDECC
+           // Entity. When this flag is set, the ATDECC Entity is in
+           // the mode to perform an ATDECC Entity firmware upgrade.
   uint8_t address_access_supported : 1; // Supports receiving the ADDRESS_ACCESS
                                         // commands as definedin 1722.1-2021
                                         // section 9.4.
-  uint8_t
-      gateway_entity : 1;    // ATDECC Entity serves as a gateway to a device on
+  uint8_t gateway_entity
+      : 1;                   // ATDECC Entity serves as a gateway to a device on
                              // another typeof media (typically a IEEE Std 1394
                              // device) by proxying control services for it
   uint8_t aem_supported : 1; // Supports receiving the ATDECC Entity Model (AEM)
                              // AECP commands as defined in 9.3.
-  uint8_t
-      legacy_avc : 1; // Supports using IEEE Std 1394 AV/C protocol (For
-                      // example, for a IEEE Std 1394 device through a gateway).
+  uint8_t legacy_avc
+      : 1; // Supports using IEEE Std 1394 AV/C protocol (For
+           // example, for a IEEE Std 1394 device through a gateway).
   uint8_t assoc_id_supported : 1; // The ATDECC Entity supports the use of the
                                   // association_id field for associating the
                                   // ATDECC Entity with other ATDECC entities.
   uint8_t assoc_id_valid : 1;     // The association_id field contains a valid
                                   // value. This bit shall only be set in
                                   // conjunction with ASSOCIATION_ID_SUPPORTED.
-  uint8_t
-      vendor_unique_supported : 1; // Supports receiving the AEM VENDOR_UNIQUE
-                                   // commands as defined in 9.5.3.
-} avb_entity_cap_s;                // 4 bytes
+  uint8_t vendor_unique_supported
+      : 1;          // Supports receiving the AEM VENDOR_UNIQUE
+                    // commands as defined in 9.5.3.
+} avb_entity_cap_s; // 4 bytes
 
 /* AVB Talker Capabilities */
 typedef struct {
@@ -1155,42 +1158,42 @@ typedef struct {
 typedef struct {
   uint8_t clock_sync_source : 1; // Indicates that the Stream is a preferred
                                  // clock synchronization source.
-  uint8_t
-      class_a : 1; // Indicates that the Stream supports streaming at Class A.
-  uint8_t
-      class_b : 1; // Indicates that the Stream supports streaming at Class B.
+  uint8_t class_a
+      : 1; // Indicates that the Stream supports streaming at Class A.
+  uint8_t class_b
+      : 1; // Indicates that the Stream supports streaming at Class B.
   uint8_t supports_encrypted : 1;       // Indicates that the Stream supports
                                         // streaming with encrypted PDUs.
   uint8_t primary_backup_supported : 1; // Indicates that the
                                         // backup_talker_entity_id_0 and the
                                         // backup_talker_entity_id_0 fields are
                                         // supported.
-  uint8_t
-      primary_backup_valid : 1; // Indicates that the backup_talker_entity_id_0
-                                // and the backup_talker_entity_id_0 fields are
-                                // valid.
+  uint8_t primary_backup_valid
+      : 1; // Indicates that the backup_talker_entity_id_0
+           // and the backup_talker_entity_id_0 fields are
+           // valid.
   uint8_t secondary_backup_supported : 1; // Indicates that the
                                           // backup_talker_entity_id_1 and the
                                           // backup_talker_entity_id_1 fields
                                           // are supported.
-  uint8_t
-      secondary_backup_valid : 1; // Indicates that the
-                                  // backup_talker_entity_id_1 and the
-                                  // backup_talker_entity_id_1 fields are valid.
+  uint8_t secondary_backup_valid
+      : 1; // Indicates that the
+           // backup_talker_entity_id_1 and the
+           // backup_talker_entity_id_1 fields are valid.
   uint8_t tertiary_backup_supported : 1; // Indicates that the
                                          // backup_talker_entity_id_2 and the
                                          // backup_talker_entity_id_2 fields are
                                          // supported.
-  uint8_t
-      tertiary_backup_valid : 1; // Indicates that the backup_talker_entity_id_2
-                                 // and the backup_talker_entity_id_2 fields are
-                                 // valid.
-  uint8_t
-      supports_avtp_udp_v4 : 1; // Indicates that the Stream supports streaming
-                                // using AVTP over UDP/IPv4 (1722-2016 Annex J).
-  uint8_t
-      supports_avtp_udp_v6 : 1; // Indicates that the Stream supports streaming
-                                // using AVTP over UDP/IPv6 (1722-2016 Annex J).
+  uint8_t tertiary_backup_valid
+      : 1; // Indicates that the backup_talker_entity_id_2
+           // and the backup_talker_entity_id_2 fields are
+           // valid.
+  uint8_t supports_avtp_udp_v4
+      : 1; // Indicates that the Stream supports streaming
+           // using AVTP over UDP/IPv4 (1722-2016 Annex J).
+  uint8_t supports_avtp_udp_v6
+      : 1; // Indicates that the Stream supports streaming
+           // using AVTP over UDP/IPv6 (1722-2016 Annex J).
   uint8_t no_support_avtp_native : 1; // Indicates that the Stream does not
                                       // support streaming with native (L2,
                                       // Ethertype 0x22f0) AVTPDUs.
@@ -1226,12 +1229,12 @@ typedef struct {
   uint8_t msrp_acc_lat_valid : 1; // The value in the msrp_accumulated_latency
                                   // field is valid.
   uint8_t stream_id_valid : 1;    // The value in the stream_id field is valid.
-  uint8_t
-      stream_format_valid : 1; // The value in the stream_format field is valid
-                               // and is to be used to change the StreamFormat
-                               // if it is a SET_STREAM_INFO command.
-  uint8_t reserved1 : 3;       // Reserved bits
-  uint8_t ip_flags_valid : 1;  // The value in the ip_flags field is valid.
+  uint8_t stream_format_valid
+      : 1;                    // The value in the stream_format field is valid
+                              // and is to be used to change the StreamFormat
+                              // if it is a SET_STREAM_INFO command.
+  uint8_t reserved1 : 3;      // Reserved bits
+  uint8_t ip_flags_valid : 1; // The value in the ip_flags field is valid.
   uint8_t ip_src_port_valid : 1; // The value in the source_port field is valid.
   uint8_t ip_dst_port_valid : 1; // The value in the destination_port field is
                                  // valid.
@@ -1249,10 +1252,10 @@ typedef struct {
   uint8_t saved_state : 1;  // Reserved for backward compatibility. This flag
                             // used to indicate that the connection has saved
                             // ACMP state associated with FAST_CONNECT.
-  uint8_t
-      streaming_wait : 1; // The Stream is presently in STREAMING_WAIT, either
-                          // it was connected with STREAMING_WAIT flag set or it
-                          // was stopped with STOP_STREAMING command.
+  uint8_t streaming_wait
+      : 1; // The Stream is presently in STREAMING_WAIT, either
+           // it was connected with STREAMING_WAIT flag set or it
+           // was stopped with STOP_STREAMING command.
   uint8_t supports_encrypted : 1; // Indicates that the Stream supports
                                   // streaming with encrypted PDUs.
   uint8_t talker_failed : 1; // Indicates that the Listener has registered an
@@ -1268,15 +1271,15 @@ typedef struct {
  */
 typedef struct {
   uint8_t subtype : 7; // 0 for 61883
-  uint8_t
-      vendor_defined : 1; // 0 for AVTP standard, 1 for vendor or ATDECC defined
-  uint8_t reserved1 : 1;  //
-  uint8_t
-      format : 6; // 61883 format ID; 0x10 for IEC 61883-6 (1722 Clause I.2.2.3)
+  uint8_t vendor_defined
+      : 1;               // 0 for AVTP standard, 1 for vendor or ATDECC defined
+  uint8_t reserved1 : 1; //
+  uint8_t format
+      : 6;        // 61883 format ID; 0x10 for IEC 61883-6 (1722 Clause I.2.2.3)
   uint8_t sf : 1; // 1=61883, 0=IIDC
   uint8_t fdf_sfc : 3; // See Clause 9.1
-  uint8_t
-      fdf_evt : 5; // 00000=AM824, 00100=32-bit float, 00110= 32-bit fixed-point
+  uint8_t fdf_evt
+      : 5; // 00000=AM824, 00100=32-bit float, 00110= 32-bit fixed-point
   uint8_t
       dbs; // num of data blocks, same as sum of all label_ fields (Clause 9.2)
   uint8_t reserved2 : 4; //
@@ -1298,8 +1301,8 @@ typedef struct {
  */
 typedef struct {
   uint8_t subtype : 7; // 0x02 for AAF
-  uint8_t
-      vendor_defined : 1; // 0 for AVTP standard, 1 for vendor or ATDECC defined
+  uint8_t vendor_defined
+      : 1; // 0 for AVTP standard, 1 for vendor or ATDECC defined
   uint8_t sample_rate : 4; // nominal base freq; same as sample_rate in stream
                            // message
   uint8_t ut : 1; // capable of handling less than channels_per_frame amount
@@ -1847,12 +1850,12 @@ typedef struct {
   uint8_t can_listen_to_self : 1; //  Listener stream sink on this interface can
                                   //  listen to a talker stream source on the
                                   //  sam interface.
-  uint8_t
-      can_listen_to_other_self : 1; // Listener stream sink on this interface
-                                    // can listen to a talker stream source of
-                                    // another interface within same Entity
-  uint8_t reserved2 : 1;            // Reserved for future use
-} aem_avb_interface_flags_s;        // 2 bytes
+  uint8_t can_listen_to_other_self
+      : 1;                   // Listener stream sink on this interface
+                             // can listen to a talker stream source of
+                             // another interface within same Entity
+  uint8_t reserved2 : 1;     // Reserved for future use
+} aem_avb_interface_flags_s; // 2 bytes
 
 /* AEM AVB Interface descriptor */
 typedef struct {
@@ -2112,8 +2115,8 @@ typedef struct {
 typedef struct {
   uint8_t class_b : 1;      // connection is class B, instead of class A
   uint8_t fast_connect : 1; // connection is using fast connect mode
-  uint8_t
-      saved_state : 1; // connection has saved ACMP state for fast connect mode
+  uint8_t saved_state
+      : 1; // connection has saved ACMP state for fast connect mode
   uint8_t streaming_wait : 1;          // for milan, this must be false
   uint8_t supports_encrypted : 1;      // stream supports encrypted PDU
   uint8_t encrypted_pdu : 1;           // stream is using encrypted PDU
@@ -2185,10 +2188,10 @@ typedef struct {
 /* Control frame queue item — used by EMAC RX dispatcher to forward
  * non-stream frames (AVTP control, MSRP, MVRP) to the AVB main loop */
 typedef struct {
-  uint8_t protocol_idx;              // AVTP=0, MSRP=1, MVRP=2
-  uint8_t src_addr[ETH_ADDR_LEN];   // source MAC address
-  uint16_t length;                   // payload length (ETH header stripped)
-  uint8_t data[AVB_MAX_MSG_LEN];    // payload data
+  uint8_t protocol_idx;           // AVTP=0, MSRP=1, MVRP=2
+  uint8_t src_addr[ETH_ADDR_LEN]; // source MAC address
+  uint16_t length;                // payload length (ETH header stripped)
+  uint8_t data[AVB_MAX_MSG_LEN];  // payload data
 } ctrl_rx_pkt_t;
 
 /* Stream RX handler callback — called inline from EMAC RX task for
@@ -2212,8 +2215,8 @@ struct stream_out_params_s {
   uint8_t bit_depth;               // bit depth
   uint8_t channels;                // channels per frame
   uint32_t sample_rate;            // sample rate
-  bool use_sine_wave; // generate sine wave instead of reading mic
-  float sine_freq;    // sine wave frequency in Hz
+  bool use_sine_wave;              // generate sine wave instead of reading mic
+  float sine_freq;                 // sine wave frequency in Hz
   uint8_t format_subtype;          // 0 = IEC 61883 (AM824), 2 = AAF
   uint8_t cip_sfc;                 // CIP SFC code (for AM824 format)
   uint8_t dbs;                     // data block size (for AM824 format)
@@ -2246,7 +2249,7 @@ typedef struct {
 
   // PTP clock snapshot for stream out media clock PLL (updated by main task
   // on core 0, read by stream out task on core 1)
-  volatile uint32_t ptp_avtp_ts;    // AVTP-format timestamp (lower 32b of PTP ns)
+  volatile uint32_t ptp_avtp_ts; // AVTP-format timestamp (lower 32b of PTP ns)
   volatile int64_t ptp_snapshot_us; // esp_timer_get_time() at moment of read
 
   /* Our own entity */
@@ -2344,9 +2347,8 @@ int avb_net_send_to_vlan(avb_state_s *state, ethertype_t ethertype, void *msg,
                          eth_addr_t *dest_addr, uint8_t *vlan_id);
 int avb_net_send(avb_state_s *state, ethertype_t ethertype, void *msg,
                  uint16_t msg_len, struct timespec *t);
-int avb_net_recv_ctrl(avb_state_s *state, int *protocol_idx,
-                      void *msg, uint16_t msg_len,
-                      eth_addr_t *src_addr, int timeout_ms);
+int avb_net_recv_ctrl(avb_state_s *state, int *protocol_idx, void *msg,
+                      uint16_t msg_len, eth_addr_t *src_addr, int timeout_ms);
 void avb_net_set_stream_rx_handler(avb_stream_rx_handler_t handler, void *ctx);
 
 /* AVB send functions */

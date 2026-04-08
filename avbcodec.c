@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Scramble Tools
+ * Copyright 2024-2026 Scramble Tools
  * License: MIT
  *
  * ESP_AVB Component
@@ -10,9 +10,9 @@
  */
 
 #include "avb.h"
+#include "es8311_codec.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
-#include "es8311_codec.h"
 
 /* Default settings */
 #define AVB_RECV_BUF_SIZE (2400)
@@ -83,9 +83,10 @@ esp_err_t avb_config_i2s(avb_state_s *state) {
   chan_cfg.auto_clear = true; // Auto clear the legacy data in the DMA buffer
   // Align DMA frames with AVTP Class A packet size (6 samples @ 48kHz = 125μs).
   // This ensures i2s_channel_read returns data aligned with the talker's
-  // 125μs busy-wait loop, and the listener's drain timer works with small chunks.
-  chan_cfg.dma_frame_num = 6;   // 6 samples = 1 AVTP packet worth
-  chan_cfg.dma_desc_num = 16;   // 16 descriptors = 2ms buffering
+  // 125μs busy-wait loop, and the listener's drain timer works with small
+  // chunks.
+  chan_cfg.dma_frame_num = 6; // 6 samples = 1 AVTP packet worth
+  chan_cfg.dma_desc_num = 16; // 16 descriptors = 2ms buffering
   ESP_ERROR_CHECK(
       i2s_new_channel(&chan_cfg, &state->i2s_tx_handle, &state->i2s_rx_handle));
   i2s_std_config_t std_cfg = {
@@ -218,9 +219,10 @@ static esp_err_t avb_config_codec_es8311(avb_state_s *state) {
   }
   state->config.codec_handle = codec_dev;
 
-  // Open codec for 24-bit stereo 48kHz — enables both ADC (mic) and DAC (speaker).
-  // Done once at startup so talker and listener can run simultaneously
-  // without risking esp_codec_dev_close killing the other direction.
+  // Open codec for 24-bit stereo 48kHz — enables both ADC (mic) and DAC
+  // (speaker). Done once at startup so talker and listener can run
+  // simultaneously without risking esp_codec_dev_close killing the other
+  // direction.
   esp_codec_dev_sample_info_t fs = {
       .bits_per_sample = state->config.default_bits_per_sample,
       .channel = 2,

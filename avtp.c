@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 Scramble Tools
+ * Copyright 2024-2026 Scramble Tools
  * License: MIT
  *
  * ESP_AVB Component
@@ -128,8 +128,8 @@ int avb_send_msrp_talker(avb_state_s *state, mrp_attr_event_t attr_event,
   int tspec_max_frame_interval = 1;
   int_to_octets(&tspec_max_frame_interval,
                 msg.talker.info.tspec_max_frame_interval, 2);
-  msg.talker.info.priority = 3; // class A
-  msg.talker.info.rank = 1;     // rank 1 for class A
+  msg.talker.info.priority = 3;    // class A
+  msg.talker.info.rank = 1;        // rank 1 for class A
   int accumulated_latency = 15000; // ~15μs worst-case talker latency
   int_to_octets(&accumulated_latency, msg.talker.info.accumulated_latency, 4);
   if (is_failed) {
@@ -400,8 +400,8 @@ static uint32_t build_sine_lut(uint8_t **lut_out, int channels, int bit_depth,
         // big-endian container. AM824 path reads bytes 0-2 as 24-bit sample.
         lut[offset + 0] = (sample >> 16) & 0xFF; // MSB
         lut[offset + 1] = (sample >> 8) & 0xFF;
-        lut[offset + 2] = (sample >> 0) & 0xFF;  // LSB
-        lut[offset + 3] = 0;                      // padding
+        lut[offset + 2] = (sample >> 0) & 0xFF; // LSB
+        lut[offset + 3] = 0;                    // padding
       } else {
         lut[offset + 0] = (sample >> 8) & 0xFF;
         lut[offset + 1] = (sample >> 0) & 0xFF;
@@ -504,7 +504,8 @@ static int avb_send_aaf_pcm_packet(avb_state_s *state, unique_id_t *stream_id,
   // not on every seq_num rollover. One-shot: set on first packet, then clear.
   static bool mcr_pending = true;
   msg.media_clock_restart = mcr_pending ? 1 : 0;
-  if (mcr_pending) mcr_pending = false;
+  if (mcr_pending)
+    mcr_pending = false;
   msg.seq_num = seq_num;
   msg.timestamp_uncertain = 0;
   memcpy(msg.stream_id, stream_id, UNIQUE_ID_LEN);
@@ -557,15 +558,15 @@ static int avb_send_aaf_pcm_packet(avb_state_s *state, unique_id_t *stream_id,
 /* Build and send an IEC 61883-6 AM824 AVTP packet
  *
  * AM824 wraps 24-bit PCM samples in IEC 61883-6 data blocks with a CIP header.
- * Each data block is 1 quadlet (4 bytes) per channel: label byte + 24-bit sample.
- * The CIP header is 2 quadlets (8 bytes) prepended to the data blocks.
+ * Each data block is 1 quadlet (4 bytes) per channel: label byte + 24-bit
+ * sample. The CIP header is 2 quadlets (8 bytes) prepended to the data blocks.
  */
 static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
                                      uint8_t *pcm_data, uint16_t data_len,
-                                     uint8_t seq_num, uint8_t dbs,
-                                     uint8_t sfc, uint8_t channels,
-                                     eth_addr_t *dest_addr, uint8_t *vlan_id,
-                                     uint32_t avtp_ts, uint16_t dbc) {
+                                     uint8_t seq_num, uint8_t dbs, uint8_t sfc,
+                                     uint8_t channels, eth_addr_t *dest_addr,
+                                     uint8_t *vlan_id, uint32_t avtp_ts,
+                                     uint16_t dbc) {
   iec_61883_6_message_s msg;
   memset(&msg, 0, sizeof(msg));
 
@@ -576,7 +577,8 @@ static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
   msg.timestamp_valid = 0;
   static bool mcr_pending_61883 = true;
   msg.media_clock_restart = mcr_pending_61883 ? 1 : 0;
-  if (mcr_pending_61883) mcr_pending_61883 = false;
+  if (mcr_pending_61883)
+    mcr_pending_61883 = false;
   msg.seq_num = seq_num;
   msg.timestamp_uncertain = 0;
   memcpy(msg.stream_id, stream_id, UNIQUE_ID_LEN);
@@ -592,15 +594,16 @@ static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
   msg.timestamp_valid = 1;
 
   // IEEE 1394 fields
-  msg.tag = 1;   // CIP header present
+  msg.tag = 1;      // CIP header present
   msg.channel = 31; // 31 = native AVTP (not IEEE 1394)
   msg.tcode = 0x0A; // must be 1010 on transmit
   msg.sy = 0;
 
   // Build CIP header (2 quadlets = 8 bytes) per IEC 61883-1 §2.3
   //
-  // Quadlet 0: | EOH(1)=0 | Fmt_hi(1)=0 | SID(6)=0x3F | DBS(8) | FN(2)=0 | QPC(3)=0 | SPH(1)=0 | rsv(1)=0 | DBC(8) |
-  // Quadlet 1: | EOH(1)=1 | Fmt_hi(1)=0 | FMT(6)=0x10 | FDF(8)          | SYT(16)=0xFFFF          |
+  // Quadlet 0: | EOH(1)=0 | Fmt_hi(1)=0 | SID(6)=0x3F | DBS(8) | FN(2)=0 |
+  // QPC(3)=0 | SPH(1)=0 | rsv(1)=0 | DBC(8) | Quadlet 1: | EOH(1)=1 |
+  // Fmt_hi(1)=0 | FMT(6)=0x10 | FDF(8)          | SYT(16)=0xFFFF          |
   //
   // SID=0x3F: no source ID info (standard for AVTP)
   // FMT=0x10: AM824 format (IEC 61883-6)
@@ -610,7 +613,8 @@ static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
   msg.stream_data[2] = 0x00; // FN=00, QPC=000, SPH=0, rsv=0, DBC[7]=0
   msg.stream_data[3] = (uint8_t)(dbc & 0xFF); // DBC lower 8 bits
   msg.stream_data[4] = 0x90; // EOH=1, Fmt_hi=0, FMT=010000 (0x10 = AM824)
-  msg.stream_data[5] = (sfc & 0x07); // FDF: evt=00000 in bits[7:3], SFC in bits[2:0]
+  msg.stream_data[5] =
+      (sfc & 0x07);          // FDF: evt=00000 in bits[7:3], SFC in bits[2:0]
   msg.stream_data[6] = 0xFF; // SYT = 0xFFFF (no SYT info — use AVTP timestamp)
   msg.stream_data[7] = 0xFF;
 
@@ -625,7 +629,8 @@ static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
 
   for (int s = 0; s < num_samples; s++) {
     for (int ch = 0; ch < channels; ch++) {
-      if (am824_offset + 4 <= AVTP_STREAM_DATA_PER_MSG && pcm_offset + 3 < data_len) {
+      if (am824_offset + 4 <= AVTP_STREAM_DATA_PER_MSG &&
+          pcm_offset + 3 < data_len) {
         // AM824 quadlet: label(8) + sample(24), big-endian
         // PCM buffer is left-justified: [0]=MSB, [1]=MID, [2]=LSB, [3]=pad
         msg.stream_data[am824_offset + 0] = 0x40; // MBLA label
@@ -644,7 +649,8 @@ static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
   msg.stream_data_len[1] = sdl & 0xFF;
 
   // Total message length
-  uint16_t msg_len = sizeof(iec_61883_6_message_s) - AVTP_STREAM_DATA_PER_MSG + sdl;
+  uint16_t msg_len =
+      sizeof(iec_61883_6_message_s) - AVTP_STREAM_DATA_PER_MSG + sdl;
 
   uint8_t eth_frame[msg_len + ETH_HEADER_LEN + sizeof(struct eth_vlan_hdr)];
   avb_create_eth_frame(eth_frame, dest_addr, state, ethertype_vlan, &msg,
@@ -659,14 +665,22 @@ static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
 /* Map CIP SFC code to sample rate in Hz */
 static uint32_t cip_sfc_to_sample_rate(uint8_t sfc) {
   switch (sfc) {
-  case cip_sfc_sample_rate_32k:    return 32000;
-  case cip_sfc_sample_rate_44_1k:  return 44100;
-  case cip_sfc_sample_rate_48k:    return 48000;
-  case cip_sfc_sample_rate_88_2k:  return 88200;
-  case cip_sfc_sample_rate_96k:    return 96000;
-  case cip_sfc_sample_rate_176_4k: return 176400;
-  case cip_sfc_sample_rate_192k:   return 192000;
-  default: return 48000;
+  case cip_sfc_sample_rate_32k:
+    return 32000;
+  case cip_sfc_sample_rate_44_1k:
+    return 44100;
+  case cip_sfc_sample_rate_48k:
+    return 48000;
+  case cip_sfc_sample_rate_88_2k:
+    return 88200;
+  case cip_sfc_sample_rate_96k:
+    return 96000;
+  case cip_sfc_sample_rate_176_4k:
+    return 176400;
+  case cip_sfc_sample_rate_192k:
+    return 192000;
+  default:
+    return 48000;
   }
 }
 
@@ -745,7 +759,7 @@ static uint8_t sample_rate_to_aaf_code(uint32_t sample_rate) {
  * AAF:   [MSB, MID, LSB, 0x00] per channel (4 bytes)
  */
 static void i2s24_to_am824_mono(const uint8_t *in, uint8_t *out,
-                                  int num_samples, int stream_channels) {
+                                int num_samples, int stream_channels) {
   for (int s = 0; s < num_samples; s++) {
     /* L channel from I2S — byte[0]=LSB, byte[1]=MID, byte[2]=MSB */
     uint8_t lsb = in[0], mid = in[1], msb = in[2];
@@ -754,26 +768,38 @@ static void i2s24_to_am824_mono(const uint8_t *in, uint8_t *out,
     for (int ch = 0; ch < stream_channels; ch++) {
       if (ch < 2) {
         /* Duplicate mono mic to ch0 and ch1 */
-        out[0] = 0x40; out[1] = msb; out[2] = mid; out[3] = lsb;
+        out[0] = 0x40;
+        out[1] = msb;
+        out[2] = mid;
+        out[3] = lsb;
       } else {
-        out[0] = 0x40; out[1] = 0; out[2] = 0; out[3] = 0;
+        out[0] = 0x40;
+        out[1] = 0;
+        out[2] = 0;
+        out[3] = 0;
       }
       out += 4;
     }
   }
 }
 
-static void i2s24_to_aaf_mono(const uint8_t *in, uint8_t *out,
-                                int num_samples, int stream_channels) {
+static void i2s24_to_aaf_mono(const uint8_t *in, uint8_t *out, int num_samples,
+                              int stream_channels) {
   for (int s = 0; s < num_samples; s++) {
     uint8_t lsb = in[0], mid = in[1], msb = in[2];
     in += 3; /* skip L */
     in += 3; /* skip R */
     for (int ch = 0; ch < stream_channels; ch++) {
       if (ch < 2) {
-        out[0] = msb; out[1] = mid; out[2] = lsb; out[3] = 0;
+        out[0] = msb;
+        out[1] = mid;
+        out[2] = lsb;
+        out[3] = 0;
       } else {
-        out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+        out[0] = 0;
+        out[1] = 0;
+        out[2] = 0;
+        out[3] = 0;
       }
       out += 4;
     }
@@ -783,8 +809,12 @@ static void i2s24_to_aaf_mono(const uint8_t *in, uint8_t *out,
 /* Sine LUT 32-bit BE [MSB,MID,LSB,pad] (4 bytes) → AM824 [0x40,MSB,MID,LSB] */
 static inline void be32_to_am824(const uint8_t *in, uint8_t *out, int n) {
   for (int i = 0; i < n; i++) {
-    out[0] = 0x40; out[1] = in[0]; out[2] = in[1]; out[3] = in[2];
-    in += 4; out += 4;
+    out[0] = 0x40;
+    out[1] = in[0];
+    out[2] = in[1];
+    out[3] = in[2];
+    in += 4;
+    out += 4;
   }
 }
 
@@ -794,12 +824,12 @@ static inline void be32_to_aaf(const uint8_t *in, uint8_t *out, int n) {
 }
 
 /* Frame layout constants for ETH+VLAN+AVTP */
-#define TX_ETH_HDR_LEN     14  /* dst(6) + src(6) + ethertype(2) */
-#define TX_VLAN_TAG_LEN     4  /* TCI(2) + inner ethertype(2) */
-#define TX_AVTP_HDR_LEN    24  /* AVTP common header */
-#define TX_CIP_HDR_LEN      8  /* IEC 61883 CIP header */
-#define TX_HDR_LEN_AAF     (TX_ETH_HDR_LEN + TX_VLAN_TAG_LEN + TX_AVTP_HDR_LEN)
-#define TX_HDR_LEN_61883   (TX_HDR_LEN_AAF + TX_CIP_HDR_LEN)
+#define TX_ETH_HDR_LEN 14  /* dst(6) + src(6) + ethertype(2) */
+#define TX_VLAN_TAG_LEN 4  /* TCI(2) + inner ethertype(2) */
+#define TX_AVTP_HDR_LEN 24 /* AVTP common header */
+#define TX_CIP_HDR_LEN 8   /* IEC 61883 CIP header */
+#define TX_HDR_LEN_AAF (TX_ETH_HDR_LEN + TX_VLAN_TAG_LEN + TX_AVTP_HDR_LEN)
+#define TX_HDR_LEN_61883 (TX_HDR_LEN_AAF + TX_CIP_HDR_LEN)
 
 static void avb_stream_out_task(void *task_param) {
   avbinfo("Starting stream out task");
@@ -813,7 +843,8 @@ static void avb_stream_out_task(void *task_param) {
   uint8_t *tx_frame = NULL;
   esp_task_wdt_user_handle_t wdt_handle = NULL;
   struct stream_out_params_s *params = (struct stream_out_params_s *)task_param;
-  if (params == NULL) goto err;
+  if (params == NULL)
+    goto err;
 
   avb_state_s *state = (avb_state_s *)params->state;
   uint8_t seq_num = 0;
@@ -824,9 +855,10 @@ static void avb_stream_out_task(void *task_param) {
   /* I2S reads stereo (2ch) regardless of stream channel count.
    * Extra channels (ch2-7) are zero-padded in the AVTP conversion.
    * Codec configures I2S with 24-bit data / 24-bit slot = 3 bytes/sample. */
-  int i2s_channels = 2; /* ES8311 mic is stereo */
+  int i2s_channels = 2;         /* ES8311 mic is stereo */
   int i2s_bytes_per_sample = 3; /* 24-bit slot */
-  int i2s_read_size = params->samples_per_packet * i2s_channels * i2s_bytes_per_sample;
+  int i2s_read_size =
+      params->samples_per_packet * i2s_channels * i2s_bytes_per_sample;
 
   i2s_buf = calloc(1, i2s_read_size);
   if (!i2s_buf) {
@@ -844,13 +876,15 @@ static void avb_stream_out_task(void *task_param) {
     }
     int bps = (params->bit_depth == 24) ? 4 : (params->bit_depth / 8);
     pcm_buf = calloc(1, params->samples_per_packet * params->channels * bps);
-    if (!pcm_buf) goto err;
+    if (!pcm_buf)
+      goto err;
   }
 
   /* Pre-build the TX frame — constant fields filled once.
    * Audio data offset depends on format (AAF vs AM824). */
   int audio_data_len = params->samples_per_packet * params->channels * 4;
-  int stream_data_len = is_am824 ? (TX_CIP_HDR_LEN + audio_data_len) : audio_data_len;
+  int stream_data_len =
+      is_am824 ? (TX_CIP_HDR_LEN + audio_data_len) : audio_data_len;
   int audio_offset = is_am824 ? TX_HDR_LEN_61883 : TX_HDR_LEN_AAF;
   int frame_len = audio_offset + audio_data_len;
   tx_frame = calloc(1, frame_len);
@@ -862,7 +896,8 @@ static void avb_stream_out_task(void *task_param) {
   /* ETH header: dst MAC + src MAC + 0x8100 (VLAN ethertype) */
   memcpy(tx_frame, &params->dest_addr, ETH_ADDR_LEN);
   memcpy(tx_frame + ETH_ADDR_LEN, state->internal_mac_addr, ETH_ADDR_LEN);
-  tx_frame[12] = 0x81; tx_frame[13] = 0x00; /* VLAN ethertype */
+  tx_frame[12] = 0x81;
+  tx_frame[13] = 0x00; /* VLAN ethertype */
 
   /* VLAN tag: PCP + VID, inner ethertype 0x22F0 */
   uint16_t vid = (params->vlan_id[0] << 8) | params->vlan_id[1];
@@ -870,7 +905,8 @@ static void avb_stream_out_task(void *task_param) {
   uint16_t tci = (pcp << 13) | (vid & 0x0FFF);
   tx_frame[14] = (tci >> 8) & 0xFF;
   tx_frame[15] = tci & 0xFF;
-  tx_frame[16] = 0x22; tx_frame[17] = 0xF0; /* inner AVTP ethertype */
+  tx_frame[16] = 0x22;
+  tx_frame[17] = 0xF0; /* inner AVTP ethertype */
 
   /* AVTP header (starts at offset 18) */
   uint8_t *avtp = tx_frame + TX_ETH_HDR_LEN + TX_VLAN_TAG_LEN;
@@ -878,15 +914,20 @@ static void avb_stream_out_task(void *task_param) {
   avtp[1] = 0x81; /* sv=1, version=0, mr=1 (first pkt), tv=1 */
   /* avtp[2] = seq_num — set per-packet */
   avtp[3] = 0x00; /* tu=0 */
-  memcpy(avtp + 4, &params->stream_id, UNIQUE_ID_LEN); /* stream_id at [4..11] */
+  memcpy(avtp + 4, &params->stream_id,
+         UNIQUE_ID_LEN); /* stream_id at [4..11] */
   /* avtp[12..15] = avtp_ts — set per-packet */
 
   if (is_am824) {
     /* IEC 61883 specific fields */
-    avtp[16] = 0x00; avtp[17] = 0x00; avtp[18] = 0x00; avtp[19] = 0x00; /* gateway */
+    avtp[16] = 0x00;
+    avtp[17] = 0x00;
+    avtp[18] = 0x00;
+    avtp[19] = 0x00; /* gateway */
     avtp[20] = (stream_data_len >> 8) & 0xFF;
     avtp[21] = stream_data_len & 0xFF;
-    avtp[22] = (1 << 6) | 31; /* tag=1 (CIP present), channel=31 (AVTP native) */
+    avtp[22] =
+        (1 << 6) | 31;      /* tag=1 (CIP present), channel=31 (AVTP native) */
     avtp[23] = (0x0A << 4); /* tcode=1010, sy=0 */
 
     /* CIP header (at avtp + 24) */
@@ -897,17 +938,23 @@ static void avb_stream_out_task(void *task_param) {
     /* cip[3] = DBC — set per-packet */
     cip[4] = 0x90; /* EOH=1, FMT=0x10 (AM824) */
     cip[5] = params->cip_sfc & 0x07;
-    cip[6] = 0xFF; cip[7] = 0xFF; /* SYT=0xFFFF */
+    cip[6] = 0xFF;
+    cip[7] = 0xFF; /* SYT=0xFFFF */
   } else {
     /* AAF specific fields */
     avtp[16] = (params->bit_depth <= 16) ? 0x02 : 0x04; /* format */
-    avtp[17] = (sample_rate_code << 4); /* sample_rate in upper nibble, padding=0 */
+    avtp[17] =
+        (sample_rate_code << 4); /* sample_rate in upper nibble, padding=0 */
     /* Actually need to check AAF header layout more carefully */
-    avtp[16] = (params->bit_depth <= 16) ? aaf_format_int_16bit : aaf_format_int_32bit;
-    avtp[17] = (sample_rate_code & 0x0F); /* nsr in lower 4 bits, padding in upper */
+    avtp[16] =
+        (params->bit_depth <= 16) ? aaf_format_int_16bit : aaf_format_int_32bit;
+    avtp[17] =
+        (sample_rate_code & 0x0F); /* nsr in lower 4 bits, padding in upper */
     /* Rewriting properly using struct knowledge */
-    avtp[16] = (params->bit_depth <= 16) ? aaf_format_int_16bit : aaf_format_int_32bit;
-    avtp[17] = ((sample_rate_code & 0x0F) << 4); /* sample rate in upper nibble */
+    avtp[16] =
+        (params->bit_depth <= 16) ? aaf_format_int_16bit : aaf_format_int_32bit;
+    avtp[17] =
+        ((sample_rate_code & 0x0F) << 4); /* sample rate in upper nibble */
     avtp[18] = params->channels;
     avtp[19] = params->bit_depth;
     avtp[20] = (audio_data_len >> 8) & 0xFF;
@@ -928,12 +975,12 @@ static void avb_stream_out_task(void *task_param) {
   uint32_t avtp_media_ts = 0;
   for (int init_try = 0; init_try < 5; init_try++) {
     struct timespec ptp_a, ptp_b;
-    if (esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &ptp_a) == 0 &&
-        esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &ptp_b) == 0) {
+    if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_a) == 0 &&
+        clock_gettime(CLOCK_PTP_SYSTEM, &ptp_b) == 0) {
       uint32_t ts_a = (uint32_t)((uint64_t)ptp_a.tv_sec * 1000000000ULL +
-                                  (uint64_t)ptp_a.tv_nsec);
+                                 (uint64_t)ptp_a.tv_nsec);
       uint32_t ts_b = (uint32_t)((uint64_t)ptp_b.tv_sec * 1000000000ULL +
-                                  (uint64_t)ptp_b.tv_nsec);
+                                 (uint64_t)ptp_b.tv_nsec);
       int32_t diff = (int32_t)(ts_b - ts_a);
       if (diff >= 0 && diff < 500000) {
         avtp_media_ts = ts_a;
@@ -942,18 +989,17 @@ static void avb_stream_out_task(void *task_param) {
     }
   }
 
-  uint32_t avtp_ts_increment =
-      (uint32_t)((uint64_t)params->samples_per_packet * 1000000000ULL /
-                 params->sample_rate);
+  uint32_t avtp_ts_increment = (uint32_t)((uint64_t)params->samples_per_packet *
+                                          1000000000ULL / params->sample_rate);
 
-  // Software PLL (unchanged)
-  #define PLL_MEASURE_FAST  500
-  #define PLL_MEASURE_SLOW  4000
-  #define PLL_FAST_DURATION 80000
-  #define PLL_SPREAD        16000
-  #define PLL_FILTER_SHIFT  4
-  #define PLL_FP_SHIFT      16
-  #define PLL_KI_SHIFT      8
+// Software PLL (unchanged)
+#define PLL_MEASURE_FAST 500
+#define PLL_MEASURE_SLOW 4000
+#define PLL_FAST_DURATION 80000
+#define PLL_SPREAD 16000
+#define PLL_FILTER_SHIFT 4
+#define PLL_FP_SHIFT 16
+#define PLL_KI_SHIFT 8
   int64_t pll_correction_fp = 0;
   int64_t pll_frac_accum = 0;
   int64_t pll_integral_fp = 0;
@@ -969,12 +1015,12 @@ static void avb_stream_out_task(void *task_param) {
   int64_t overrun_max = 0;
   uint32_t send_fail_count = 0;
   bool mcr_cleared = false;
-  uint32_t i2s_zero_reads = 0;   /* reads that returned 0 bytes */
+  uint32_t i2s_zero_reads = 0;    /* reads that returned 0 bytes */
   uint32_t i2s_nonzero_audio = 0; /* reads with non-zero audio data */
 
-  /* I2S RX local ring — absorbs DMA buffer timing mismatch.
-   * Read larger chunks when available, consume i2s_read_size per packet. */
-  #define I2S_RING_SIZE 2048  /* ~5ms at 48kHz stereo 24-bit */
+/* I2S RX local ring — absorbs DMA buffer timing mismatch.
+ * Read larger chunks when available, consume i2s_read_size per packet. */
+#define I2S_RING_SIZE 2048 /* ~5ms at 48kHz stereo 24-bit */
   int i2s_ring_head = 0, i2s_ring_tail = 0;
   if (!params->use_sine_wave) {
     i2s_ring = calloc(1, I2S_RING_SIZE);
@@ -993,11 +1039,13 @@ static void avb_stream_out_task(void *task_param) {
       int write_pos = i2s_ring_head % I2S_RING_SIZE;
       int space = I2S_RING_SIZE - i2s_ring_head;
       int chunk = I2S_RING_SIZE - write_pos;
-      if (chunk > space) chunk = space;
+      if (chunk > space)
+        chunk = space;
       size_t got = 0;
-      i2s_channel_read(params->i2s_rx_handle,
-                       i2s_ring + write_pos, chunk, &got, 100);
-      if (got == 0) break; /* timeout — give up pre-fill */
+      i2s_channel_read(params->i2s_rx_handle, i2s_ring + write_pos, chunk, &got,
+                       100);
+      if (got == 0)
+        break; /* timeout — give up pre-fill */
       i2s_ring_head += got;
     }
     avbinfo("Stream out: I2S ring pre-filled %d bytes", i2s_ring_head);
@@ -1008,13 +1056,15 @@ static void avb_stream_out_task(void *task_param) {
              state->output_streams[params->stream_index].connection_count, 2) >
          0) {
     /* Busy-wait until next send time */
-    while (esp_timer_get_time() < next_send_time) { }
+    while (esp_timer_get_time() < next_send_time) {
+    }
 
     int64_t now = esp_timer_get_time();
     int64_t overrun = now - next_send_time;
     if (overrun > params->interval / 2) {
       overrun_count++;
-      if (overrun > overrun_max) overrun_max = overrun;
+      if (overrun > overrun_max)
+        overrun_max = overrun;
     }
     if (overrun > params->interval * 10) {
       next_send_time = now + params->interval;
@@ -1030,8 +1080,12 @@ static void avb_stream_out_task(void *task_param) {
 
     /* Update per-packet fields in tx_frame */
     avtp[1] = mcr_cleared ? 0x81 : 0x89; /* sv=1, tv=1, mr=1 on first pkt */
-    if (!mcr_cleared) { avtp[1] = 0x89; mcr_cleared = true; }
-    else { avtp[1] = 0x81; }
+    if (!mcr_cleared) {
+      avtp[1] = 0x89;
+      mcr_cleared = true;
+    } else {
+      avtp[1] = 0x81;
+    }
     avtp[2] = seq_num++;
     uint32_t presentation_ts = avtp_media_ts + (is_am824 ? 2000000 : 4000000);
     avtp[12] = (presentation_ts >> 24) & 0xFF;
@@ -1053,8 +1107,10 @@ static void avb_stream_out_task(void *task_param) {
     if (params->use_sine_wave) {
       copy_sine_from_lut(pcm_buf, params->samples_per_packet, params->channels,
                          params->bit_depth, sine_lut, lut_samples, &lut_pos);
-      if (is_am824) be32_to_am824(pcm_buf, audio_dst, total_samples);
-      else          be32_to_aaf(pcm_buf, audio_dst, total_samples);
+      if (is_am824)
+        be32_to_am824(pcm_buf, audio_dst, total_samples);
+      else
+        be32_to_aaf(pcm_buf, audio_dst, total_samples);
     } else {
       /* Read mic audio via local ring — refill from I2S when low,
        * consume i2s_read_size bytes per packet */
@@ -1064,12 +1120,13 @@ static void avb_stream_out_task(void *task_param) {
         int ring_space = I2S_RING_SIZE - ring_avail;
         int write_pos = i2s_ring_head % I2S_RING_SIZE;
         int chunk = I2S_RING_SIZE - write_pos; /* to end of buffer */
-        if (chunk > ring_space) chunk = ring_space;
+        if (chunk > ring_space)
+          chunk = ring_space;
         size_t bytes_read = 0;
         /* Use short timeout — I2S DMA buffers arrive periodically.
          * If no data now, the ring has buffered audio from previous fills. */
-        i2s_channel_read(params->i2s_rx_handle,
-                         i2s_ring + write_pos, chunk, &bytes_read, 0);
+        i2s_channel_read(params->i2s_rx_handle, i2s_ring + write_pos, chunk,
+                         &bytes_read, 0);
         if (bytes_read > 0) {
           i2s_ring_head += bytes_read;
           i2s_nonzero_audio++;
@@ -1094,10 +1151,12 @@ static void avb_stream_out_task(void *task_param) {
         i2s_zero_reads++;
       }
       /* One-shot: dump I2S input and AM824 output */
-      if (is_am824) i2s24_to_am824_mono(i2s_buf, audio_dst,
-                                        params->samples_per_packet, params->channels);
-      else          i2s24_to_aaf_mono(i2s_buf, audio_dst,
-                                       params->samples_per_packet, params->channels);
+      if (is_am824)
+        i2s24_to_am824_mono(i2s_buf, audio_dst, params->samples_per_packet,
+                            params->channels);
+      else
+        i2s24_to_aaf_mono(i2s_buf, audio_dst, params->samples_per_packet,
+                          params->channels);
     } /* end else (mic path) */
 
     /* Transmit directly via EMAC — single copy into DMA ring */
@@ -1114,16 +1173,16 @@ static void avb_stream_out_task(void *task_param) {
 
     /* Software PLL (unchanged) */
 #if !PLL_DISABLED
-    uint32_t pll_interval = (loop_count < PLL_FAST_DURATION)
-                                ? PLL_MEASURE_FAST : PLL_MEASURE_SLOW;
+    uint32_t pll_interval =
+        (loop_count < PLL_FAST_DURATION) ? PLL_MEASURE_FAST : PLL_MEASURE_SLOW;
     if (loop_count % pll_interval == 0) {
       struct timespec ptp_now;
-      if (esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &ptp_now) == 0) {
+      if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_now) == 0) {
         uint32_t ptp_now_ts =
             (uint32_t)((uint64_t)ptp_now.tv_sec * 1000000000ULL +
                        (uint64_t)ptp_now.tv_nsec);
         struct timespec ptp_check;
-        if (esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &ptp_check) == 0) {
+        if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_check) == 0) {
           uint32_t check_ts =
               (uint32_t)((uint64_t)ptp_check.tv_sec * 1000000000ULL +
                          (uint64_t)ptp_check.tv_nsec);
@@ -1131,25 +1190,30 @@ static void avb_stream_out_task(void *task_param) {
           if (read_diff >= 0 && read_diff < 500000) {
             int32_t offset = (int32_t)(ptp_now_ts - avtp_media_ts);
             pll_measure_count++;
-            if (offset > pll_offset_max) pll_offset_max = offset;
-            if (offset < pll_offset_min) pll_offset_min = offset;
-            #define PLL_OUTLIER_NS 50000000
+            if (offset > pll_offset_max)
+              pll_offset_max = offset;
+            if (offset < pll_offset_min)
+              pll_offset_min = offset;
+#define PLL_OUTLIER_NS 50000000
             if (offset > PLL_OUTLIER_NS || offset < -PLL_OUTLIER_NS) {
               pll_skip_count++;
               goto pll_skip;
             }
             int64_t prop_corr_fp =
                 ((int64_t)offset << PLL_FP_SHIFT) / PLL_SPREAD;
-            pll_integral_fp +=
-                ((int64_t)offset << PLL_FP_SHIFT) / (PLL_SPREAD << PLL_KI_SHIFT);
+            pll_integral_fp += ((int64_t)offset << PLL_FP_SHIFT) /
+                               (PLL_SPREAD << PLL_KI_SHIFT);
             int64_t integral_max = (int64_t)125 << PLL_FP_SHIFT;
-            if (pll_integral_fp > integral_max) pll_integral_fp = integral_max;
-            if (pll_integral_fp < -integral_max) pll_integral_fp = -integral_max;
+            if (pll_integral_fp > integral_max)
+              pll_integral_fp = integral_max;
+            if (pll_integral_fp < -integral_max)
+              pll_integral_fp = -integral_max;
             int64_t new_corr_fp = prop_corr_fp + pll_integral_fp;
             int64_t filter_n = (1 << PLL_FILTER_SHIFT);
             pll_correction_fp =
                 (pll_correction_fp * (filter_n - 1) + new_corr_fp) / filter_n;
-            pll_skip: (void)0;
+          pll_skip:
+            (void)0;
           }
         }
       }
@@ -1163,12 +1227,13 @@ static void avb_stream_out_task(void *task_param) {
           loop_count, send_fail_count, overrun_count, overrun_max,
           i2s_zero_reads, i2s_nonzero_audio);
   avbinfo("PLL: %lu measures, %lu skipped, offset [%ldns, %ldns]",
-          pll_measure_count, pll_skip_count,
-          (long)pll_offset_min, (long)pll_offset_max);
+          pll_measure_count, pll_skip_count, (long)pll_offset_min,
+          (long)pll_offset_max);
 
 err:
   esp_log_level_set("*", ESP_LOG_INFO);
-  if (wdt_handle) esp_task_wdt_delete_user(wdt_handle);
+  if (wdt_handle)
+    esp_task_wdt_delete_user(wdt_handle);
   free(sine_lut);
   free(pcm_buf);
   free(i2s_buf);
@@ -1195,13 +1260,13 @@ err:
  * Capacity MUST be a power of 2 for fast index masking. */
 typedef struct {
   uint8_t *buf;
-  uint32_t capacity;          /* power of 2 */
-  _Atomic uint32_t head;      /* write position (producer only) */
-  _Atomic uint32_t tail;      /* read position (consumer only) */
+  uint32_t capacity;     /* power of 2 */
+  _Atomic uint32_t head; /* write position (producer only) */
+  _Atomic uint32_t tail; /* read position (consumer only) */
 } jitter_ring_t;
 
 #define JITTER_RING_SIZE 2048 /* ~5.3ms at 48kHz stereo 24-bit */
-#define JITTER_PREFILL   576  /* ~2ms of silence pre-fill */
+#define JITTER_PREFILL 576    /* ~2ms of silence pre-fill */
 
 static inline uint32_t ring_readable(const jitter_ring_t *r) {
   return atomic_load_explicit(&r->head, memory_order_acquire) -
@@ -1212,15 +1277,18 @@ static inline uint32_t ring_writable(const jitter_ring_t *r) {
   return r->capacity - ring_readable(r);
 }
 
-static inline uint32_t ring_write(jitter_ring_t *r,
-                                   const uint8_t *data, uint32_t len) {
+static inline uint32_t ring_write(jitter_ring_t *r, const uint8_t *data,
+                                  uint32_t len) {
   uint32_t avail = ring_writable(r);
-  if (len > avail) len = avail;
-  if (len == 0) return 0;
+  if (len > avail)
+    len = avail;
+  if (len == 0)
+    return 0;
   uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
   uint32_t mask = r->capacity - 1;
   uint32_t first = r->capacity - (h & mask);
-  if (first > len) first = len;
+  if (first > len)
+    first = len;
   memcpy(r->buf + (h & mask), data, first);
   if (len > first)
     memcpy(r->buf, data + first, len - first);
@@ -1228,15 +1296,17 @@ static inline uint32_t ring_write(jitter_ring_t *r,
   return len;
 }
 
-static inline uint32_t ring_read(jitter_ring_t *r,
-                                  uint8_t *dst, uint32_t len) {
+static inline uint32_t ring_read(jitter_ring_t *r, uint8_t *dst, uint32_t len) {
   uint32_t avail = ring_readable(r);
-  if (len > avail) len = avail;
-  if (len == 0) return 0;
+  if (len > avail)
+    len = avail;
+  if (len == 0)
+    return 0;
   uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
   uint32_t mask = r->capacity - 1;
   uint32_t first = r->capacity - (t & mask);
-  if (first > len) first = len;
+  if (first > len)
+    first = len;
   memcpy(dst, r->buf + (t & mask), first);
   if (len > first)
     memcpy(dst + first, r->buf, len - first);
@@ -1248,18 +1318,18 @@ static inline uint32_t ring_read(jitter_ring_t *r,
  * esp_timer task. Allocated by avb_start_stream_in. */
 typedef struct {
   i2s_chan_handle_t i2s_tx_handle;
-  uint8_t *i2s_drain_buf;     /* buffer for drain callback reads */
+  uint8_t *i2s_drain_buf; /* buffer for drain callback reads */
   size_t i2s_drain_buf_size;
-  uint8_t *i2s_convert_buf;   /* buffer for AVTP→PCM conversion in handler */
+  uint8_t *i2s_convert_buf; /* buffer for AVTP→PCM conversion in handler */
   size_t i2s_convert_buf_size;
   jitter_ring_t ring;
   esp_timer_handle_t drain_timer;
   /* diagnostics */
   uint32_t pkt_count;
-  uint32_t ring_write_fail;   /* ring full — packets dropped */
+  uint32_t ring_write_fail; /* ring full — packets dropped */
   uint32_t ring_write_ok;
   uint32_t drain_count;
-  uint32_t drain_underrun;    /* drain found ring empty */
+  uint32_t drain_underrun; /* drain found ring empty */
   /* first-packet snapshot (written by handler, printed by main loop) */
   uint8_t diag_subtype;
   uint16_t diag_sdl;
@@ -1285,24 +1355,25 @@ static void stream_in_drain_cb(void *arg) {
   }
 
   uint32_t to_read = avail;
-  if (to_read > c->i2s_drain_buf_size) to_read = c->i2s_drain_buf_size;
+  if (to_read > c->i2s_drain_buf_size)
+    to_read = c->i2s_drain_buf_size;
   /* Align to frame boundary (6 bytes per stereo 24-bit frame) */
   to_read = (to_read / 6) * 6;
-  if (to_read == 0) return;
+  if (to_read == 0)
+    return;
 
   uint32_t got = ring_read(&c->ring, c->i2s_drain_buf, to_read);
   size_t bytes_written = 0;
-  i2s_channel_write(c->i2s_tx_handle, c->i2s_drain_buf, got,
-                    &bytes_written, 1);
+  i2s_channel_write(c->i2s_tx_handle, c->i2s_drain_buf, got, &bytes_written, 1);
 }
 
 /* Stream RX handler — called inline from EMAC RX task for each
  * VLAN-tagged AVTP packet. Parses AVTP, converts audio to 24-bit
  * stereo, writes to jitter ring buffer. Must return quickly. */
-static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
-                                   void *ctx) {
+static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *ctx) {
   stream_rx_ctx_t *c = (stream_rx_ctx_t *)ctx;
-  if (!c || len < 24) return;
+  if (!c || len < 24)
+    return;
 
   uint8_t subtype = avtp_data[0] & 0x7F;
   uint8_t *pcm_data = NULL;
@@ -1317,7 +1388,8 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
     if (stream_data_len == 0 || stream_data_len > AVTP_STREAM_DATA_PER_MSG)
       return;
     channels = aaf_msg->chan_per_frame;
-    if (channels == 0) channels = 8;
+    if (channels == 0)
+      channels = 8;
     samples = stream_data_len / (channels * 4);
     pcm_data = aaf_msg->stream_data;
     pcm_len = stream_data_len;
@@ -1326,10 +1398,12 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
     iec_61883_6_message_s *iec_msg = (iec_61883_6_message_s *)avtp_data;
     uint16_t stream_data_len =
         (iec_msg->stream_data_len[0] << 8) | iec_msg->stream_data_len[1];
-    if (stream_data_len <= 8) return;
+    if (stream_data_len <= 8)
+      return;
     uint8_t dbs = iec_msg->stream_data[1];
     channels = dbs;
-    if (channels == 0) channels = 8;
+    if (channels == 0)
+      channels = 8;
     int data_bytes = stream_data_len - 8;
     samples = data_bytes / (channels * 4);
     pcm_data = iec_msg->stream_data + 8;
@@ -1338,14 +1412,17 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
     return;
   }
 
-  if (samples <= 0 || !pcm_data) return;
+  if (samples <= 0 || !pcm_data)
+    return;
 
   /* Capture first packet diagnostics (main loop prints) */
   if (c->diag_captured == 0) {
     c->diag_subtype = subtype;
-    c->diag_sdl = (subtype == avtp_subtype_61883) ?
-        ((iec_61883_6_message_s *)avtp_data)->stream_data_len[0] << 8 |
-        ((iec_61883_6_message_s *)avtp_data)->stream_data_len[1] : 0;
+    c->diag_sdl =
+        (subtype == avtp_subtype_61883)
+            ? ((iec_61883_6_message_s *)avtp_data)->stream_data_len[0] << 8 |
+                  ((iec_61883_6_message_s *)avtp_data)->stream_data_len[1]
+            : 0;
     c->diag_channels = channels;
     c->diag_samples = samples;
     int copy = pcm_len < 8 ? pcm_len : 8;
@@ -1358,7 +1435,8 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
    * Downmix multi-channel to stereo: ch0 → L, ch1 → R */
   uint8_t *buf = c->i2s_convert_buf;
   int offset = 0;
-  for (int s = 0; s < samples && offset + 6 <= (int)c->i2s_convert_buf_size; s++) {
+  for (int s = 0; s < samples && offset + 6 <= (int)c->i2s_convert_buf_size;
+       s++) {
     for (int ch = 0; ch < 2; ch++) {
       int src_ch = (ch < channels) ? ch : 0;
       int src_offset = (s * channels + src_ch) * 4;
@@ -1369,7 +1447,9 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
           buf[offset + 1] = pcm_data[src_offset + 1]; // MID
           buf[offset + 2] = pcm_data[src_offset + 0]; // MSB
         } else {
-          buf[offset + 0] = 0; buf[offset + 1] = 0; buf[offset + 2] = 0;
+          buf[offset + 0] = 0;
+          buf[offset + 1] = 0;
+          buf[offset + 2] = 0;
         }
       } else {
         if (src_offset + 3 < pcm_len) {
@@ -1377,7 +1457,9 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
           buf[offset + 1] = pcm_data[src_offset + 2]; // MID
           buf[offset + 2] = pcm_data[src_offset + 1]; // MSB
         } else {
-          buf[offset + 0] = 0; buf[offset + 1] = 0; buf[offset + 2] = 0;
+          buf[offset + 0] = 0;
+          buf[offset + 1] = 0;
+          buf[offset + 2] = 0;
         }
       }
       offset += 3;
@@ -1392,7 +1474,8 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
     } else {
       c->ring_write_ok++;
     }
-    if (!c->diag_i2s_bytes) c->diag_i2s_bytes = offset;
+    if (!c->diag_i2s_bytes)
+      c->diag_i2s_bytes = offset;
   }
   c->pkt_count++;
 }
@@ -1401,16 +1484,15 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
  * One-shot: prints first-packet info once, then suppressed. */
 void avb_stream_in_print_diag(void) {
   stream_rx_ctx_t *c = s_stream_rx_ctx;
-  if (!c || c->diag_captured != 1) return;
+  if (!c || c->diag_captured != 1)
+    return;
   c->diag_captured = 2;
   avbinfo("STREAM: ok=%lu rfail=%lu drain=%lu underrun=%lu fill=%lu "
           "sub=%d sdl=%d ch=%d samp=%d i2s=%d "
           "audio=[%02x %02x %02x %02x %02x %02x %02x %02x]",
-          c->ring_write_ok, c->ring_write_fail,
-          c->drain_count, c->drain_underrun,
-          ring_readable(&c->ring),
-          c->diag_subtype, c->diag_sdl, c->diag_channels,
-          c->diag_samples, c->diag_i2s_bytes,
+          c->ring_write_ok, c->ring_write_fail, c->drain_count,
+          c->drain_underrun, ring_readable(&c->ring), c->diag_subtype,
+          c->diag_sdl, c->diag_channels, c->diag_samples, c->diag_i2s_bytes,
           c->diag_first_audio[0], c->diag_first_audio[1],
           c->diag_first_audio[2], c->diag_first_audio[3],
           c->diag_first_audio[4], c->diag_first_audio[5],
@@ -1498,7 +1580,8 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
 
 /* Stop AVB stream input — unregisters handler, stops timer, frees resources */
 void avb_stop_stream_in(avb_state_s *state) {
-  if (!state->stream_in_active) return;
+  if (!state->stream_in_active)
+    return;
 
   // Unregister handler first to stop new packets
   avb_net_set_stream_rx_handler(NULL, NULL);
@@ -1512,10 +1595,8 @@ void avb_stop_stream_in(avb_state_s *state) {
 
     avbinfo("Stream in stopped: %lu pkts, ring ok=%lu fail=%lu, "
             "drain=%lu underrun=%lu, ring fill=%lu",
-            s_stream_rx_ctx->pkt_count,
-            s_stream_rx_ctx->ring_write_ok,
-            s_stream_rx_ctx->ring_write_fail,
-            s_stream_rx_ctx->drain_count,
+            s_stream_rx_ctx->pkt_count, s_stream_rx_ctx->ring_write_ok,
+            s_stream_rx_ctx->ring_write_fail, s_stream_rx_ctx->drain_count,
             s_stream_rx_ctx->drain_underrun,
             ring_readable(&s_stream_rx_ctx->ring));
 
@@ -1575,7 +1656,7 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
     params->cip_sfc = fmt->am824.fdf_sfc;
     params->dbs = fmt->am824.dbs;
     params->channels = fmt->am824.dbs; // dbs = channels for AM824 PCM
-    params->bit_depth = 24; // AM824 always carries 24-bit samples
+    params->bit_depth = 24;            // AM824 always carries 24-bit samples
     params->sample_rate = cip_sfc_to_sample_rate(fmt->am824.fdf_sfc);
   } else {
     // AAF PCM format
