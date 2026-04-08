@@ -1,4 +1,7 @@
 version: "0.9.0"
+description: "A simple example component"
+url: "https://github.com/scrambletools/esp_avb"
+license: "MIT"
 dependencies:
   idf: ^6.0
   scrambletools/esp_ptp: "*"
