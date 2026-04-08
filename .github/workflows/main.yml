@@ -1,16 +1,17 @@
-name: Upload component
+name: Push component to https://components.espressif.com
 on:
   push:
-    branches: [ main ]
-
 jobs:
   upload_components:
-    runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write # IMPORTANT: Required to generate an OIDC Token
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout
-      - uses: espressif/upload-components-ci-action
+      - uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+      - name: Upload component to the component registry
+        uses: espressif/upload-components-ci-action@v2
         with:
           components: "esp_avb: ."
           namespace: "scrambletools"
