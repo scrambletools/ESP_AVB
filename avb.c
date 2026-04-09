@@ -147,14 +147,14 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   // avtp_stream_format_aaf_pcm_s sf6 =
   //     AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_96k, aaf_ch, false);
   state->supported_formats[0].am824 = sf0;
-  state->supported_formats[1].am824 = sf1;
+  state->supported_formats[1].aaf_pcm = sf1;
   // state->supported_formats[2].am824 = sf2;
   // state->supported_formats[3].aaf_pcm = sf3;
   // state->supported_formats[4].aaf_pcm = sf4;
   // state->supported_formats[5].aaf_pcm = sf5;
   // state->supported_formats[6].aaf_pcm = sf6;
   state->num_supported_formats = 2;
-  avtp_stream_format_aaf_pcm_s format = sf2;
+  avtp_stream_format_aaf_pcm_s format = sf1;
 
   // setup listener stream flags, and stream info flags, default vlan id and
   // stream format
