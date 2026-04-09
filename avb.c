@@ -131,30 +131,30 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
                 2);
 
   // Build supported stream formats
+  // avtp_stream_format_am824_s sf0 =
+  //     AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_44_1k);
   avtp_stream_format_am824_s sf0 =
-      AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_44_1k);
-  avtp_stream_format_am824_s sf1 =
       AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_48k);
-  avtp_stream_format_am824_s sf2 =
-      AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_96k);
+  // avtp_stream_format_am824_s sf2 =
+  //     AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_96k);
   uint8_t aaf_ch = 8; // 8 channels to match MOTU/Apple AVB expectations
-  avtp_stream_format_aaf_pcm_s sf3 =
-      AVB_DEFAULT_FORMAT_AAF(16, aaf_pcm_sample_rate_44_1k, aaf_ch, false);
-  avtp_stream_format_aaf_pcm_s sf4 =
-      AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_44_1k, aaf_ch, false);
-  avtp_stream_format_aaf_pcm_s sf5 =
+  // avtp_stream_format_aaf_pcm_s sf3 =
+  //     AVB_DEFAULT_FORMAT_AAF(16, aaf_pcm_sample_rate_44_1k, aaf_ch, false);
+  // avtp_stream_format_aaf_pcm_s sf4 =
+  //     AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_44_1k, aaf_ch, false);
+  avtp_stream_format_aaf_pcm_s sf1 =
       AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_48k, aaf_ch, false);
-  avtp_stream_format_aaf_pcm_s sf6 =
-      AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_96k, aaf_ch, false);
+  // avtp_stream_format_aaf_pcm_s sf6 =
+  //     AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_96k, aaf_ch, false);
   state->supported_formats[0].am824 = sf0;
   state->supported_formats[1].am824 = sf1;
-  state->supported_formats[2].am824 = sf2;
-  state->supported_formats[3].aaf_pcm = sf3;
-  state->supported_formats[4].aaf_pcm = sf4;
-  state->supported_formats[5].aaf_pcm = sf5;
-  state->supported_formats[6].aaf_pcm = sf6;
-  state->num_supported_formats = 7;
-  avtp_stream_format_aaf_pcm_s format = sf5;
+  // state->supported_formats[2].am824 = sf2;
+  // state->supported_formats[3].aaf_pcm = sf3;
+  // state->supported_formats[4].aaf_pcm = sf4;
+  // state->supported_formats[5].aaf_pcm = sf5;
+  // state->supported_formats[6].aaf_pcm = sf6;
+  state->num_supported_formats = 2;
+  avtp_stream_format_aaf_pcm_s format = sf2;
 
   // setup listener stream flags, and stream info flags, default vlan id and
   // stream format
