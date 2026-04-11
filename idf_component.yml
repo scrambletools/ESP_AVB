@@ -1,4 +1,4 @@
-version: "0.9.3"
+version: "0.9.4"
 description: "AVB talker and listener for ESP32"
 url: "https://github.com/scrambletools/esp_avb"
 license: "MIT"
@@ -6,3 +6,5 @@ dependencies:
   idf: ^6.0
   scrambletools/esp_ptp: "*"
   espressif/esp_codec_dev: "*"
+targets:
+  - esp32p4
