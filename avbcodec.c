@@ -153,17 +153,6 @@ static esp_err_t avb_config_codec_es8311(avb_state_s *state) {
     return ESP_FAIL;
   }
 
-  // Setup the data interface for the codec (I2S)
-  audio_codec_i2s_cfg_t i2s_cfg = {
-      .rx_handle = state->i2s_rx_handle,
-      .tx_handle = state->i2s_tx_handle,
-  };
-  const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_cfg);
-  if (!data_if) {
-    ESP_LOGE("ES8311", "Failed to create codec data interface");
-    return ESP_FAIL;
-  }
-
   // Setup the I2C master bus
   i2c_master_bus_handle_t i2c_bus_handle;
   i2c_master_bus_config_t bus_config = {
@@ -206,36 +195,33 @@ static esp_err_t avb_config_codec_es8311(avb_state_s *state) {
     return ESP_FAIL;
   }
 
-  // Create the codec device handle and store it in the state
-  esp_codec_dev_cfg_t dev_cfg = {
-      .codec_if = codec_if,
-      .data_if = data_if,
-      .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
-  };
-  esp_codec_dev_handle_t codec_dev = esp_codec_dev_new(&dev_cfg);
-  if (!codec_dev) {
-    ESP_LOGE("ES8311", "Failed to create codec device");
-    return ESP_FAIL;
-  }
-  state->config.codec_handle = codec_dev;
-
-  // Open codec for 24-bit stereo 48kHz — enables both ADC (mic) and DAC
-  // (speaker). Done once at startup so talker and listener can run
-  // simultaneously without risking esp_codec_dev_close killing the other
-  // direction.
+  /* Configure and start the codec directly — bypass esp_codec_dev_open()
+   * which reconfigures I2S (disable/re-enable cycle) and can misalign the
+   * BCLK phase, causing only the top 8 bits of 24-bit audio to be captured.
+   *
+   * Since both talker and listener use i2s_channel_read/write directly
+   * (not esp_codec_dev_read/write), no I2S data interface is needed. */
   esp_codec_dev_sample_info_t fs = {
       .bits_per_sample = state->config.default_bits_per_sample,
       .channel = 2,
       .sample_rate = state->config.default_sample_rate,
       .mclk_multiple = AVB_MCLK_MULTIPLE,
   };
-  esp_err_t ret = esp_codec_dev_open(codec_dev, &fs);
-  if (ret != ESP_CODEC_DEV_OK) {
-    ESP_LOGE("ES8311", "Failed to open codec: %d", ret);
+  if (codec_if->set_fs && codec_if->set_fs(codec_if, &fs) != 0) {
+    ESP_LOGE("ES8311", "Failed to set codec sample format");
     return ESP_FAIL;
   }
-  esp_codec_dev_set_out_vol(codec_dev, 60.0);
-  esp_codec_dev_set_in_gain(codec_dev, 30.0);
+  if (codec_if->enable && codec_if->enable(codec_if, true) != 0) {
+    ESP_LOGE("ES8311", "Failed to enable codec");
+    return ESP_FAIL;
+  }
+  if (codec_if->set_vol) {
+    codec_if->set_vol(codec_if, 60.0);
+  }
+  if (codec_if->set_mic_gain) {
+    codec_if->set_mic_gain(codec_if, 30.0);
+  }
+
   state->codec_enabled = true;
 
   ESP_LOGI("ES8311", "Codec configured and opened (ADC+DAC active)");

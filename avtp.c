@@ -969,26 +969,7 @@ static void avb_stream_out_task(void *task_param) {
           params->interval, frame_len, audio_offset,
           params->use_sine_wave ? "sine" : "mic");
 
-  int64_t next_send_time = esp_timer_get_time();
-
-  // Initialize AVTP media clock from PTP (double-read consistency check)
   uint32_t avtp_media_ts = 0;
-  for (int init_try = 0; init_try < 5; init_try++) {
-    struct timespec ptp_a, ptp_b;
-    if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_a) == 0 &&
-        clock_gettime(CLOCK_PTP_SYSTEM, &ptp_b) == 0) {
-      uint32_t ts_a = (uint32_t)((uint64_t)ptp_a.tv_sec * 1000000000ULL +
-                                 (uint64_t)ptp_a.tv_nsec);
-      uint32_t ts_b = (uint32_t)((uint64_t)ptp_b.tv_sec * 1000000000ULL +
-                                 (uint64_t)ptp_b.tv_nsec);
-      int32_t diff = (int32_t)(ts_b - ts_a);
-      if (diff >= 0 && diff < 500000) {
-        avtp_media_ts = ts_a;
-        break;
-      }
-    }
-  }
-
   uint32_t avtp_ts_increment = (uint32_t)((uint64_t)params->samples_per_packet *
                                           1000000000ULL / params->sample_rate);
 
@@ -1020,36 +1001,65 @@ static void avb_stream_out_task(void *task_param) {
 
 /* I2S RX local ring — absorbs DMA buffer timing mismatch.
  * Read larger chunks when available, consume i2s_read_size per packet. */
-#define I2S_RING_SIZE 2048 /* ~5ms at 48kHz stereo 24-bit */
+  /* Ring size must be a multiple of i2s_read_size (bytes per AVTP packet)
+   * to avoid partial-frame reads at ring wrap boundaries.  Target ~5ms. */
+  int i2s_frame_bytes = i2s_channels * i2s_bytes_per_sample;
+  int i2s_ring_size = (int)(params->sample_rate * i2s_frame_bytes * 5 / 1000);
+  /* Round down to nearest multiple of i2s_read_size */
+  i2s_ring_size -= i2s_ring_size % i2s_read_size;
+  if (i2s_ring_size < i2s_read_size * 4)
+    i2s_ring_size = i2s_read_size * 4; /* minimum 4 packets */
   int i2s_ring_head = 0, i2s_ring_tail = 0;
   if (!params->use_sine_wave) {
-    i2s_ring = calloc(1, I2S_RING_SIZE);
+    i2s_ring = calloc(1, i2s_ring_size);
     if (!i2s_ring) {
       avberr("Stream out: no memory for I2S ring");
       goto err;
     }
-    /* Ensure I2S RX channel is enabled (codec open may have reconfigured it) */
-    i2s_channel_enable(params->i2s_rx_handle); /* no-op if already enabled */
-
     /* Pre-fill the I2S ring with blocking reads to establish buffer level.
      * I2S DMA returns in chunks larger than requested (driver adjusts
      * dma_frame_num), so we fill as much as we can. */
-    int prefill_target = I2S_RING_SIZE / 2; /* ~2.5ms of audio */
+    int frame_size = i2s_channels * i2s_bytes_per_sample;
+    int prefill_target = i2s_ring_size / 2; /* ~2.5ms of audio */
     while (i2s_ring_head < prefill_target) {
-      int write_pos = i2s_ring_head % I2S_RING_SIZE;
-      int space = I2S_RING_SIZE - i2s_ring_head;
-      int chunk = I2S_RING_SIZE - write_pos;
+      int write_pos = i2s_ring_head % i2s_ring_size;
+      int space = i2s_ring_size - i2s_ring_head;
+      int chunk = i2s_ring_size - write_pos;
       if (chunk > space)
         chunk = space;
+      /* Align to frame boundary to prevent partial-frame reads */
+      chunk -= chunk % frame_size;
+      if (chunk == 0)
+        break;
       size_t got = 0;
       i2s_channel_read(params->i2s_rx_handle, i2s_ring + write_pos, chunk, &got,
                        100);
+      got -= got % frame_size; /* discard any trailing partial frame */
       if (got == 0)
         break; /* timeout — give up pre-fill */
       i2s_ring_head += got;
     }
     avbinfo("Stream out: I2S ring pre-filled %d bytes", i2s_ring_head);
-    /* Log pre-fill status */
+  }
+
+  /* Sample PTP and send-time as late as possible — all logging and pre-fill
+   * is done.  This ensures the first packet's presentation timestamp is
+   * accurate rather than stale by the pre-fill duration. */
+  int64_t next_send_time = esp_timer_get_time();
+  for (int init_try = 0; init_try < 5; init_try++) {
+    struct timespec ptp_a, ptp_b;
+    if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_a) == 0 &&
+        clock_gettime(CLOCK_PTP_SYSTEM, &ptp_b) == 0) {
+      uint32_t ts_a = (uint32_t)((uint64_t)ptp_a.tv_sec * 1000000000ULL +
+                                 (uint64_t)ptp_a.tv_nsec);
+      uint32_t ts_b = (uint32_t)((uint64_t)ptp_b.tv_sec * 1000000000ULL +
+                                 (uint64_t)ptp_b.tv_nsec);
+      int32_t diff = (int32_t)(ts_b - ts_a);
+      if (diff >= 0 && diff < 500000) {
+        avtp_media_ts = ts_a;
+        break;
+      }
+    }
   }
 
   while (octets_to_uint(
@@ -1117,16 +1127,23 @@ static void avb_stream_out_task(void *task_param) {
       int ring_avail = i2s_ring_head - i2s_ring_tail;
       if (ring_avail < i2s_read_size) {
         /* Refill: read as much as possible from I2S into ring */
-        int ring_space = I2S_RING_SIZE - ring_avail;
-        int write_pos = i2s_ring_head % I2S_RING_SIZE;
-        int chunk = I2S_RING_SIZE - write_pos; /* to end of buffer */
+        int ring_space = i2s_ring_size - ring_avail;
+        int write_pos = i2s_ring_head % i2s_ring_size;
+        int chunk = i2s_ring_size - write_pos; /* to end of buffer */
         if (chunk > ring_space)
           chunk = ring_space;
         size_t bytes_read = 0;
         /* Use short timeout — I2S DMA buffers arrive periodically.
          * If no data now, the ring has buffered audio from previous fills. */
+        /* Align chunk to frame boundary (6 bytes = 1 stereo 24-bit frame)
+         * to prevent partial-frame reads that desync the ring buffer */
+        chunk -= chunk % (i2s_channels * i2s_bytes_per_sample);
+        if (chunk == 0)
+          goto skip_refill;
         i2s_channel_read(params->i2s_rx_handle, i2s_ring + write_pos, chunk,
                          &bytes_read, 0);
+        /* Discard any trailing partial frame the driver might return */
+        bytes_read -= bytes_read % (i2s_channels * i2s_bytes_per_sample);
         if (bytes_read > 0) {
           i2s_ring_head += bytes_read;
           i2s_nonzero_audio++;
@@ -1135,10 +1152,11 @@ static void avb_stream_out_task(void *task_param) {
         }
         ring_avail = i2s_ring_head - i2s_ring_tail;
       }
+      skip_refill:
       /* Consume i2s_read_size bytes from ring */
       if (ring_avail >= i2s_read_size) {
-        int read_pos = i2s_ring_tail % I2S_RING_SIZE;
-        int first = I2S_RING_SIZE - read_pos;
+        int read_pos = i2s_ring_tail % i2s_ring_size;
+        int first = i2s_ring_size - read_pos;
         if (first >= i2s_read_size) {
           memcpy(i2s_buf, i2s_ring + read_pos, i2s_read_size);
         } else {
@@ -1150,7 +1168,6 @@ static void avb_stream_out_task(void *task_param) {
         memset(i2s_buf, 0, i2s_read_size); /* underrun — silence */
         i2s_zero_reads++;
       }
-      /* One-shot: dump I2S input and AM824 output */
       if (is_am824)
         i2s24_to_am824_mono(i2s_buf, audio_dst, params->samples_per_packet,
                             params->channels);
