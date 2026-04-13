@@ -1282,7 +1282,7 @@ typedef struct {
   _Atomic uint32_t tail; /* read position (consumer only) */
 } jitter_ring_t;
 
-#define JITTER_RING_SIZE 4096 /* ~11ms at 48kHz stereo 24-bit */
+#define JITTER_RING_SIZE 2048 /* ~7ms at 48kHz stereo 24-bit */
 #define JITTER_PREFILL 576    /* ~2ms of silence pre-fill */
 
 static inline uint32_t ring_readable(const jitter_ring_t *r) {
