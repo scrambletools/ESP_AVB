@@ -215,14 +215,21 @@ static esp_err_t avb_config_codec_es8311(avb_state_s *state) {
     ESP_LOGE("ES8311", "Failed to enable codec");
     return ESP_FAIL;
   }
+  state->codec_enabled = true;
+  state->codec_if = codec_if;
+
+  /* Initialize AECP control values and ranges from codec-specific defaults */
+  state->codec_ranges = (codec_control_range_s)ES8311_CONTROL_RANGES;
+  state->ctrl_speaker_vol = state->codec_ranges.vol_default_tenth_db / 10.0f;
+  state->ctrl_mic_gain = state->codec_ranges.gain_default_tenth_db / 10.0f;
+
+  /* Apply initial volume and gain from control defaults */
   if (codec_if->set_vol) {
-    codec_if->set_vol(codec_if, 30.0);
+    codec_if->set_vol(codec_if, state->ctrl_speaker_vol);
   }
   if (codec_if->set_mic_gain) {
-    codec_if->set_mic_gain(codec_if, 5.0);
+    codec_if->set_mic_gain(codec_if, state->ctrl_mic_gain);
   }
-
-  state->codec_enabled = true;
 
   ESP_LOGI("ES8311", "Codec configured and opened (ADC+DAC active)");
   return ESP_OK;
@@ -242,4 +249,20 @@ esp_err_t avb_config_codec(avb_state_s *state) {
     return ESP_FAIL;
   }
   ESP_LOGI("AVB", "Codec configured");
+}
+
+/* Set speaker volume via codec interface */
+void avb_codec_set_vol(avb_state_s *state, float db) {
+  const audio_codec_if_t *codec = (const audio_codec_if_t *)state->codec_if;
+  if (codec && codec->set_vol) {
+    codec->set_vol(codec, db);
+  }
+}
+
+/* Set mic gain via codec interface */
+void avb_codec_set_mic_gain(avb_state_s *state, float db) {
+  const audio_codec_if_t *codec = (const audio_codec_if_t *)state->codec_if;
+  if (codec && codec->set_mic_gain) {
+    codec->set_mic_gain(codec, db);
+  }
 }

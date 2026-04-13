@@ -138,6 +138,7 @@
 #define AEM_MAX_NUM_CONFIGS 1       // only one config supported for now
 #define AEM_MAX_NUM_DESC 20         // max number of descriptors in a config
 #define AEM_MAX_DESC_COUNT 1        // max count of each descriptor in a config
+#define AEM_NUM_CONTROLS 3          // IDENTIFY, Speaker Volume, Mic Gain
 #define AEM_MAX_NUM_SAMPLE_RATES 10 // max number of sample rates
 #define AEM_MAX_NUM_FORMATS 12      // max number of formats
 #define AEM_MAX_NUM_MAPPINGS                                                   \
@@ -322,7 +323,7 @@ typedef enum {
   aecp_cmd_code_get_name = 0x0011,         // unsupported
   aecp_cmd_code_set_clock_source = 0x0016, // unsupported
   aecp_cmd_code_get_clock_source = 0x0017,
-  aecp_cmd_code_set_control = 0x0018, // unsupported
+  aecp_cmd_code_set_control = 0x0018,
   aecp_cmd_code_get_control = 0x0019,
   aecp_cmd_code_start_streaming = 0x0022, // unsupported
   aecp_cmd_code_stop_streaming = 0x0023,  // unsupported
@@ -2246,6 +2247,13 @@ typedef struct {
   QueueHandle_t ctrl_rx_queue; // control frame queue from EMAC dispatcher
   bool stream_in_active;       // stream-in handler is registered
   bool codec_enabled;          // codec enabled
+  const void *codec_if;        // codec interface (audio_codec_if_t *)
+
+  /* AECP control values */
+  codec_control_range_s codec_ranges; // codec-specific control ranges
+  uint8_t ctrl_identify;       // IDENTIFY control (0=off, 255=on)
+  float ctrl_speaker_vol;      // speaker volume in dB
+  float ctrl_mic_gain;         // mic gain in dB
 
   // PTP clock snapshot for stream out media clock PLL (updated by main task
   // on core 0, read by stream out task on core 1)
@@ -2514,6 +2522,13 @@ int avb_process_aecp_rsp_controller_available(avb_state_s *state,
 int avb_process_aecp_rsp_get_stream_info(avb_state_s *state,
                                          aecp_message_u *msg);
 int avb_process_aecp_rsp_get_counters(avb_state_s *state, aecp_message_u *msg);
+int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
+                                     eth_addr_t *src_addr);
+int avb_process_aecp_cmd_get_control(avb_state_s *state, aecp_message_u *msg,
+                                     eth_addr_t *src_addr);
+
+/* Identify tone */
+void avb_identify_tone(avb_state_s *state, uint32_t duration_ms);
 
 /* ACMP processing functions */
 int avb_process_acmp_connect_rx_command(avb_state_s *state, acmp_message_s *msg,
@@ -2540,6 +2555,8 @@ int avb_stop_stream_out(avb_state_s *state, uint16_t index);
 /* Codec functions */
 esp_err_t avb_config_i2s(avb_state_s *state);
 esp_err_t avb_config_codec(avb_state_s *state);
+void avb_codec_set_vol(avb_state_s *state, float db);
+void avb_codec_set_mic_gain(avb_state_s *state, float db);
 void i2s_task(void *arg);
 
 /* Helper functions */

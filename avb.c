@@ -751,3 +751,56 @@ esp_err_t avb_test_codec_playback(uint32_t duration_ms) {
                           configMAX_PRIORITIES - 2, NULL, 0);
   return ESP_OK;
 }
+
+/* Identify tone task — plays a 24-bit 1kHz sine wave through I2S TX
+ * without reconfiguring the codec. Self-deleting. */
+static void identify_tone_task(void *param) {
+  avb_state_s *state = (avb_state_s *)param;
+  if (!state || !state->i2s_tx_handle) {
+    vTaskDelete(NULL);
+    return;
+  }
+
+  /* 1kHz sine LUT, 48 samples/cycle at 48kHz, ~50% amplitude */
+  static const int32_t sine48[48] = {
+      0,    544665,  1079631, 1595279, 2082235, 2532439, 2938203, 3293268,
+      3592842, 3833605, 4013711, 4132776, 4191840, 4193292, 4140750, 4039013,
+      3893852, 3711777, 3499778, 3265042, 3014650, 2755321, 2493117, 2233135,
+      1979243, 1734805, 1502529, 1284363, 1081490, 894262, 722287, 564457,
+      419026, 283660, 155571, 31687, -91418, -217017, -348206, -488058,
+      -639633, -805996, -990239, -1195498, -1425006, -1682125, -1970389, -2293550
+  };
+
+  int frames_per_ms = 48;
+  uint8_t buf[48 * 6]; /* 1ms worth of 24-bit stereo */
+  uint32_t duration_ms = 500;
+  uint32_t phase = 0;
+
+  avbinfo("Identify tone: %lums", duration_ms);
+
+  int64_t end_time = esp_timer_get_time() + (int64_t)duration_ms * 1000;
+  while (esp_timer_get_time() < end_time) {
+    uint8_t *p = buf;
+    for (int i = 0; i < frames_per_ms; i++) {
+      int32_t val = sine48[phase % 48];
+      /* 24-bit little-endian stereo: [LSB, MID, MSB, LSB, MID, MSB] */
+      p[0] = val & 0xFF;
+      p[1] = (val >> 8) & 0xFF;
+      p[2] = (val >> 16) & 0xFF;
+      p[3] = p[0]; p[4] = p[1]; p[5] = p[2];
+      p += 6;
+      phase++;
+    }
+    size_t bw = 0;
+    i2s_channel_write(state->i2s_tx_handle, buf, sizeof(buf), &bw, 10);
+  }
+
+  avbinfo("Identify tone: done");
+  vTaskDelete(NULL);
+}
+
+/* Play an identify tone — spawns a short-lived task */
+void avb_identify_tone(avb_state_s *state, uint32_t duration_ms) {
+  xTaskCreatePinnedToCore(identify_tone_task, "IDENTIFY", 4096, (void *)state,
+                          configMAX_PRIORITIES - 2, NULL, 0);
+}

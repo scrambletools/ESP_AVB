@@ -309,7 +309,9 @@ int avb_send_aecp_rsp_read_descr_configuration(avb_state_s *state,
   for (int i = 0; i < descriptor_counts_count; i++) {
     aem_config_desc_count_s desc_count = {0};
     int_to_octets(&descriptors[i], desc_count.descriptor_type, 2);
-    size_t count = AEM_MAX_DESC_COUNT;
+    size_t count = (descriptors[i] == aem_desc_type_control)
+                       ? AEM_NUM_CONTROLS
+                       : AEM_MAX_DESC_COUNT;
     int_to_octets(&count, desc_count.count, 2);
     memcpy(&config_desc.descriptor_counts[i], &desc_count,
            sizeof(aem_config_desc_count_s));
@@ -889,64 +891,269 @@ int avb_send_aecp_rsp_read_descr_audio_map(avb_state_s *state,
 }
 
 /* Send AECP response get descriptor for control message
- * currently only supporting identify control
+ * Supports: 0=IDENTIFY, 1=Speaker Volume (listener), 2=Mic Gain (talker)
  */
 int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
                                          aecp_read_descriptor_rsp_s *msg,
                                          eth_addr_t *dest_addr) {
   int ret = OK;
   struct timespec ts;
+  uint16_t index = octets_to_uint(msg->descriptor_index, 2);
 
-  // data for the stream input descriptor
-  int localized_description = 9;   // strings desc 1, string_1
-  uint16_t control_value_type = 1; // CONTROL_LINEAR_UINT8
-  uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
-                             0x00, 0x00, 0x00, 0x01}; // INDENTIFY
-  uint16_t values_offset = 104;                       // Required by spec
-  uint16_t num_values = 1;
-  uint16_t signal_type =
-      aem_desc_type_invalid; // spec requires this to be invalid
-  // milan compliant identify control values
-  aem_identify_control_value_s control_values = {
-      .values = {0, 255, 255, 0, 0},
-      .units = {0},
-      .string_ref = {0xff, 0xff}, // not set
-  };
-
-  // create a stream input descriptor
   aem_control_desc_s descriptor;
   memset(&descriptor, 0, sizeof(aem_control_desc_s));
 
-  // populate the descriptor (only non-zero fields)
-  int_to_octets(&localized_description, descriptor.localized_description, 2);
-  int_to_octets(&control_value_type, descriptor.control_value_type, 2);
-  memcpy(descriptor.control_type, control_type, 8);
+  uint16_t values_offset = 104; // Required by spec
+  uint16_t num_values = 1;
+  uint16_t signal_type = aem_desc_type_invalid;
   int_to_octets(&values_offset, &descriptor.values_offset, 2);
   int_to_octets(&num_values, &descriptor.number_of_values, 2);
   int_to_octets(&signal_type, &descriptor.signal_type, 2);
-  memcpy(descriptor.value_details, &control_values,
-         sizeof(aem_identify_control_value_s));
 
-  // insert the descriptor into the response message
+  switch (index) {
+  case 0: { /* IDENTIFY */
+    int localized_description = 9;
+    uint16_t control_value_type = 1; // CONTROL_LINEAR_UINT8
+    uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
+                               0x00, 0x00, 0x00, 0x01};
+    aem_identify_control_value_s control_values = {
+        .values = {0, 255, 255, 0, 0},
+        .units = {0},
+        .string_ref = {0xff, 0xff},
+    };
+    int_to_octets(&localized_description, descriptor.localized_description, 2);
+    int_to_octets(&control_value_type, descriptor.control_value_type, 2);
+    memcpy(descriptor.control_type, control_type, 8);
+    memcpy(descriptor.value_details, &control_values,
+           sizeof(aem_identify_control_value_s));
+    break;
+  }
+  case 1: { /* Speaker Volume (LEVEL control type) */
+    if (!state->config.listener) {
+      avbwarn("Control index 1 (volume) not available: listener not enabled");
+      return OK; // controller will see no response
+    }
+    uint16_t control_value_type = 2; // CONTROL_LINEAR_INT16
+    uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
+                               0x00, 0x00, 0x00, 0x03}; // LEVEL
+    strncpy((char *)descriptor.object_name, "Speaker Volume", 64);
+    int_to_octets(&control_value_type, descriptor.control_value_type, 2);
+    memcpy(descriptor.control_type, control_type, 8);
+    /* value_details: min(2) max(2) step(2) default(2) current(2) unit(2)
+     * string(2) = 14 bytes per IEEE 1722.1 Table 7-39 */
+    /* value_details order per §7.3.6.2: min, max, step, default, current,
+     * unit, string_ref — each field is 2 bytes for CONTROL_LINEAR_INT16 */
+    codec_control_range_s *r = &state->codec_ranges;
+    int16_t current = (int16_t)(state->ctrl_speaker_vol * 10.0f);
+    uint8_t *v = descriptor.value_details;
+    int_to_octets(&r->vol_min_tenth_db, v + 0, 2);
+    int_to_octets(&r->vol_max_tenth_db, v + 2, 2);
+    int_to_octets(&r->vol_step_tenth_db, v + 4, 2);
+    int_to_octets(&r->vol_default_tenth_db, v + 6, 2);
+    int_to_octets(&current, v + 8, 2);
+    /* units: multiplier=-1 (0xFF), code=0xB0 (DB) */
+    v[10] = 0xFF; /* multiplier */
+    v[11] = 0xB0; /* code: DB */
+    v[12] = 0xFF; /* string_ref high (not set) */
+    v[13] = 0xFF; /* string_ref low */
+    break;
+  }
+  case 2: { /* Mic Gain (GAIN control type) */
+    if (!state->config.talker) {
+      avbwarn("Control index 2 (mic gain) not available: talker not enabled");
+      return OK;
+    }
+    uint16_t control_value_type = 2; // CONTROL_LINEAR_INT16
+    uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
+                               0x00, 0x00, 0x00, 0x04}; // GAIN
+    strncpy((char *)descriptor.object_name, "Mic Gain", 64);
+    int_to_octets(&control_value_type, descriptor.control_value_type, 2);
+    memcpy(descriptor.control_type, control_type, 8);
+    codec_control_range_s *r = &state->codec_ranges;
+    int16_t current = (int16_t)(state->ctrl_mic_gain * 10.0f);
+    uint8_t *v = descriptor.value_details;
+    int_to_octets(&r->gain_min_tenth_db, v + 0, 2);
+    int_to_octets(&r->gain_max_tenth_db, v + 2, 2);
+    int_to_octets(&r->gain_step_tenth_db, v + 4, 2);
+    int_to_octets(&r->gain_default_tenth_db, v + 6, 2);
+    int_to_octets(&current, v + 8, 2);
+    v[10] = 0xFF;
+    v[11] = 0xB0;
+    v[12] = 0xFF;
+    v[13] = 0xFF;
+    break;
+  }
+  default:
+    avbwarn("Unsupported control descriptor index: %d", index);
+    return OK;
+  }
+
   memcpy(msg->descriptor_data, &descriptor, sizeof(aem_control_desc_s));
 
-  // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_control_desc_s) +
-      4; // add the stream descriptor size including the type and index
-
-  // set the control data length
+      AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN +
+      sizeof(aem_control_desc_s) + 4;
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
   msg->common.header.control_data_len = control_data_len & 0xFF;
 
-  // send the response message
   uint16_t msg_len =
       sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
   ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, dest_addr);
   if (ret < 0) {
     avberr("send AECP Read Descriptor response failed: %d", errno);
+  }
+  return ret;
+}
+
+/* Process AECP SET_CONTROL command (IEEE 1722.1 §7.4.25) */
+int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
+                                     eth_addr_t *src_addr) {
+  struct timespec ts;
+  aecp_aem_short_s *cmd = (aecp_aem_short_s *)msg;
+  uint16_t desc_index = octets_to_uint(cmd->descriptor_index, 2);
+  uint8_t *values = (uint8_t *)cmd + sizeof(aecp_aem_short_s);
+  uint8_t status = aecp_status_success;
+
+  switch (desc_index) {
+  case 0: { /* IDENTIFY */
+    uint8_t val = values[0];
+    state->ctrl_identify = val;
+    if (val != 0) {
+      avb_identify_tone(state, 500);
+    }
+    avbinfo("SET_CONTROL: IDENTIFY = %d", val);
+    break;
+  }
+  case 1: { /* Speaker Volume */
+    if (!state->config.listener) {
+      status = aecp_status_not_supported;
+      break;
+    }
+    int16_t raw = (int16_t)((values[0] << 8) | values[1]);
+    float vol = raw / 10.0f;
+    /* Clamp to codec range */
+    float min_vol = state->codec_ranges.vol_min_tenth_db / 10.0f;
+    float max_vol = state->codec_ranges.vol_max_tenth_db / 10.0f;
+    if (vol < min_vol) vol = min_vol;
+    if (vol > max_vol) vol = max_vol;
+    state->ctrl_speaker_vol = vol;
+    avb_codec_set_vol(state, vol);
+    avbinfo("SET_CONTROL: Speaker Volume = %.1f dB", vol);
+    break;
+  }
+  case 2: { /* Mic Gain */
+    if (!state->config.talker) {
+      status = aecp_status_not_supported;
+      break;
+    }
+    int16_t raw = (int16_t)((values[0] << 8) | values[1]);
+    float gain = raw / 10.0f;
+    float min_gain = state->codec_ranges.gain_min_tenth_db / 10.0f;
+    float max_gain = state->codec_ranges.gain_max_tenth_db / 10.0f;
+    if (gain < min_gain) gain = min_gain;
+    if (gain > max_gain) gain = max_gain;
+    state->ctrl_mic_gain = gain;
+    avb_codec_set_mic_gain(state, gain);
+    avbinfo("SET_CONTROL: Mic Gain = %.1f dB", gain);
+    break;
+  }
+  default:
+    status = aecp_status_no_such_descriptor;
+    break;
+  }
+
+  /* Build response: echo command with msg_type=response, set status */
+  msg->header.msg_type = aecp_msg_type_aem_response;
+  msg->header.status_valtime = status;
+
+  /* Write current value back into response */
+  if (status == aecp_status_success) {
+    switch (desc_index) {
+    case 0:
+      values[0] = state->ctrl_identify;
+      break;
+    case 1: {
+      int16_t cur = (int16_t)(state->ctrl_speaker_vol * 10.0f);
+      values[0] = (cur >> 8) & 0xFF;
+      values[1] = cur & 0xFF;
+      break;
+    }
+    case 2: {
+      int16_t cur = (int16_t)(state->ctrl_mic_gain * 10.0f);
+      values[0] = (cur >> 8) & 0xFF;
+      values[1] = cur & 0xFF;
+      break;
+    }
+    }
+  }
+
+  uint16_t control_data_len =
+      (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
+  uint16_t msg_len =
+      sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
+  int ret =
+      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP SET_CONTROL response failed: %d", errno);
+  }
+  return ret;
+}
+
+/* Process AECP GET_CONTROL command (IEEE 1722.1 §7.4.26) */
+int avb_process_aecp_cmd_get_control(avb_state_s *state, aecp_message_u *msg,
+                                     eth_addr_t *src_addr) {
+  struct timespec ts;
+  aecp_aem_short_s *cmd = (aecp_aem_short_s *)msg;
+  uint16_t desc_index = octets_to_uint(cmd->descriptor_index, 2);
+  uint8_t *values = (uint8_t *)cmd + sizeof(aecp_aem_short_s);
+  uint8_t status = aecp_status_success;
+
+  switch (desc_index) {
+  case 0: /* IDENTIFY */
+    values[0] = state->ctrl_identify;
+    break;
+  case 1: { /* Speaker Volume */
+    if (!state->config.listener) {
+      status = aecp_status_not_supported;
+      break;
+    }
+    int16_t cur = (int16_t)(state->ctrl_speaker_vol * 10.0f);
+    values[0] = (cur >> 8) & 0xFF;
+    values[1] = cur & 0xFF;
+    break;
+  }
+  case 2: { /* Mic Gain */
+    if (!state->config.talker) {
+      status = aecp_status_not_supported;
+      break;
+    }
+    int16_t cur = (int16_t)(state->ctrl_mic_gain * 10.0f);
+    values[0] = (cur >> 8) & 0xFF;
+    values[1] = cur & 0xFF;
+    break;
+  }
+  default:
+    status = aecp_status_no_such_descriptor;
+    break;
+  }
+
+  msg->header.msg_type = aecp_msg_type_aem_response;
+  msg->header.status_valtime = status;
+
+  /* Set control_data_len to include the values field */
+  uint16_t values_len = (desc_index == 0) ? 1 : 2;
+  uint16_t control_data_len =
+      sizeof(aecp_common_s) + sizeof(aecp_common_aem_s) + 4 + values_len -
+      AVTP_CDL_PREAMBLE_LEN;
+  msg->header.control_data_len_h = (control_data_len >> 8) & 0xFF;
+  msg->header.control_data_len = control_data_len & 0xFF;
+
+  uint16_t msg_len =
+      sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
+  int ret =
+      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP GET_CONTROL response failed: %d", errno);
   }
   return ret;
 }
@@ -1178,6 +1385,12 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
       break;
     case aecp_cmd_code_get_counters:
       return avb_process_aecp_cmd_get_counters(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_set_control:
+      return avb_process_aecp_cmd_set_control(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_control:
+      return avb_process_aecp_cmd_get_control(state, msg, src_addr);
       break;
     default:
       return OK;

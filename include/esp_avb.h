@@ -61,6 +61,30 @@ typedef enum {
   avb_codec_type_es8311 // Everest Semiconductor ES8311 (currently only one supported)
 } avb_codec_type_t;
 
+/* Codec control ranges (in tenths of dB for AECP control values) */
+typedef struct {
+  int16_t vol_min_tenth_db;     // speaker volume minimum
+  int16_t vol_max_tenth_db;     // speaker volume maximum
+  int16_t vol_step_tenth_db;    // speaker volume step
+  int16_t vol_default_tenth_db; // speaker volume default
+  int16_t gain_min_tenth_db;    // mic gain minimum
+  int16_t gain_max_tenth_db;    // mic gain maximum
+  int16_t gain_step_tenth_db;   // mic gain step
+  int16_t gain_default_tenth_db; // mic gain default
+} codec_control_range_s;
+
+/* ES8311 codec control ranges */
+#define ES8311_CONTROL_RANGES {  \
+  .vol_min_tenth_db = -955,      \
+  .vol_max_tenth_db = 320,       \
+  .vol_step_tenth_db = 5,        \
+  .vol_default_tenth_db = 300,   \
+  .gain_min_tenth_db = 0,        \
+  .gain_max_tenth_db = 300,      \
+  .gain_step_tenth_db = 30,      \
+  .gain_default_tenth_db = 50    \
+}
+
 /* Sample rates struct */
 typedef struct {
     uint32_t sample_rates[8];
