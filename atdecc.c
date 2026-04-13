@@ -437,7 +437,13 @@ int avb_send_aecp_rsp_read_descr_stream(avb_state_s *state,
   aem_stream_desc_s descriptor;
   memset(&descriptor, 0, sizeof(aem_stream_desc_s));
 
-  // populate the stream input descriptor
+  // populate the stream descriptor — copy persisted name if set
+  if (is_output && index < AVB_MAX_NUM_OUTPUT_STREAMS)
+    memcpy(descriptor.object_name,
+           state->descriptor_names[AVB_NAME_STREAM_OUTPUT_0 + index], 64);
+  else if (!is_output && index < AVB_MAX_NUM_INPUT_STREAMS)
+    memcpy(descriptor.object_name,
+           state->descriptor_names[AVB_NAME_STREAM_INPUT_0 + index], 64);
   int_to_octets(&localized_description, descriptor.localized_description, 2);
   int_to_octets(&stream_flags, (uint8_t *)&descriptor.stream_flags, 2);
   memcpy(&descriptor.current_format, &current_format,
@@ -692,7 +698,7 @@ int avb_send_aecp_rsp_read_descr_strings(avb_state_s *state,
   char *string_6 = "Ethernet";         // AVB Interface Name (addr 6)
   if (msg->descriptor_index[1] == 1) {
     string_0 = "Logo";           // Memory Object Name (addr 8)
-    string_1 = "Indentify";      // Control Name (addr 9)
+    string_1 = "Identify";       // Control Name (addr 9)
     string_2 = "Clock Domain";   // Clock Domain Name (addr 10)
     string_3 = "Internal Clock"; // Clock Source Name (addr 11)
     string_4 = "Vendor Name";    // Vendor Name (addr 12)
@@ -931,6 +937,7 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
         .units = {0},
         .string_ref = {0xff, 0xff},
     };
+    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_0], 64);
     int_to_octets(&localized_description, descriptor.localized_description, 2);
     int_to_octets(&control_value_type, descriptor.control_value_type, 2);
     memcpy(descriptor.control_type, control_type, 8);
@@ -947,7 +954,7 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
     uint16_t control_value_type = 2; // CONTROL_LINEAR_INT16
     uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
                                0x00, 0x00, 0x00, 0x03}; // LEVEL
-    memcpy(descriptor.object_name, state->ctrl_names[1], 64);
+    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_1], 64);
     int_to_octets(&localized_desc_vol, descriptor.localized_description, 2);
     int_to_octets(&control_value_type, descriptor.control_value_type, 2);
     memcpy(descriptor.control_type, control_type, 8);
@@ -979,7 +986,7 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
     uint16_t control_value_type = 2; // CONTROL_LINEAR_INT16
     uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
                                0x00, 0x00, 0x00, 0x04}; // GAIN
-    memcpy(descriptor.object_name, state->ctrl_names[2], 64);
+    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_2], 64);
     int_to_octets(&localized_desc_gain, descriptor.localized_description, 2);
     int_to_octets(&control_value_type, descriptor.control_value_type, 2);
     memcpy(descriptor.control_type, control_type, 8);
@@ -1053,6 +1060,7 @@ int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
     state->ctrl_speaker_vol = vol;
     avb_codec_set_vol(state, vol);
     avbinfo("SET_CONTROL: Speaker Volume = %.1f dB", vol);
+    avb_persist_save(state);
     break;
   }
   case 2: { /* Mic Gain */
@@ -1069,6 +1077,7 @@ int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
     state->ctrl_mic_gain = gain;
     avb_codec_set_mic_gain(state, gain);
     avbinfo("SET_CONTROL: Mic Gain = %.1f dB", gain);
+    avb_persist_save(state);
     break;
   }
   default:
@@ -1366,15 +1375,28 @@ static uint8_t *avb_resolve_name_ptr(avb_state_s *state, uint16_t desc_type,
   switch (desc_type) {
   case aem_desc_type_entity:
     if (name_index == 0)
-      return state->own_entity.detail.entity_name;
+      return (uint8_t *)state->descriptor_names[AVB_NAME_ENTITY];
     if (name_index == 1)
-      return (uint8_t *)state->own_entity.detail.group_name;
+      return (uint8_t *)state->descriptor_names[AVB_NAME_GROUP];
     return NULL;
   case aem_desc_type_avb_interface:
-    return (name_index == 0) ? state->avb_interface.object_name : NULL;
+    return (name_index == 0)
+               ? (uint8_t *)state->descriptor_names[AVB_NAME_AVB_INTERFACE]
+               : NULL;
+  case aem_desc_type_stream_input:
+    if (desc_index < AVB_MAX_NUM_INPUT_STREAMS && name_index == 0)
+      return (uint8_t *)state->descriptor_names[AVB_NAME_STREAM_INPUT_0 +
+                                                desc_index];
+    return NULL;
+  case aem_desc_type_stream_output:
+    if (desc_index < AVB_MAX_NUM_OUTPUT_STREAMS && name_index == 0)
+      return (uint8_t *)state->descriptor_names[AVB_NAME_STREAM_OUTPUT_0 +
+                                                desc_index];
+    return NULL;
   case aem_desc_type_control:
     if (desc_index < AEM_NUM_CONTROLS && name_index == 0)
-      return (uint8_t *)state->ctrl_names[desc_index];
+      return (uint8_t *)state->descriptor_names[AVB_NAME_CONTROL_0 +
+                                                desc_index];
     return NULL;
   default:
     return NULL;
@@ -1398,8 +1420,16 @@ int avb_process_aecp_cmd_set_name(avb_state_s *state, aecp_message_u *msg,
                                          name_index);
   if (target) {
     memcpy(target, name, 64);
-    avbinfo("SET_NAME: type=0x%04x idx=%d name_idx=%d name='%.64s'",
-            desc_type, desc_index, name_index, (char *)target);
+    /* Sync to canonical locations for descriptors that read from elsewhere */
+    if (desc_type == aem_desc_type_entity && name_index == 0)
+      memcpy(state->own_entity.detail.entity_name, target, 64);
+    else if (desc_type == aem_desc_type_entity && name_index == 1)
+      memcpy(state->own_entity.detail.group_name, target, 64);
+    else if (desc_type == aem_desc_type_avb_interface)
+      memcpy(state->avb_interface.object_name, target, 64);
+    avbinfo("SET_NAME: type=0x%04x idx=%d name='%.64s'",
+            desc_type, desc_index, (char *)target);
+    avb_persist_save(state);
   } else {
     status = aecp_status_not_implemented;
   }
@@ -1474,8 +1504,6 @@ int avb_process_aecp_addr_access(avb_state_s *state, aecp_message_u *msg,
   aecp_addr_access_s *cmd = &msg->addr_access;
   uint16_t tlv_count = (cmd->tlv_count[0] << 8) | cmd->tlv_count[1];
   uint8_t status = 0; /* SUCCESS */
-
-  avbinfo("ADDRESS_ACCESS: tlv_count=%d", tlv_count);
 
   /* Base address of the logo in memory */
   uintptr_t logo_base = (uintptr_t)state->logo_start;
@@ -1968,6 +1996,7 @@ int avb_process_aecp_cmd_set_stream_format(avb_state_s *state,
     memcpy(&state->input_streams[index].stream_format, requested,
            sizeof(avtp_stream_format_s));
   }
+  avb_persist_save(state);
 
   // send the response
   return avb_send_aecp_rsp_set_stream_format(state, &msg->stream_format,

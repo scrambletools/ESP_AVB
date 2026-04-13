@@ -13,6 +13,7 @@
 #include "esp_codec_dev.h"
 #include "esp_timer.h"
 #include <esp_task_wdt.h>
+#include <nvs_flash.h>
 
 /* Global state */
 avb_state_s *s_state;
@@ -573,6 +574,16 @@ static void avb_task(void *task_param) {
     }
   }
 
+  // Load persistent data from NVS — must be after codec init so
+  // persisted volume/gain override the codec defaults
+  avb_persist_load(state);
+
+  // Apply persisted codec values to hardware
+  if (state->codec_enabled) {
+    avb_codec_set_vol(state, state->ctrl_speaker_vol);
+    avb_codec_set_mic_gain(state, state->ctrl_mic_gain);
+  }
+
   // Main AVB loop — receive control frames from EMAC RX dispatcher queue,
   // process them, and handle periodic tasks. VLAN stream data is handled
   // directly by the registered stream handler in the EMAC RX task.
@@ -804,4 +815,144 @@ static void identify_tone_task(void *param) {
 void avb_identify_tone(avb_state_s *state, uint32_t duration_ms) {
   xTaskCreatePinnedToCore(identify_tone_task, "IDENTIFY", 4096, (void *)state,
                           configMAX_PRIORITIES - 2, NULL, 0);
+}
+
+/****************************************************************************
+ * NVS Persistent Storage
+ ****************************************************************************/
+
+#define AVB_NVS_NAMESPACE "avb"
+#define AVB_NVS_KEY "persist"
+
+/* Populate the persist struct from current state */
+static void avb_persist_gather(avb_state_s *state) {
+  avb_persistent_data_s *p = &state->persist;
+  memset(p, 0, sizeof(*p));
+  p->version = AVB_PERSIST_VERSION;
+
+  /* All descriptor names from the unified array */
+  memcpy(p->descriptor_names, state->descriptor_names,
+         sizeof(state->descriptor_names));
+
+  /* Control values */
+  p->speaker_vol_db = state->ctrl_speaker_vol;
+  p->mic_gain_db = state->ctrl_mic_gain;
+
+  /* Stream formats */
+  for (int i = 0; i < state->num_input_streams && i < AVB_MAX_NUM_INPUT_STREAMS;
+       i++)
+    memcpy(p->stream_input_formats[i], &state->input_streams[i].stream_format,
+           8);
+  for (int i = 0;
+       i < state->num_output_streams && i < AVB_MAX_NUM_OUTPUT_STREAMS; i++)
+    memcpy(p->stream_output_formats[i],
+           &state->output_streams[i].stream_format, 8);
+}
+
+/* Apply loaded persist data to current state */
+static void avb_persist_apply(avb_state_s *state) {
+  avb_persistent_data_s *p = &state->persist;
+
+  /* Restore all descriptor names */
+  memcpy(state->descriptor_names, p->descriptor_names,
+         sizeof(state->descriptor_names));
+
+  /* Copy entity name and group name into their canonical locations too,
+   * since the entity descriptor builder reads from there */
+  if (state->descriptor_names[AVB_NAME_ENTITY][0])
+    memcpy(state->own_entity.detail.entity_name,
+           state->descriptor_names[AVB_NAME_ENTITY], 64);
+  if (state->descriptor_names[AVB_NAME_GROUP][0])
+    memcpy(state->own_entity.detail.group_name,
+           state->descriptor_names[AVB_NAME_GROUP], 64);
+  if (state->descriptor_names[AVB_NAME_AVB_INTERFACE][0])
+    memcpy(state->avb_interface.object_name,
+           state->descriptor_names[AVB_NAME_AVB_INTERFACE], 64);
+
+  /* Control values — apply if non-zero (default struct is zeroed) */
+  if (p->speaker_vol_db != 0.0f || p->mic_gain_db != 0.0f) {
+    state->ctrl_speaker_vol = p->speaker_vol_db;
+    state->ctrl_mic_gain = p->mic_gain_db;
+  }
+
+  /* Stream formats — apply if any byte is non-zero
+   * (can't check just byte[0] since AM824 subtype is 0x00) */
+  for (int i = 0; i < AVB_MAX_NUM_INPUT_STREAMS; i++) {
+    uint8_t *f = p->stream_input_formats[i];
+    if (f[0] | f[1] | f[2] | f[3] | f[4] | f[5] | f[6] | f[7])
+      memcpy(&state->input_streams[i].stream_format, f, 8);
+  }
+  for (int i = 0; i < AVB_MAX_NUM_OUTPUT_STREAMS; i++) {
+    uint8_t *f = p->stream_output_formats[i];
+    if (f[0] | f[1] | f[2] | f[3] | f[4] | f[5] | f[6] | f[7])
+      memcpy(&state->output_streams[i].stream_format, f, 8);
+  }
+}
+
+/* Load persistent data from NVS */
+esp_err_t avb_persist_load(avb_state_s *state) {
+  /* Ensure NVS is initialized */
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+      err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs_flash_erase();
+    err = nvs_flash_init();
+  }
+  if (err != ESP_OK) {
+    avberr("NVS: flash init failed: %d", err);
+    return err;
+  }
+
+  nvs_handle_t handle;
+  err = nvs_open(AVB_NVS_NAMESPACE, NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    avbinfo("NVS: no saved data (namespace not found)");
+    return err;
+  }
+
+  size_t size = sizeof(avb_persistent_data_s);
+  err = nvs_get_blob(handle, AVB_NVS_KEY, &state->persist, &size);
+  nvs_close(handle);
+
+  if (err != ESP_OK) {
+    avbinfo("NVS: no saved data (key not found)");
+    return err;
+  }
+
+  if (state->persist.version != AVB_PERSIST_VERSION) {
+    avbwarn("NVS: version mismatch (%d != %d), ignoring",
+            state->persist.version, AVB_PERSIST_VERSION);
+    memset(&state->persist, 0, sizeof(avb_persistent_data_s));
+    return ESP_ERR_INVALID_VERSION;
+  }
+
+  avb_persist_apply(state);
+  avbinfo("NVS: loaded persistent data (%d bytes)", (int)size);
+  return ESP_OK;
+}
+
+/* Save persistent data to NVS */
+esp_err_t avb_persist_save(avb_state_s *state) {
+  avb_persist_gather(state);
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(AVB_NVS_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    avberr("NVS: failed to open for writing: %d", err);
+    return err;
+  }
+
+  err = nvs_set_blob(handle, AVB_NVS_KEY, &state->persist,
+                     sizeof(avb_persistent_data_s));
+  if (err != ESP_OK) {
+    avberr("NVS: failed to write: %d", err);
+    nvs_close(handle);
+    return err;
+  }
+
+  err = nvs_commit(handle);
+  nvs_close(handle);
+  avbinfo("NVS: saved persistent data (%d bytes)",
+          (int)sizeof(avb_persistent_data_s));
+  return err;
 }

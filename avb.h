@@ -149,6 +149,38 @@
 #define AEM_MAX_LEN_CONTROL_VAL_DETAILS                                        \
   100 // max length of control value details (spec max is 404)
 
+/* Descriptor name indices for state->descriptor_names[] */
+typedef enum {
+  AVB_NAME_ENTITY = 0,        // entity_name (name_index 0)
+  AVB_NAME_GROUP,             // group_name (name_index 1)
+  AVB_NAME_AVB_INTERFACE,
+  AVB_NAME_CONTROL_0,         // IDENTIFY
+  AVB_NAME_CONTROL_1,         // Speaker Volume
+  AVB_NAME_CONTROL_2,         // Mic Gain
+  AVB_NAME_STREAM_INPUT_0,
+  AVB_NAME_STREAM_OUTPUT_0,
+  AVB_NAME_COUNT              // total number of settable names
+} avb_name_index_t;
+
+/* Persistent data saved to NVS flash.
+ * Holds user-settable names, control values, and stream formats that
+ * survive reboots. Stored as a single blob under NVS key "avb_persist". */
+#define AVB_PERSIST_VERSION 1
+typedef struct {
+  uint8_t version; /* struct version for forward compatibility */
+
+  /* Descriptor names — indexed by avb_name_index_t */
+  char descriptor_names[AVB_NAME_COUNT][64];
+
+  /* Codec control values */
+  float speaker_vol_db; /* speaker volume in dB */
+  float mic_gain_db;    /* mic gain in dB */
+
+  /* Stream formats (8 bytes each) */
+  uint8_t stream_input_formats[AVB_MAX_NUM_INPUT_STREAMS][8];
+  uint8_t stream_output_formats[AVB_MAX_NUM_OUTPUT_STREAMS][8];
+} avb_persistent_data_s;
+
 /* Timespec functions */
 #define clock_timespec_subtract(ts1, ts2, ts3) timespecsub(ts1, ts2, ts3)
 #define clock_timespec_add(ts1, ts2, ts3) timespecadd(ts1, ts2, ts3)
@@ -2254,7 +2286,8 @@ typedef struct {
   uint8_t ctrl_identify;       // IDENTIFY control (0=off, 255=on)
   float ctrl_speaker_vol;      // speaker volume in dB
   float ctrl_mic_gain;         // mic gain in dB
-  char ctrl_names[AEM_NUM_CONTROLS][64]; // runtime names for CONTROL descriptors
+  char descriptor_names[AVB_NAME_COUNT][64]; // user-settable descriptor names
+  avb_persistent_data_s persist;             // persistent data (saved to NVS)
 
   // PTP clock snapshot for stream out media clock PLL (updated by main task
   // on core 0, read by stream out task on core 1)
@@ -2564,6 +2597,10 @@ esp_err_t avb_config_i2s(avb_state_s *state);
 esp_err_t avb_config_codec(avb_state_s *state);
 void avb_codec_set_vol(avb_state_s *state, float db);
 void avb_codec_set_mic_gain(avb_state_s *state, float db);
+
+/* NVS persistent storage */
+esp_err_t avb_persist_load(avb_state_s *state);
+esp_err_t avb_persist_save(avb_state_s *state);
 void i2s_task(void *arg);
 
 /* Helper functions */

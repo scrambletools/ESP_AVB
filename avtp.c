@@ -24,10 +24,6 @@
  * task to miss its 125μs deadlines. The DMA ring appears to handle concurrent
  * access in practice (separate TX descriptors for each caller). */
 
-/* globals to optimize l2tap usage */
-static bool avtp_active_stream_in = false;
-static bool avtp_active_stream_out = false;
-
 /* Send MVRP VLAN identifier message */
 int avb_send_mvrp_vlan_id(avb_state_s *state, mrp_attr_event_t attr_event,
                           bool leave_all) {
