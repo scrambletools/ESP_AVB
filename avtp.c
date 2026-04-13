@@ -386,7 +386,7 @@ static uint32_t build_sine_lut(uint8_t **lut_out, int channels, int bit_depth,
   }
 
   float amplitude =
-      (bit_depth == 24) ? 8388607.0f : 32767.0f; // 2^23-1 or 2^15-1
+      (bit_depth == 24) ? 20000.0f : 32767.0f; // quiet: match mic level (~±20k)
   float phase_inc = 2.0f * M_PI * freq / (float)sample_rate;
   float phase = 0.0f;
 
@@ -1282,7 +1282,7 @@ typedef struct {
   _Atomic uint32_t tail; /* read position (consumer only) */
 } jitter_ring_t;
 
-#define JITTER_RING_SIZE 2048 /* ~5.3ms at 48kHz stereo 24-bit */
+#define JITTER_RING_SIZE 4096 /* ~11ms at 48kHz stereo 24-bit */
 #define JITTER_PREFILL 576    /* ~2ms of silence pre-fill */
 
 static inline uint32_t ring_readable(const jitter_ring_t *r) {
@@ -1341,12 +1341,14 @@ typedef struct {
   size_t i2s_convert_buf_size;
   jitter_ring_t ring;
   esp_timer_handle_t drain_timer;
+  uint8_t expected_stream_id[UNIQUE_ID_LEN]; /* filter: only accept this stream */
   /* diagnostics */
   uint32_t pkt_count;
   uint32_t ring_write_fail; /* ring full — packets dropped */
   uint32_t ring_write_ok;
   uint32_t drain_count;
   uint32_t drain_underrun; /* drain found ring empty */
+  uint32_t stream_id_mismatch; /* packets dropped due to wrong stream_id */
   /* first-packet snapshot (written by handler, printed by main loop) */
   uint8_t diag_subtype;
   uint16_t diag_sdl;
@@ -1391,6 +1393,13 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *ctx) {
   stream_rx_ctx_t *c = (stream_rx_ctx_t *)ctx;
   if (!c || len < 24)
     return;
+
+  /* Filter by stream_id — only accept packets from the connected talker.
+   * Stream_id is at AVTP header bytes [4..11] for both AAF and IEC 61883. */
+  if (memcmp(avtp_data + 4, c->expected_stream_id, UNIQUE_ID_LEN) != 0) {
+    c->stream_id_mismatch++;
+    return;
+  }
 
   uint8_t subtype = avtp_data[0] & 0x7F;
   uint8_t *pcm_data = NULL;
@@ -1483,13 +1492,14 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *ctx) {
     }
   }
 
-  /* Write converted PCM into jitter ring — non-blocking */
+  /* Write converted PCM into jitter ring — non-blocking.
+   * All-or-nothing to preserve 6-byte frame alignment. */
   if (offset > 0) {
-    uint32_t written = ring_write(&c->ring, buf, offset);
-    if (written < (uint32_t)offset) {
-      c->ring_write_fail++;
-    } else {
+    if (ring_writable(&c->ring) >= (uint32_t)offset) {
+      ring_write(&c->ring, buf, offset);
       c->ring_write_ok++;
+    } else {
+      c->ring_write_fail++;
     }
     if (!c->diag_i2s_bytes)
       c->diag_i2s_bytes = offset;
@@ -1505,10 +1515,11 @@ void avb_stream_in_print_diag(void) {
     return;
   c->diag_captured = 2;
   avbinfo("STREAM: ok=%lu rfail=%lu drain=%lu underrun=%lu fill=%lu "
-          "sub=%d sdl=%d ch=%d samp=%d i2s=%d "
+          "id_skip=%lu sub=%d ch=%d samp=%d i2s=%d "
           "audio=[%02x %02x %02x %02x %02x %02x %02x %02x]",
           c->ring_write_ok, c->ring_write_fail, c->drain_count,
-          c->drain_underrun, ring_readable(&c->ring), c->diag_subtype,
+          c->drain_underrun, ring_readable(&c->ring),
+          c->stream_id_mismatch, c->diag_subtype,
           c->diag_sdl, c->diag_channels, c->diag_samples, c->diag_i2s_bytes,
           c->diag_first_audio[0], c->diag_first_audio[1],
           c->diag_first_audio[2], c->diag_first_audio[3],
@@ -1535,14 +1546,20 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
     return ERROR;
   }
   ctx->i2s_tx_handle = state->i2s_tx_handle;
+  memcpy(ctx->expected_stream_id, state->input_streams[index].stream_id,
+         UNIQUE_ID_LEN);
 
-  // Conversion buffer — used by handler to build stereo PCM per packet
+  // Conversion buffer — used by handler to build stereo PCM per packet.
+  // All shared buffers use DMA-capable memory to avoid L1 cache coherency
+  // issues between the EMAC RX handler (producer) and drain timer (consumer)
+  // which may run on different CPU cores on ESP32-P4.
   ctx->i2s_convert_buf_size = (AVTP_STREAM_DATA_PER_MSG / 4) * 2 * 3;
-  ctx->i2s_convert_buf = calloc(1, ctx->i2s_convert_buf_size);
+  ctx->i2s_convert_buf =
+      heap_caps_calloc(1, ctx->i2s_convert_buf_size, MALLOC_CAP_DMA);
 
   // Drain buffer — used by timer callback to read from ring
   ctx->i2s_drain_buf_size = 512; /* ~85 frames, well above 1ms worth */
-  ctx->i2s_drain_buf = calloc(1, ctx->i2s_drain_buf_size);
+  ctx->i2s_drain_buf = heap_caps_calloc(1, ctx->i2s_drain_buf_size, MALLOC_CAP_DMA);
 
   if (!ctx->i2s_convert_buf || !ctx->i2s_drain_buf) {
     avberr("Stream in: no memory for buffers");
@@ -1552,7 +1569,7 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
     return ERROR;
   }
 
-  // Allocate jitter ring buffer (internal RAM for speed)
+  // Allocate jitter ring buffer
   ctx->ring.buf = calloc(1, JITTER_RING_SIZE);
   if (!ctx->ring.buf) {
     avberr("Stream in: no memory for ring buffer");
@@ -1611,11 +1628,12 @@ void avb_stop_stream_in(avb_state_s *state) {
     esp_timer_delete(s_stream_rx_ctx->drain_timer);
 
     avbinfo("Stream in stopped: %lu pkts, ring ok=%lu fail=%lu, "
-            "drain=%lu underrun=%lu, ring fill=%lu",
+            "drain=%lu underrun=%lu, ring fill=%lu, id_skip=%lu",
             s_stream_rx_ctx->pkt_count, s_stream_rx_ctx->ring_write_ok,
             s_stream_rx_ctx->ring_write_fail, s_stream_rx_ctx->drain_count,
             s_stream_rx_ctx->drain_underrun,
-            ring_readable(&s_stream_rx_ctx->ring));
+            ring_readable(&s_stream_rx_ctx->ring),
+            s_stream_rx_ctx->stream_id_mismatch);
 
     free(s_stream_rx_ctx->ring.buf);
     free(s_stream_rx_ctx->i2s_convert_buf);

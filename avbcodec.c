@@ -216,10 +216,10 @@ static esp_err_t avb_config_codec_es8311(avb_state_s *state) {
     return ESP_FAIL;
   }
   if (codec_if->set_vol) {
-    codec_if->set_vol(codec_if, 60.0);
+    codec_if->set_vol(codec_if, 30.0);
   }
   if (codec_if->set_mic_gain) {
-    codec_if->set_mic_gain(codec_if, 30.0);
+    codec_if->set_mic_gain(codec_if, 5.0);
   }
 
   state->codec_enabled = true;
