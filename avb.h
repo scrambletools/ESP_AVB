@@ -319,8 +319,8 @@ typedef enum {
   aecp_cmd_code_set_stream_format = 0x0008,
   aecp_cmd_code_get_stream_format = 0x0009, // unsupported
   aecp_cmd_code_get_stream_info = 0x000f,
-  aecp_cmd_code_set_name = 0x0010,         // unsupported
-  aecp_cmd_code_get_name = 0x0011,         // unsupported
+  aecp_cmd_code_set_name = 0x0010,
+  aecp_cmd_code_get_name = 0x0011,
   aecp_cmd_code_set_clock_source = 0x0016, // unsupported
   aecp_cmd_code_get_clock_source = 0x0017,
   aecp_cmd_code_set_control = 0x0018,
@@ -2254,6 +2254,7 @@ typedef struct {
   uint8_t ctrl_identify;       // IDENTIFY control (0=off, 255=on)
   float ctrl_speaker_vol;      // speaker volume in dB
   float ctrl_mic_gain;         // mic gain in dB
+  char ctrl_names[AEM_NUM_CONTROLS][64]; // runtime names for CONTROL descriptors
 
   // PTP clock snapshot for stream out media clock PLL (updated by main task
   // on core 0, read by stream out task on core 1)
@@ -2526,6 +2527,12 @@ int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
                                      eth_addr_t *src_addr);
 int avb_process_aecp_cmd_get_control(avb_state_s *state, aecp_message_u *msg,
                                      eth_addr_t *src_addr);
+int avb_process_aecp_addr_access(avb_state_s *state, aecp_message_u *msg,
+                                 eth_addr_t *src_addr);
+int avb_process_aecp_cmd_set_name(avb_state_s *state, aecp_message_u *msg,
+                                  eth_addr_t *src_addr);
+int avb_process_aecp_cmd_get_name(avb_state_s *state, aecp_message_u *msg,
+                                  eth_addr_t *src_addr);
 
 /* Identify tone */
 void avb_identify_tone(avb_state_s *state, uint32_t duration_ms);

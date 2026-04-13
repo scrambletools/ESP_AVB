@@ -51,6 +51,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   entity_caps.class_b = true;
   entity_caps.aem_supported = true;
   entity_caps.aem_config_index_valid = true;
+  entity_caps.address_access_supported = true;
   memcpy(&state->own_entity.summary.entity_capabilities, &entity_caps,
          sizeof(avb_entity_cap_s));
 

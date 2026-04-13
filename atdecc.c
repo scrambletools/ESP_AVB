@@ -596,6 +596,8 @@ int avb_send_aecp_rsp_read_descr_memory_obj(avb_state_s *state,
   int_to_octets(&state->logo_start, &descriptor.start_address[4], 4);
   int_to_octets(&state->logo_length, &descriptor.length[4], 4);
   int_to_octets(&state->logo_length, &descriptor.maximum_length[4], 4);
+  uint32_t max_segment = 400; /* safe limit for single AECP frame */
+  int_to_octets(&max_segment, &descriptor.maximum_segment_length[4], 4);
 
   // insert the descriptor into the response message
   memcpy(msg->descriptor_data, &descriptor, sizeof(aem_memory_object_desc_s));
@@ -631,7 +633,7 @@ int avb_send_aecp_rsp_read_descr_locale(avb_state_s *state,
   // data for the stream input descriptor
   size_t locale_identifier_len = 2;
   char *locale_identifier = "en";
-  uint16_t number_of_strings = 2;
+  uint16_t number_of_strings = 3;
 
   // create a stream input descriptor
   aem_locale_desc_s descriptor;
@@ -695,7 +697,15 @@ int avb_send_aecp_rsp_read_descr_strings(avb_state_s *state,
     string_3 = "Internal Clock"; // Clock Source Name (addr 11)
     string_4 = "Vendor Name";    // Vendor Name (addr 12)
     string_5 = "AVB Endpoint";   // Model Name (addr 13)
-    string_6 = "";               // (addr 14)
+    string_6 = "Speaker Volume"; // (addr 14)
+  } else if (msg->descriptor_index[1] == 2) {
+    string_0 = "Mic Gain"; // (addr 16)
+    string_1 = "";
+    string_2 = "";
+    string_3 = "";
+    string_4 = "";
+    string_5 = "";
+    string_6 = "";
   }
 
   // create a stream input descriptor
@@ -931,12 +941,14 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
   case 1: { /* Speaker Volume (LEVEL control type) */
     if (!state->config.listener) {
       avbwarn("Control index 1 (volume) not available: listener not enabled");
-      return OK; // controller will see no response
+      return OK;
     }
+    int localized_desc_vol = 14; /* strings desc 1, string_6 */
     uint16_t control_value_type = 2; // CONTROL_LINEAR_INT16
     uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
                                0x00, 0x00, 0x00, 0x03}; // LEVEL
-    strncpy((char *)descriptor.object_name, "Speaker Volume", 64);
+    memcpy(descriptor.object_name, state->ctrl_names[1], 64);
+    int_to_octets(&localized_desc_vol, descriptor.localized_description, 2);
     int_to_octets(&control_value_type, descriptor.control_value_type, 2);
     memcpy(descriptor.control_type, control_type, 8);
     /* value_details: min(2) max(2) step(2) default(2) current(2) unit(2)
@@ -963,10 +975,12 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
       avbwarn("Control index 2 (mic gain) not available: talker not enabled");
       return OK;
     }
+    int localized_desc_gain = 16; /* strings desc 2, string_0 */
     uint16_t control_value_type = 2; // CONTROL_LINEAR_INT16
     uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
                                0x00, 0x00, 0x00, 0x04}; // GAIN
-    strncpy((char *)descriptor.object_name, "Mic Gain", 64);
+    memcpy(descriptor.object_name, state->ctrl_names[2], 64);
+    int_to_octets(&localized_desc_gain, descriptor.localized_description, 2);
     int_to_octets(&control_value_type, descriptor.control_value_type, 2);
     memcpy(descriptor.control_type, control_type, 8);
     codec_control_range_s *r = &state->codec_ranges;
@@ -1344,8 +1358,195 @@ int avb_process_adp(avb_state_s *state, adp_message_s *msg,
 }
 
 /* Process received ATDECC AECP message */
+/* Resolve a descriptor's object_name pointer from type/index/name_index.
+ * Returns NULL if the descriptor type is not supported for naming. */
+static uint8_t *avb_resolve_name_ptr(avb_state_s *state, uint16_t desc_type,
+                                     uint16_t desc_index,
+                                     uint16_t name_index) {
+  switch (desc_type) {
+  case aem_desc_type_entity:
+    if (name_index == 0)
+      return state->own_entity.detail.entity_name;
+    if (name_index == 1)
+      return (uint8_t *)state->own_entity.detail.group_name;
+    return NULL;
+  case aem_desc_type_avb_interface:
+    return (name_index == 0) ? state->avb_interface.object_name : NULL;
+  case aem_desc_type_control:
+    if (desc_index < AEM_NUM_CONTROLS && name_index == 0)
+      return (uint8_t *)state->ctrl_names[desc_index];
+    return NULL;
+  default:
+    return NULL;
+  }
+}
+
+/* Process AECP SET_NAME command (IEEE 1722.1-2021 §7.4.17)
+ * Format after AEM common: descriptor_type(2) descriptor_index(2)
+ *   name_index(2) configuration_index(2) name(64) */
+int avb_process_aecp_cmd_set_name(avb_state_s *state, aecp_message_u *msg,
+                                  eth_addr_t *src_addr) {
+  struct timespec ts;
+  uint8_t *data = msg->raw + sizeof(aecp_common_s) + sizeof(aecp_common_aem_s);
+  uint16_t desc_type = (data[0] << 8) | data[1];
+  uint16_t desc_index = (data[2] << 8) | data[3];
+  uint16_t name_index = (data[4] << 8) | data[5];
+  uint8_t *name = data + 8; /* 64-byte name field at offset 8 */
+  uint8_t status = aecp_status_success;
+
+  uint8_t *target = avb_resolve_name_ptr(state, desc_type, desc_index,
+                                         name_index);
+  if (target) {
+    memcpy(target, name, 64);
+    avbinfo("SET_NAME: type=0x%04x idx=%d name_idx=%d name='%.64s'",
+            desc_type, desc_index, name_index, (char *)target);
+  } else {
+    status = aecp_status_not_implemented;
+  }
+
+  /* Build response */
+  msg->header.msg_type = aecp_msg_type_aem_response;
+  msg->header.status_valtime = status;
+  if (target) {
+    memcpy(name, target, 64); /* echo current value */
+  }
+
+  uint16_t control_data_len =
+      (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
+  uint16_t msg_len =
+      sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
+  int ret =
+      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP SET_NAME response failed: %d", errno);
+  }
+  return ret;
+}
+
+/* Process AECP GET_NAME command (IEEE 1722.1-2021 §7.4.18)
+ * Command format: descriptor_type(2) descriptor_index(2)
+ *   name_index(2) configuration_index(2)
+ * Response format: same as SET_NAME (adds 64-byte name) */
+int avb_process_aecp_cmd_get_name(avb_state_s *state, aecp_message_u *msg,
+                                  eth_addr_t *src_addr) {
+  struct timespec ts;
+  uint8_t *data = msg->raw + sizeof(aecp_common_s) + sizeof(aecp_common_aem_s);
+  uint16_t desc_type = (data[0] << 8) | data[1];
+  uint16_t desc_index = (data[2] << 8) | data[3];
+  uint16_t name_index = (data[4] << 8) | data[5];
+  uint8_t *name = data + 8;
+  uint8_t status = aecp_status_success;
+
+  uint8_t *target = avb_resolve_name_ptr(state, desc_type, desc_index,
+                                         name_index);
+  if (target) {
+    memcpy(name, target, 64);
+  } else {
+    status = aecp_status_not_implemented;
+    memset(name, 0, 64);
+  }
+
+  msg->header.msg_type = aecp_msg_type_aem_response;
+  msg->header.status_valtime = status;
+
+  /* Update control_data_len to include the 64-byte name field */
+  uint16_t control_data_len =
+      sizeof(aecp_common_s) + sizeof(aecp_common_aem_s) + 8 + 64 -
+      AVTP_CDL_PREAMBLE_LEN;
+  msg->header.control_data_len_h = (control_data_len >> 8) & 0xFF;
+  msg->header.control_data_len = control_data_len & 0xFF;
+
+  uint16_t msg_len =
+      sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
+  int ret =
+      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP GET_NAME response failed: %d", errno);
+  }
+  return ret;
+}
+
+/* Process AECP ADDRESS_ACCESS command (IEEE 1722.1-2021 §9.4)
+ * Handles READ requests for memory objects (entity icon PNG). */
+int avb_process_aecp_addr_access(avb_state_s *state, aecp_message_u *msg,
+                                 eth_addr_t *src_addr) {
+  struct timespec ts;
+  aecp_addr_access_s *cmd = &msg->addr_access;
+  uint16_t tlv_count = (cmd->tlv_count[0] << 8) | cmd->tlv_count[1];
+  uint8_t status = 0; /* SUCCESS */
+
+  avbinfo("ADDRESS_ACCESS: tlv_count=%d", tlv_count);
+
+  /* Base address of the logo in memory */
+  uintptr_t logo_base = (uintptr_t)state->logo_start;
+  uint32_t logo_len = state->logo_length;
+
+  /* Process each TLV */
+  uint8_t *tlv = cmd->tlv_data;
+  for (int i = 0; i < tlv_count && i < 4; i++) {
+    /* TLV format: mode(4bits) + length(12bits) [2 bytes], address [8 bytes],
+     * memory_data [length bytes] */
+    uint8_t mode = (tlv[0] >> 4) & 0x0F;
+    uint16_t length = ((tlv[0] & 0x0F) << 8) | tlv[1];
+    uint64_t address = 0;
+    for (int b = 0; b < 8; b++) {
+      address = (address << 8) | tlv[2 + b];
+    }
+    uint8_t *memory_data = tlv + 10;
+
+    if (mode == 0) { /* READ */
+      /* Check if address falls within the logo memory region */
+      if (address < logo_base) {
+        status = 2; /* ADDRESS_TOO_LOW */
+        break;
+      }
+      uint64_t offset = address - logo_base;
+      if (offset + length > logo_len) {
+        status = 3; /* ADDRESS_TOO_HIGH */
+        /* Clamp to available data */
+        if (offset < logo_len) {
+          length = logo_len - offset;
+          tlv[0] = (mode << 4) | ((length >> 8) & 0x0F);
+          tlv[1] = length & 0xFF;
+        } else {
+          break;
+        }
+      }
+      /* Copy requested bytes into response */
+      memcpy(memory_data, state->logo_start + offset, length);
+      status = 0;
+    } else {
+      status = 1; /* NOT_IMPLEMENTED (WRITE/EXECUTE not supported) */
+      break;
+    }
+
+    /* Advance to next TLV */
+    tlv += 10 + length;
+  }
+
+  /* Build response */
+  msg->header.msg_type = aecp_msg_type_addr_access_response;
+  msg->header.status_valtime = status;
+
+  uint16_t control_data_len =
+      (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
+  uint16_t msg_len =
+      sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
+  int ret =
+      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP ADDRESS_ACCESS response failed: %d", errno);
+  }
+  return ret;
+}
+
 int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
                      eth_addr_t *src_addr) {
+
+  /* Process ADDRESS_ACCESS command (separate message type from AEM) */
+  if (msg->header.msg_type == aecp_msg_type_addr_access_command) {
+    return avb_process_aecp_addr_access(state, msg, src_addr);
+  }
 
   /* Process AECP command */
   if (msg->header.msg_type == aecp_msg_type_aem_command) {
@@ -1385,6 +1586,12 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
       break;
     case aecp_cmd_code_get_counters:
       return avb_process_aecp_cmd_get_counters(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_set_name:
+      return avb_process_aecp_cmd_set_name(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_name:
+      return avb_process_aecp_cmd_get_name(state, msg, src_addr);
       break;
     case aecp_cmd_code_set_control:
       return avb_process_aecp_cmd_set_control(state, msg, src_addr);
