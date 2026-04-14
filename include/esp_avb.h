@@ -5,7 +5,7 @@
  * ESP_AVB Component
  *
  * This component provides an implementation of an AVB talker and listener.
- * 
+ *
  * This file provides the public API for the ESP_AVB component.
  */
 
@@ -16,9 +16,9 @@
  * Included Files
  ****************************************************************************/
 
+#include <esp_eth.h>
 #include <stdbool.h>
 #include <time.h>
-#include <esp_eth.h>
 
 /****************************************************************************
  * Compiler Definitions
@@ -30,27 +30,23 @@
 /**
  * @brief get default AVB configuration
  */
-#define AVB_DEFAULT_CONFIG() { \
-    .talker = false, \
-    .listener = false, \
-    .eth_interface = DEF_ETH_IF, \
-    .i2s_port = 0, \
-    .output_pa_pin = 53, \
-    .i2c_handle = NULL, \
-    .codec_handle = NULL, \
-    .eth_handle = NULL, \
-    .codec_type = avb_codec_type_es8311, \
-    .default_sample_rate = 48000, \
-    .default_bits_per_sample = 24, \
-    .num_channels_input = 1, \
-    .num_channels_output = 1, \
-    .supported_sample_rates = { \
-        .sample_rates = {44100, 48000, 96000}, \
-        .num_rates = 3}, \
-    .supported_bits_per_sample = { \
-        .bit_rates = {16, 24}, \
-        .num_rates = 2} \
-}
+#define AVB_DEFAULT_CONFIG()                                                   \
+  {.talker = false,                                                            \
+   .listener = false,                                                          \
+   .eth_interface = DEF_ETH_IF,                                                \
+   .i2s_port = 0,                                                              \
+   .output_pa_pin = 53,                                                        \
+   .i2c_handle = NULL,                                                         \
+   .codec_handle = NULL,                                                       \
+   .eth_handle = NULL,                                                         \
+   .codec_type = avb_codec_type_es8311,                                        \
+   .default_sample_rate = 48000,                                               \
+   .default_bits_per_sample = 24,                                              \
+   .num_channels_input = 1,                                                    \
+   .num_channels_output = 1,                                                   \
+   .supported_sample_rates = {.sample_rates = {44100, 48000, 96000},           \
+                              .num_rates = 3},                                 \
+   .supported_bits_per_sample = {.bit_rates = {16, 24}, .num_rates = 2}}
 
 /****************************************************************************
  * Public Types
@@ -58,43 +54,43 @@
 
 /* Codec types */
 typedef enum {
-  avb_codec_type_es8311 // Everest Semiconductor ES8311 (currently only one supported)
+  avb_codec_type_es8311 // Everest Semiconductor ES8311 (currently only one
+                        // supported)
 } avb_codec_type_t;
 
 /* Codec control ranges (in tenths of dB for AECP control values) */
 typedef struct {
-  int16_t vol_min_tenth_db;     // speaker volume minimum
-  int16_t vol_max_tenth_db;     // speaker volume maximum
-  int16_t vol_step_tenth_db;    // speaker volume step
-  int16_t vol_default_tenth_db; // speaker volume default
-  int16_t gain_min_tenth_db;    // mic gain minimum
-  int16_t gain_max_tenth_db;    // mic gain maximum
-  int16_t gain_step_tenth_db;   // mic gain step
+  int16_t vol_min_tenth_db;      // speaker volume minimum
+  int16_t vol_max_tenth_db;      // speaker volume maximum
+  int16_t vol_step_tenth_db;     // speaker volume step
+  int16_t vol_default_tenth_db;  // speaker volume default
+  int16_t gain_min_tenth_db;     // mic gain minimum
+  int16_t gain_max_tenth_db;     // mic gain maximum
+  int16_t gain_step_tenth_db;    // mic gain step
   int16_t gain_default_tenth_db; // mic gain default
 } codec_control_range_s;
 
 /* ES8311 codec control ranges */
-#define ES8311_CONTROL_RANGES {  \
-  .vol_min_tenth_db = -955,      \
-  .vol_max_tenth_db = 320,       \
-  .vol_step_tenth_db = 5,        \
-  .vol_default_tenth_db = 300,   \
-  .gain_min_tenth_db = 0,        \
-  .gain_max_tenth_db = 300,      \
-  .gain_step_tenth_db = 30,      \
-  .gain_default_tenth_db = 50    \
-}
+#define ES8311_CONTROL_RANGES                                                  \
+  {.vol_min_tenth_db = -955,                                                   \
+   .vol_max_tenth_db = 320,                                                    \
+   .vol_step_tenth_db = 5,                                                     \
+   .vol_default_tenth_db = 100,                                                \
+   .gain_min_tenth_db = 0,                                                     \
+   .gain_max_tenth_db = 300,                                                   \
+   .gain_step_tenth_db = 30,                                                   \
+   .gain_default_tenth_db = 90}
 
 /* Sample rates struct */
 typedef struct {
-    uint32_t sample_rates[8];
-    uint8_t num_rates;
+  uint32_t sample_rates[8];
+  uint8_t num_rates;
 } avb_sample_rates_s;
 
 /* Bit rates struct */
 typedef struct {
-    uint8_t bit_rates[8]; // bits per sample
-    uint8_t num_rates;
+  uint8_t bit_rates[8]; // bits per sample
+  uint8_t num_rates;
 } avb_bit_rates_s;
 
 /* AVB configuration structure
@@ -102,30 +98,30 @@ typedef struct {
  * for all inputs and outputs.
  */
 typedef struct {
-    bool                   talker;                    // enable talker
-    bool                   listener;                  // enable listener
-    char *                 eth_interface;             // ethernet interface name
-    uint8_t                i2s_port;                  // i2s port number
-    uint8_t                output_pa_pin;             // output PA pin
-    void *                 i2c_handle;                // i2c handle
-    void *                 codec_handle;              // codec handle
-    esp_eth_handle_t *     eth_handle;                // ethernet handle
-    const avb_codec_type_t codec_type;                // codec type
-    uint32_t               default_sample_rate;       // default sample rate
-    uint8_t                default_bits_per_sample;   // default bits per sample
-    uint8_t                num_channels_input;        // number of input channels
-    uint8_t                num_channels_output;       // number of output channels
-    avb_sample_rates_s     supported_sample_rates;    // supported sample rates
-    avb_bit_rates_s        supported_bits_per_sample; // supported bits per sample
-    const uint8_t *        pcm_data;                  // pointer to embedded PCM file data
-    uint32_t               pcm_data_length;           // length of PCM data in bytes
+  bool talker;                               // enable talker
+  bool listener;                             // enable listener
+  char *eth_interface;                       // ethernet interface name
+  uint8_t i2s_port;                          // i2s port number
+  uint8_t output_pa_pin;                     // output PA pin
+  void *i2c_handle;                          // i2c handle
+  void *codec_handle;                        // codec handle
+  esp_eth_handle_t *eth_handle;              // ethernet handle
+  const avb_codec_type_t codec_type;         // codec type
+  uint32_t default_sample_rate;              // default sample rate
+  uint8_t default_bits_per_sample;           // default bits per sample
+  uint8_t num_channels_input;                // number of input channels
+  uint8_t num_channels_output;               // number of output channels
+  avb_sample_rates_s supported_sample_rates; // supported sample rates
+  avb_bit_rates_s supported_bits_per_sample; // supported bits per sample
+  const uint8_t *pcm_data;  // pointer to embedded PCM file data
+  uint32_t pcm_data_length; // length of PCM data in bytes
 } avb_config_s;
 
 /* AVB status information structure */
 typedef struct {
-  bool clock_source_valid;      // clock source valid
+  bool clock_source_valid; // clock source valid
   struct {
-    uint8_t id[8];              // Entity ID
+    uint8_t id[8]; // Entity ID
   } entity;
   struct timespec last_started; // when AVB was last started
 } avb_status_s;
@@ -136,45 +132,44 @@ typedef struct {
 
 #ifdef __cplusplus
 #define EXTERN extern "C"
-extern "C"
-{
+extern "C" {
 #else
 #define EXTERN extern
 #endif
 
 /* @brief Start the AVB task and bind it to a specified interface
- * 
+ *
  * @param config Configuration structure
- * 
+ *
  * @return OK on success, ERROR on failure
- * 
- * @note Make sure i2c is initialized before starting AVB task. 
+ *
+ * @note Make sure i2c is initialized before starting AVB task.
  *       AVB task will handle i2s and codec initialization.
- *       Only one instance of AVB task can run at a time. 
+ *       Only one instance of AVB task can run at a time.
  *       Attempting to start multiple instances will fail with an error.
  */
 int avb_start(avb_config_s *config);
 
 /* @brief Query status from a running AVB task
- * 
+ *
  * @param status Pointer to status storage structure
- * 
+ *
  * @return OK on success, negative errno on failure
- * 
+ *
  * @note Multiple threads with priority less than CONFIG_ESP_AVB_TASKPRIO
- *       can request status simultaneously. If higher priority threads 
+ *       can request status simultaneously. If higher priority threads
  *       request status simultaneously, some of the requests may timeout.
  */
 int avb_status(avb_status_s *status);
 
 /* @brief Stop the AVB task
- * 
+ *
  * @return OK on success, negative errno on failure
  **/
 int avb_stop();
 
 /* @brief Get the codec handle
- * 
+ *
  * @return codec handle
  **/
 void *avb_get_codec_handle();
