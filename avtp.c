@@ -1040,8 +1040,15 @@ static void avb_stream_out_task(void *task_param) {
 
   /* Sample PTP and send-time as late as possible — all logging and pre-fill
    * is done.  This ensures the first packet's presentation timestamp is
-   * accurate rather than stale by the pre-fill duration. */
-  int64_t next_send_time = esp_timer_get_time();
+   * accurate rather than stale by the pre-fill duration.
+   *
+   * Stagger initial send phase by a device-unique offset derived from the MAC.
+   * Without this, PTP-synchronized ESPs transmit in lockstep (same 125μs
+   * phase), causing systematic DMA contention between TX and RX on the
+   * receiving side — both fire at the same instant every interval. */
+  uint8_t mac_hash = state->internal_mac_addr[4] ^ state->internal_mac_addr[5];
+  int64_t phase_offset = (mac_hash % params->interval);
+  int64_t next_send_time = esp_timer_get_time() + phase_offset;
   for (int init_try = 0; init_try < 5; init_try++) {
     struct timespec ptp_a, ptp_b;
     if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_a) == 0 &&
@@ -1511,7 +1518,7 @@ void avb_stream_in_print_diag(void) {
     return;
   c->diag_captured = 2;
   avbinfo("STREAM: ok=%lu rfail=%lu drain=%lu underrun=%lu fill=%lu "
-          "id_skip=%lu sub=%d ch=%d samp=%d i2s=%d "
+          "id_skip=%lu sub=%d sdl=%d ch=%d samp=%d i2s=%d "
           "audio=[%02x %02x %02x %02x %02x %02x %02x %02x]",
           c->ring_write_ok, c->ring_write_fail, c->drain_count,
           c->drain_underrun, ring_readable(&c->ring),

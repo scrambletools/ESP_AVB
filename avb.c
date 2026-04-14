@@ -205,7 +205,12 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
                          state->output_streams[i].stream_id, i);
       memcpy(&state->output_streams[i].stream_dest_addr, &MAAP_START_MAC_ADDR,
              ETH_ADDR_LEN);
-      state->output_streams[i].stream_dest_addr[5] += i;
+      /* Derive a per-device unique multicast dest from the device MAC.
+       * MAAP range is 91:e0:f0:00:00:00–91:e0:f0:00:fd:ff (0xFE00 addresses).
+       * Use last two MAC bytes to spread devices across the range. */
+      uint8_t *dest = state->output_streams[i].stream_dest_addr;
+      dest[4] = state->internal_mac_addr[4];
+      dest[5] = state->internal_mac_addr[5] + i;
     }
   }
 

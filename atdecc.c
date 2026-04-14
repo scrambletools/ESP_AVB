@@ -1110,8 +1110,15 @@ int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
     }
   }
 
+  /* Compute exact response length from value size, not from the incoming
+   * command length — some controllers send extra data (full value_details)
+   * in the command that must not be echoed back. */
+  uint16_t values_len = (desc_index == 0) ? 1 : 2;
   uint16_t control_data_len =
-      (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
+      sizeof(aecp_common_s) + sizeof(aecp_common_aem_s) + 4 + values_len -
+      AVTP_CDL_PREAMBLE_LEN;
+  msg->header.control_data_len_h = (control_data_len >> 8) & 0xFF;
+  msg->header.control_data_len = control_data_len & 0xFF;
   uint16_t msg_len =
       sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
   int ret =
@@ -3142,13 +3149,14 @@ acmp_status_t avb_disconnect_listener(avb_state_s *state,
   // Stop stream-in handler if active
   avb_stop_stream_in(state);
 
-  // reset the input stream data
+  // Reset connection state but preserve stream format and vlan_id
+  avtp_stream_format_s saved_format = state->input_streams[index].stream_format;
+  uint8_t saved_vlan[2];
+  memcpy(saved_vlan, state->input_streams[index].vlan_id, 2);
   memset(&state->input_streams[index], 0, sizeof(avb_listener_stream_s));
-  uint16_t vlan_id = CONFIG_ESP_AVB_STREAM_VLAN_ID;
-  avtp_stream_format_s format = state->default_format;
-  memcpy(&state->input_streams[index].stream_format, &format,
+  memcpy(&state->input_streams[index].stream_format, &saved_format,
          sizeof(avtp_stream_format_s));
-  int_to_octets(&vlan_id, state->input_streams[index].vlan_id, 2);
+  memcpy(state->input_streams[index].vlan_id, saved_vlan, 2);
 
   // send SRP listener deregistration command
   int ret = avb_send_msrp_listener(state, mrp_attr_event_lv,
