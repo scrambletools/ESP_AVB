@@ -842,6 +842,22 @@ typedef struct {
   uint8_t confl_count[2];      // conflict count
 } maap_message_s;              // 28 bytes
 
+/* MAAP state machine states */
+typedef enum {
+  maap_state_initial,
+  maap_state_probe,
+  maap_state_defend
+} maap_state_t;
+
+/* MAAP state per output stream */
+typedef struct {
+  maap_state_t state;
+  eth_addr_t acquired_addr;   // acquired multicast address
+  uint8_t probe_count;        // remaining probes to send
+  int64_t timer_expiry_us;    // next probe or announce time (esp_timer_get_time)
+  bool acquired;              // true when address successfully acquired
+} maap_stream_state_s;
+
 /* ATDECC types*/
 
 /* The data structures in this section are defined in IEEE 1722.1-2021
@@ -2317,6 +2333,7 @@ typedef struct {
   // index of output_streams is the talker_uid
   avb_listener_stream_s input_streams[AVB_MAX_NUM_INPUT_STREAMS];
   avb_talker_stream_s output_streams[AVB_MAX_NUM_OUTPUT_STREAMS];
+  maap_stream_state_s maap[AVB_MAX_NUM_OUTPUT_STREAMS];
   size_t num_input_streams;
   size_t num_output_streams;
 
@@ -2364,7 +2381,6 @@ typedef struct {
   struct timespec last_transmitted_msrp_talker_adv;
   struct timespec last_transmitted_msrp_listener;
   struct timespec last_transmitted_msrp_leaveall;
-  struct timespec last_transmitted_maap_announce;
   struct timespec last_ptp_status_update;
   struct timespec last_transmitted_unsol_notif;
 
@@ -2413,8 +2429,14 @@ int avb_send_msrp_listener(avb_state_s *state, mrp_attr_event_t attr_event,
                            msrp_listener_event_t listener_event, bool leave_all,
                            unique_id_t *stream_id);
 
+/* MAAP functions */
+void avb_maap_init(avb_state_s *state);
+void avb_maap_tick(avb_state_s *state);
+int avb_send_maap_msg(avb_state_s *state, maap_msg_type_t msg_type,
+                      eth_addr_t *req_addr, uint16_t req_count,
+                      eth_addr_t *confl_addr, uint16_t confl_count);
+
 /* AVTP send functions */
-int avb_send_maap_announce(avb_state_s *state);
 int avb_send_aaf_pcm(avb_state_s *state);
 
 /* ATDECC send functions */

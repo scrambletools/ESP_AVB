@@ -185,20 +185,141 @@ int avb_send_msrp_listener(avb_state_s *state, mrp_attr_event_t attr_event,
   return ret;
 }
 
-/* Send MAAP Announce message */
-int avb_send_maap_announce(avb_state_s *state) {
+/* MAAP timing constants (IEEE 1722-2016 Annex B) */
+#define MAAP_PROBE_RETRANSMITS 3
+#define MAAP_PROBE_INTERVAL_BASE_MS 500
+#define MAAP_PROBE_INTERVAL_VAR_MS 100
+#define MAAP_ANNOUNCE_INTERVAL_BASE_MS 30000
+#define MAAP_ANNOUNCE_INTERVAL_VAR_MS 2000
+/* MAAP dynamic allocation pool: 91:E0:F0:00:00:00 to 91:E0:F0:00:FD:FF */
+#define MAAP_POOL_SIZE 0xFE00
+
+/* Generate a random address within the MAAP pool using device MAC as seed */
+static void maap_generate_addr(avb_state_s *state, eth_addr_t *addr,
+                               int stream_index) {
+  uint32_t seed = state->internal_mac_addr[2] ^ state->internal_mac_addr[3];
+  seed = (seed << 8) | state->internal_mac_addr[4];
+  seed = (seed << 8) | state->internal_mac_addr[5];
+  seed += (uint32_t)esp_timer_get_time() + stream_index;
+  uint16_t offset = seed % MAAP_POOL_SIZE;
+  uint8_t *a = (uint8_t *)addr;
+  a[0] = 0x91;
+  a[1] = 0xe0;
+  a[2] = 0xf0;
+  a[3] = 0x00;
+  a[4] = (offset >> 8) & 0xFF;
+  a[5] = offset & 0xFF;
+}
+
+/* Get a random timer jitter value */
+static int64_t maap_jitter_us(int base_ms, int var_ms) {
+  uint32_t r = (uint32_t)esp_timer_get_time();
+  int jitter = (r % (var_ms + 1));
+  return (int64_t)(base_ms + jitter) * 1000;
+}
+
+/* Check if two single-address ranges conflict */
+static bool maap_addr_conflicts(eth_addr_t *a, eth_addr_t *b) {
+  return memcmp(a, b, ETH_ADDR_LEN) == 0;
+}
+
+/* Send a MAAP message */
+int avb_send_maap_msg(avb_state_s *state, maap_msg_type_t msg_type,
+                      eth_addr_t *req_addr, uint16_t req_count,
+                      eth_addr_t *confl_addr, uint16_t confl_count) {
   maap_message_s msg;
   struct timespec ts;
-  int ret;
   memset(&msg, 0, sizeof(msg));
 
-  // Populate the message TDB
+  msg.subtype = avtp_subtype_maap;
+  msg.msg_type = msg_type;
+  msg.sv = 0;
+  msg.version = 0;
+  msg.maap_version = 1;
+  msg.control_data_len = 16;
+  memcpy(msg.req_start_addr, req_addr, ETH_ADDR_LEN);
+  int_to_octets(&req_count, msg.req_count, 2);
+  if (confl_addr)
+    memcpy(msg.confl_start_addr, confl_addr, ETH_ADDR_LEN);
+  if (confl_count > 0)
+    int_to_octets(&confl_count, msg.confl_count, 2);
 
-  ret = avb_net_send(state, ethertype_avtp, &msg, sizeof(msg), &ts);
+  int ret = avb_net_send(state, ethertype_avtp, &msg, sizeof(msg), &ts);
   if (ret < 0) {
-    avberr("send MAAP Announce failed: %d", errno);
+    avberr("send MAAP %s failed: %d",
+           msg_type == maap_msg_type_probe     ? "probe"
+           : msg_type == maap_msg_type_defend   ? "defend"
+           : msg_type == maap_msg_type_announce ? "announce"
+                                                : "unknown",
+           errno);
   }
-  return OK;
+  return ret;
+}
+
+/* Initialize MAAP state for all output streams */
+void avb_maap_init(avb_state_s *state) {
+  for (int i = 0; i < state->num_output_streams; i++) {
+    maap_stream_state_s *m = &state->maap[i];
+    m->state = maap_state_initial;
+    m->acquired = false;
+    maap_generate_addr(state, &m->acquired_addr, i);
+    m->probe_count = MAAP_PROBE_RETRANSMITS;
+    m->timer_expiry_us =
+        esp_timer_get_time() + maap_jitter_us(MAAP_PROBE_INTERVAL_BASE_MS,
+                                              MAAP_PROBE_INTERVAL_VAR_MS);
+    m->state = maap_state_probe;
+    avb_send_maap_msg(state, maap_msg_type_probe, &m->acquired_addr, 1, NULL,
+                      0);
+    avbinfo("MAAP: probing %02x:%02x:%02x:%02x:%02x:%02x for stream %d",
+            m->acquired_addr[0], m->acquired_addr[1], m->acquired_addr[2],
+            m->acquired_addr[3], m->acquired_addr[4], m->acquired_addr[5], i);
+  }
+}
+
+/* MAAP periodic tick — called from AVB main loop.
+ * Handles probe retransmits and announce refresh. */
+void avb_maap_tick(avb_state_s *state) {
+  int64_t now = esp_timer_get_time();
+
+  for (int i = 0; i < state->num_output_streams; i++) {
+    maap_stream_state_s *m = &state->maap[i];
+    if (now < m->timer_expiry_us)
+      continue;
+
+    if (m->state == maap_state_probe) {
+      m->probe_count--;
+      if (m->probe_count == 0) {
+        /* Probing complete — address acquired */
+        m->state = maap_state_defend;
+        m->acquired = true;
+        memcpy(state->output_streams[i].stream_dest_addr, m->acquired_addr,
+               ETH_ADDR_LEN);
+        avb_send_maap_msg(state, maap_msg_type_announce, &m->acquired_addr, 1,
+                          NULL, 0);
+        m->timer_expiry_us =
+            now + maap_jitter_us(MAAP_ANNOUNCE_INTERVAL_BASE_MS,
+                                 MAAP_ANNOUNCE_INTERVAL_VAR_MS);
+        avbinfo("MAAP: acquired %02x:%02x:%02x:%02x:%02x:%02x for stream %d",
+                m->acquired_addr[0], m->acquired_addr[1], m->acquired_addr[2],
+                m->acquired_addr[3], m->acquired_addr[4], m->acquired_addr[5],
+                i);
+      } else {
+        /* Send another probe */
+        avb_send_maap_msg(state, maap_msg_type_probe, &m->acquired_addr, 1,
+                          NULL, 0);
+        m->timer_expiry_us =
+            now + maap_jitter_us(MAAP_PROBE_INTERVAL_BASE_MS,
+                                 MAAP_PROBE_INTERVAL_VAR_MS);
+      }
+    } else if (m->state == maap_state_defend) {
+      /* Periodic announce refresh */
+      avb_send_maap_msg(state, maap_msg_type_announce, &m->acquired_addr, 1,
+                        NULL, 0);
+      m->timer_expiry_us =
+          now + maap_jitter_us(MAAP_ANNOUNCE_INTERVAL_BASE_MS,
+                               MAAP_ANNOUNCE_INTERVAL_VAR_MS);
+    }
+  }
 }
 
 /* Process received MSRP domain message */
@@ -455,7 +576,72 @@ int avb_process_aaf(avb_state_s *state, aaf_pcm_message_s *msg) {
 
 /* Process received AVTP MAAP message */
 int avb_process_maap(avb_state_s *state, maap_message_s *msg) {
-  // not implemented
+  for (int i = 0; i < state->num_output_streams; i++) {
+    maap_stream_state_s *m = &state->maap[i];
+
+    /* Only handle messages that conflict with our address */
+    if (!maap_addr_conflicts(&m->acquired_addr, (eth_addr_t *)msg->req_start_addr))
+      continue;
+
+    switch (msg->msg_type) {
+    case maap_msg_type_probe:
+      /* Someone is probing our address — defend it if we own it */
+      if (m->state == maap_state_defend) {
+        avbinfo("MAAP: defending stream %d address against probe", i);
+        avb_send_maap_msg(state, maap_msg_type_defend,
+                          (eth_addr_t *)msg->req_start_addr, 1,
+                          &m->acquired_addr, 1);
+      } else if (m->state == maap_state_probe) {
+        /* We're also probing — lower MAC yields. Compare our MAC vs sender.
+         * For simplicity, restart with a new address. */
+        avbinfo("MAAP: probe conflict on stream %d, selecting new address", i);
+        maap_generate_addr(state, &m->acquired_addr, i);
+        m->probe_count = MAAP_PROBE_RETRANSMITS;
+        m->timer_expiry_us =
+            esp_timer_get_time() +
+            maap_jitter_us(MAAP_PROBE_INTERVAL_BASE_MS,
+                           MAAP_PROBE_INTERVAL_VAR_MS);
+        avb_send_maap_msg(state, maap_msg_type_probe, &m->acquired_addr, 1,
+                          NULL, 0);
+      }
+      break;
+
+    case maap_msg_type_defend:
+      /* Our probe was defended — pick a new address */
+      if (m->state == maap_state_probe) {
+        avbinfo("MAAP: probe defended on stream %d, selecting new address", i);
+        maap_generate_addr(state, &m->acquired_addr, i);
+        m->probe_count = MAAP_PROBE_RETRANSMITS;
+        m->timer_expiry_us =
+            esp_timer_get_time() +
+            maap_jitter_us(MAAP_PROBE_INTERVAL_BASE_MS,
+                           MAAP_PROBE_INTERVAL_VAR_MS);
+        avb_send_maap_msg(state, maap_msg_type_probe, &m->acquired_addr, 1,
+                          NULL, 0);
+      }
+      break;
+
+    case maap_msg_type_announce:
+      /* Conflicting announce — yield and restart with new address */
+      if (m->state == maap_state_defend) {
+        avbinfo("MAAP: conflicting announce on stream %d, restarting", i);
+        m->acquired = false;
+        maap_generate_addr(state, &m->acquired_addr, i);
+        m->state = maap_state_probe;
+        m->probe_count = MAAP_PROBE_RETRANSMITS;
+        m->timer_expiry_us =
+            esp_timer_get_time() +
+            maap_jitter_us(MAAP_PROBE_INTERVAL_BASE_MS,
+                           MAAP_PROBE_INTERVAL_VAR_MS);
+        avb_send_maap_msg(state, maap_msg_type_probe, &m->acquired_addr, 1,
+                          NULL, 0);
+      }
+      break;
+
+    default:
+      break;
+    }
+  }
   return OK;
 }
 

@@ -205,14 +205,8 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
              sizeof(avb_talker_stream_s));
       stream_id_from_mac(&state->internal_mac_addr,
                          state->output_streams[i].stream_id, i);
-      memcpy(&state->output_streams[i].stream_dest_addr, &MAAP_START_MAC_ADDR,
-             ETH_ADDR_LEN);
-      /* Derive a per-device unique multicast dest from the device MAC.
-       * MAAP range is 91:e0:f0:00:00:00–91:e0:f0:00:fd:ff (0xFE00 addresses).
-       * Use last two MAC bytes to spread devices across the range. */
-      uint8_t *dest = state->output_streams[i].stream_dest_addr;
-      dest[4] = state->internal_mac_addr[4];
-      dest[5] = state->internal_mac_addr[5] + i;
+      /* Stream dest addr will be set by MAAP after address acquisition */
+      memset(&state->output_streams[i].stream_dest_addr, 0, ETH_ADDR_LEN);
     }
   }
 
@@ -225,6 +219,11 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   // if valid PTP status
   if (ptpd_status(0, &ptp_status) == 0) {
     state->ptp_status = ptp_status;
+  }
+
+  // Initialize MAAP for output stream multicast address acquisition
+  if (config->talker) {
+    avb_maap_init(state);
   }
 
   // Set stop to false
@@ -319,12 +318,7 @@ static int avb_periodic_send(avb_state_s *state) {
                              state->output_streams[i].vlan_id);
       }
     }
-    clock_timespec_subtract(&time_now, &state->last_transmitted_maap_announce,
-                            &delta);
-    if (timespec_to_ms(&delta) > MAAP_ANNOUNCE_INTERVAL_MSEC) {
-      state->last_transmitted_maap_announce = time_now;
-      avb_send_maap_announce(state);
-    }
+    avb_maap_tick(state);
   }
 
   // Send MSRP listener message
