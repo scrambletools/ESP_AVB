@@ -204,7 +204,17 @@ int avb_send_maap_announce(avb_state_s *state) {
 /* Process received MSRP domain message */
 int avb_process_msrp_domain(avb_state_s *state, msrp_msgbuf_s *msg, int offset,
                             size_t length) {
-  // not implemented
+  msrp_domain_message_s domain;
+  memset(&domain, 0, sizeof(domain));
+  memcpy(&domain, &msg->messages_raw[offset], sizeof(msrp_domain_message_s));
+
+  uint16_t vid = octets_to_uint(domain.sr_class_vid, 2);
+  uint16_t our_vid = octets_to_uint(state->msrp_mappings[0].vlan_id, 2);
+
+  /* Log and validate — the network's SR class must match ours */
+  if (domain.sr_class_id == 6 && vid != our_vid) {
+    avberr("MSRP domain: network VLAN %d != our VLAN %d", vid, our_vid);
+  }
   return OK;
 }
 
@@ -248,10 +258,115 @@ int avb_process_msrp_talker(avb_state_s *state, msrp_msgbuf_s *msg_data,
   return OK;
 }
 
-/* Process received MSRP listener ready message */
+/* Find a connected listener by MAC address in a stream's listener list.
+ * Returns index or -1 if not found. */
+static int find_connected_listener(avb_talker_stream_s *stream,
+                                   eth_addr_t *mac_addr) {
+  uint16_t count = octets_to_uint(stream->connection_count, 2);
+  for (int i = 0; i < count && i < AVB_MAX_NUM_CONNECTED_LISTENERS; i++) {
+    if (memcmp(stream->connected_listeners[i].mac_addr, mac_addr,
+               ETH_ADDR_LEN) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/* Add a listener to a stream's connected_listeners list.
+ * Returns index of added entry, or -1 if full. */
+static int add_connected_listener(avb_talker_stream_s *stream,
+                                  eth_addr_t *mac_addr) {
+  uint16_t count = octets_to_uint(stream->connection_count, 2);
+  if (count >= AVB_MAX_NUM_CONNECTED_LISTENERS)
+    return -1;
+  memcpy(stream->connected_listeners[count].mac_addr, mac_addr, ETH_ADDR_LEN);
+  stream->connected_listeners[count].msrp_ready = true;
+  count++;
+  int_to_octets(&count, stream->connection_count, 2);
+  return count - 1;
+}
+
+/* Remove a listener from a stream's connected_listeners list by index. */
+static void remove_connected_listener(avb_talker_stream_s *stream, int index) {
+  uint16_t count = octets_to_uint(stream->connection_count, 2);
+  if (index < 0 || index >= count)
+    return;
+  /* Shift remaining entries down */
+  for (int i = index; i < count - 1; i++) {
+    stream->connected_listeners[i] = stream->connected_listeners[i + 1];
+  }
+  count--;
+  int_to_octets(&count, stream->connection_count, 2);
+  memset(&stream->connected_listeners[count], 0,
+         sizeof(stream->connected_listeners[0]));
+}
+
+/* Process received MSRP listener message.
+ * As a talker, this tells us a listener has declared ready/asking_failed
+ * for one of our streams. Drives streaming start/stop decisions. */
 int avb_process_msrp_listener(avb_state_s *state, msrp_msgbuf_s *msg,
-                              int offset, size_t length) {
-  // not implemented
+                              int offset, size_t length,
+                              eth_addr_t *src_addr) {
+  msrp_listener_message_s listener_msg;
+  memset(&listener_msg, 0, sizeof(listener_msg));
+  memcpy(&listener_msg, &msg->messages_raw[offset],
+         sizeof(msrp_listener_message_s));
+
+  /* Decode the MRP attribute event and listener declaration */
+  int attr_event = 0, unused1 = 0, unused2 = 0;
+  three_pe_to_int(listener_msg.event_decl_data[0].event, &attr_event, &unused1,
+                  &unused2);
+  uint8_t listener_decl = listener_msg.event_decl_data[1].declaration.event1;
+
+  /* Check if this listener declaration is for one of our output streams */
+  for (int i = 0; i < state->num_output_streams; i++) {
+    avb_talker_stream_s *stream = &state->output_streams[i];
+    if (memcmp(listener_msg.stream_id, stream->stream_id, UNIQUE_ID_LEN) != 0)
+      continue;
+
+    /* Listener leaving — remove and possibly stop streaming */
+    if (attr_event == mrp_attr_event_lv) {
+      int idx = find_connected_listener(stream, src_addr);
+      if (idx >= 0) {
+        avbinfo("MSRP: listener leaving stream %d", i);
+        remove_connected_listener(stream, idx);
+        uint16_t count = octets_to_uint(stream->connection_count, 2);
+        if (count == 0 && stream->streaming) {
+          avb_stop_stream_out(state, i);
+        }
+      }
+      return OK;
+    }
+
+    /* Listener ready — add if new and start streaming */
+    if (listener_decl == msrp_listener_event_ready) {
+      int idx = find_connected_listener(stream, src_addr);
+      if (idx < 0) {
+        /* New listener */
+        idx = add_connected_listener(stream, src_addr);
+        if (idx < 0) {
+          avberr("MSRP: connected_listeners full for stream %d", i);
+          return OK;
+        }
+        avbinfo("MSRP: listener ready for stream %d (count=%d)", i,
+                octets_to_uint(stream->connection_count, 2));
+        if (!stream->streaming) {
+          avb_start_stream_out(state, i);
+        }
+      }
+      /* Existing listener re-declaring — no action needed */
+      return OK;
+    }
+
+    /* Listener asking_failed or ready_failed — log only */
+    if (listener_decl == msrp_listener_event_asking_failed) {
+      avbinfo("MSRP: listener asking_failed for stream %d", i);
+    } else if (listener_decl == msrp_listener_event_ready_failed) {
+      avbinfo("MSRP: listener ready_failed for stream %d", i);
+    }
+    return OK;
+  }
+
   return OK;
 }
 
@@ -1702,7 +1817,7 @@ void avb_stop_stream_in(avb_state_s *state) {
  */
 int avb_start_stream_out(avb_state_s *state, uint16_t index) {
 
-  if (octets_to_uint(state->output_streams[index].connection_count, 2) > 0) {
+  if (state->output_streams[index].streaming) {
     avberr("Stream out %d is already active", index);
     return ERROR;
   }
@@ -1762,13 +1877,9 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
 
   // Clear stop flag and start the stream output task
   state->output_streams[index].stop_streaming = false;
+  state->output_streams[index].streaming = true;
   xTaskCreatePinnedToCore(avb_stream_out_task, "AVB-OUT", 8192, (void *)params,
                           configMAX_PRIORITIES - 1, NULL, 1);
-
-  // Update connection count
-  uint16_t count =
-      octets_to_uint(state->output_streams[index].connection_count, 2) + 1;
-  int_to_octets(&count, state->output_streams[index].connection_count, 2);
 
   avbinfo("Stream out %d started: %s -> AVTP %s", index,
           params->use_sine_wave ? "sine wave" : "mic input",
@@ -1779,8 +1890,7 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
 /* Stop the AVB stream output task */
 int avb_stop_stream_out(avb_state_s *state, uint16_t index) {
   state->output_streams[index].stop_streaming = true;
-  uint16_t count = 0;
-  int_to_octets(&count, state->output_streams[index].connection_count, 2);
+  state->output_streams[index].streaming = false;
   avbinfo("Stream out %d stopped", index);
   return OK;
 }

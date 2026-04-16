@@ -115,6 +115,7 @@ int avb_send_aecp_rsp_get_stream_info(avb_state_s *state,
     avb_talker_stream_s *s = &state->output_streams[index];
     aem_stream_info_flags_s flags = s->stream_info_flags;
     flags.stream_id_valid = memcmp(s->stream_id, zero_id, UNIQUE_ID_LEN) != 0;
+    flags.stream_format_valid = 1;
     flags.stream_dest_mac_valid =
         memcmp(s->stream_dest_addr, zero_mac, ETH_ADDR_LEN) != 0;
     flags.msrp_acc_lat_valid =
@@ -135,6 +136,7 @@ int avb_send_aecp_rsp_get_stream_info(avb_state_s *state,
     // input stream info
     avb_listener_stream_s *s = &state->input_streams[index];
     aem_stream_info_flags_s flags = s->stream_info_flags;
+    flags.stream_format_valid = 1;
     flags.stream_dest_mac_valid =
         memcmp(s->stream_dest_addr, zero_mac, ETH_ADDR_LEN) != 0;
     flags.msrp_acc_lat_valid =
@@ -2663,21 +2665,19 @@ int avb_process_acmp_connect_tx_command(avb_state_s *state, acmp_message_s *msg,
     return ERROR;
   }
   if (disconnect) {
-    ret = avb_stop_stream_out(state, talker_uid);
-  } else {
-    ret = avb_start_stream_out(state, talker_uid);
+    /* Disconnect: stop streaming as fallback if MSRP listener leave
+     * doesn't arrive. MSRP handler will also stop on listener leave. */
+    if (state->output_streams[talker_uid].streaming) {
+      avb_stop_stream_out(state, talker_uid);
+    }
   }
-  if (ret != OK) {
-    avberr("Failed to %s stream out", disconnect ? "stop" : "start");
-    avb_send_acmp_response(state, tx_response_type, msg,
-                           acmp_status_talker_misbehaving);
-  } else {
-    memcpy(msg->stream_id, state->output_streams[talker_uid].stream_id,
-           UNIQUE_ID_LEN);
-    memcpy(msg->stream_dest_addr,
-           state->output_streams[talker_uid].stream_dest_addr, ETH_ADDR_LEN);
-    avb_send_acmp_response(state, tx_response_type, msg, acmp_status_success);
-  }
+  /* Streaming is now driven by MSRP Listener Ready, not ACMP.
+   * Respond with stream info so the listener can do MSRP registration. */
+  memcpy(msg->stream_id, state->output_streams[talker_uid].stream_id,
+         UNIQUE_ID_LEN);
+  memcpy(msg->stream_dest_addr,
+         state->output_streams[talker_uid].stream_dest_addr, ETH_ADDR_LEN);
+  avb_send_acmp_response(state, tx_response_type, msg, acmp_status_success);
   return ret;
 }
 

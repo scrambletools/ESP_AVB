@@ -2190,9 +2190,13 @@ typedef struct {
   uint8_t msrp_failure_code[2];              // msrp failure code
   uint8_t connection_count[2];               // number of connected listeners
   volatile bool stop_streaming;              // cross-core stop signal
-  identity_pair_t
-      connected_listeners[AVB_MAX_NUM_CONNECTED_LISTENERS]; // list of connected
-                                                            // listeners
+  bool streaming;                            // true when stream_out_task running
+  struct {
+    eth_addr_t mac_addr;     // from MSRP source
+    identity_pair_t identity; // from ACMP connect_tx
+    bool msrp_ready;         // MSRP listener declared ready
+    bool acmp_connected;     // ACMP connect_tx received
+  } connected_listeners[AVB_MAX_NUM_CONNECTED_LISTENERS];
 } avb_talker_stream_s;
 
 /* ATDECC command message union */
@@ -2499,7 +2503,8 @@ int avb_process_msrp_talker(avb_state_s *state, msrp_msgbuf_s *msg, int offset,
                             size_t length, bool is_failed,
                             eth_addr_t *src_addr);
 int avb_process_msrp_listener(avb_state_s *state, msrp_msgbuf_s *msg,
-                              int offset, size_t length);
+                              int offset, size_t length,
+                              eth_addr_t *src_addr);
 
 /* AVTP processing functions */
 int avb_process_iec_61883(avb_state_s *state, iec_61883_6_message_s *msg);

@@ -487,7 +487,7 @@ static int avb_process_rx_message(avb_state_s *state, int protocol_idx,
         avb_process_msrp_talker(state, msg, offset, attr_size, true, &src_addr);
         break;
       case msrp_attr_type_listener:
-        avb_process_msrp_listener(state, msg, offset, attr_size);
+        avb_process_msrp_listener(state, msg, offset, attr_size, &src_addr);
         break;
       default:
         avbinfo("Ignoring unknown MSRP message atribute type: 0x%02x",
