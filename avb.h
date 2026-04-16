@@ -151,15 +151,15 @@
 
 /* Descriptor name indices for state->descriptor_names[] */
 typedef enum {
-  AVB_NAME_ENTITY = 0,        // entity_name (name_index 0)
-  AVB_NAME_GROUP,             // group_name (name_index 1)
+  AVB_NAME_ENTITY = 0, // entity_name (name_index 0)
+  AVB_NAME_GROUP,      // group_name (name_index 1)
   AVB_NAME_AVB_INTERFACE,
-  AVB_NAME_CONTROL_0,         // IDENTIFY
-  AVB_NAME_CONTROL_1,         // Speaker Volume
-  AVB_NAME_CONTROL_2,         // Mic Gain
+  AVB_NAME_CONTROL_0, // IDENTIFY
+  AVB_NAME_CONTROL_1, // Speaker Volume
+  AVB_NAME_CONTROL_2, // Mic Gain
   AVB_NAME_STREAM_INPUT_0,
   AVB_NAME_STREAM_OUTPUT_0,
-  AVB_NAME_COUNT              // total number of settable names
+  AVB_NAME_COUNT // total number of settable names
 } avb_name_index_t;
 
 /* Persistent data saved to NVS flash.
@@ -349,7 +349,7 @@ typedef enum {
   aecp_cmd_code_read_descriptor = 0x0004,
   aecp_cmd_code_get_configuration = 0x0007,
   aecp_cmd_code_set_stream_format = 0x0008,
-  aecp_cmd_code_get_stream_format = 0x0009, // unsupported
+  aecp_cmd_code_get_stream_format = 0x0009,
   aecp_cmd_code_get_stream_info = 0x000f,
   aecp_cmd_code_set_name = 0x0010,
   aecp_cmd_code_get_name = 0x0011,
@@ -1520,7 +1520,7 @@ typedef struct {
 } aecp_get_as_path_s;          // 28 bytes
 
 /* AECP get AS path response */
-#define AECP_MAX_AS_PATH_COUNT 2
+#define AECP_MAX_AS_PATH_COUNT 7
 typedef struct {
   aecp_common_s common;
   aecp_common_aem_s aem;
@@ -2189,6 +2189,7 @@ typedef struct {
   uint8_t msrp_accumulated_latency[4];       // msrp accumulated latency
   uint8_t msrp_failure_code[2];              // msrp failure code
   uint8_t connection_count[2];               // number of connected listeners
+  volatile bool stop_streaming;              // cross-core stop signal
   identity_pair_t
       connected_listeners[AVB_MAX_NUM_CONNECTED_LISTENERS]; // list of connected
                                                             // listeners
@@ -2282,10 +2283,10 @@ typedef struct {
   const void *codec_if;        // codec interface (audio_codec_if_t *)
 
   /* AECP control values */
-  codec_control_range_s codec_ranges; // codec-specific control ranges
-  uint8_t ctrl_identify;       // IDENTIFY control (0=off, 255=on)
-  float ctrl_speaker_vol;      // speaker volume in dB
-  float ctrl_mic_gain;         // mic gain in dB
+  codec_control_range_s codec_ranges;        // codec-specific control ranges
+  uint8_t ctrl_identify;                     // IDENTIFY control (0=off, 255=on)
+  float ctrl_speaker_vol;                    // speaker volume in dB
+  float ctrl_mic_gain;                       // mic gain in dB
   char descriptor_names[AVB_NAME_COUNT][64]; // user-settable descriptor names
   avb_persistent_data_s persist;             // persistent data (saved to NVS)
 
@@ -2536,6 +2537,12 @@ int avb_process_aecp_cmd_read_descriptor(avb_state_s *state,
 int avb_process_aecp_cmd_set_stream_format(avb_state_s *state,
                                            aecp_message_u *msg,
                                            eth_addr_t *src_addr);
+int avb_process_aecp_cmd_get_stream_format(avb_state_s *state,
+                                           aecp_message_u *msg,
+                                           eth_addr_t *src_addr);
+int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
+                                          aecp_message_u *msg,
+                                          eth_addr_t *src_addr);
 int avb_process_aecp_cmd_get_stream_info(avb_state_s *state,
                                          aecp_message_u *msg,
                                          eth_addr_t *src_addr);

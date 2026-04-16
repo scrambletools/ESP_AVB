@@ -23,7 +23,7 @@ int avb_send_adp_entity_available(avb_state_s *state) {
   msg.header.subtype = avtp_subtype_adp;
   msg.header.msg_type = adp_msg_type_entity_available;
   msg.header.version = 0;
-  msg.header.status_valtime = 8; // valid time: 16 seconds
+  msg.header.status_valtime = 10; // valid time: 20 seconds (Milan v1.3)
   msg.header.control_data_len = body_size;
   memcpy(&msg.entity, &state->own_entity.summary, sizeof(avb_entity_summary_s));
   memcpy(msg.gptp_gm_id, state->ptp_status.clock_source_info.gm_id, 8);
@@ -38,11 +38,7 @@ int avb_send_adp_entity_available(avb_state_s *state) {
   }
   // Increment available index
   uint32_t index = octets_to_uint(state->own_entity.summary.available_index, 4);
-  if (index < 9999) {
-    index++;
-  } else {
-    index = 0;
-  }
+  index++;
   int_to_octets(&index, state->own_entity.summary.available_index, 4);
   return ret;
 }
@@ -485,7 +481,7 @@ int avb_send_aecp_rsp_read_descr_stream(avb_state_s *state,
 /* Update AVB interface descriptor with current PTP status */
 void avb_update_avb_interface_from_ptp(avb_state_s *state) {
   memcpy(state->avb_interface.clock_identity,
-         state->ptp_status.clock_source_info.id, sizeof(unique_id_t));
+         state->ptp_status.own_identity_info.id, sizeof(unique_id_t));
   state->avb_interface.priority1 =
       state->ptp_status.clock_source_info.priority1;
   state->avb_interface.clock_class =
@@ -1610,6 +1606,12 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
     case aecp_cmd_code_set_stream_format:
       return avb_process_aecp_cmd_set_stream_format(state, msg, src_addr);
       break;
+    case aecp_cmd_code_get_stream_format:
+      return avb_process_aecp_cmd_get_stream_format(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_clock_source:
+      return avb_process_aecp_cmd_get_clock_source(state, msg, src_addr);
+      break;
     case aecp_cmd_code_get_stream_info:
       return avb_process_aecp_cmd_get_stream_info(state, msg, src_addr);
       break;
@@ -2010,6 +2012,71 @@ int avb_process_aecp_cmd_set_stream_format(avb_state_s *state,
                                              src_addr);
 }
 
+/* Process AECP command get stream format */
+int avb_process_aecp_cmd_get_stream_format(avb_state_s *state,
+                                           aecp_message_u *msg,
+                                           eth_addr_t *src_addr) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0) {
+    return OK;
+  }
+
+  uint16_t descriptor_type =
+      octets_to_uint(msg->stream_format.descriptor_type, 2);
+  if (descriptor_type != aem_desc_type_stream_input &&
+      descriptor_type != aem_desc_type_stream_output) {
+    return ERROR;
+  }
+
+  uint16_t index = octets_to_uint(msg->stream_format.descriptor_index, 2);
+  bool is_output = descriptor_type == aem_desc_type_stream_output;
+  if ((is_output && index >= state->num_output_streams) ||
+      (!is_output && index >= state->num_input_streams)) {
+    return ERROR;
+  }
+
+  // fill in the current stream format
+  avtp_stream_format_s *fmt = is_output
+                                  ? &state->output_streams[index].stream_format
+                                  : &state->input_streams[index].stream_format;
+  memcpy(&msg->stream_format.stream_format, fmt, sizeof(avtp_stream_format_s));
+
+  return avb_send_aecp_rsp_set_stream_format(state, &msg->stream_format,
+                                             src_addr);
+}
+
+/* Process AECP command get clock source (IEEE 1722.1 §7.4.12) */
+int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
+                                          aecp_message_u *msg,
+                                          eth_addr_t *src_addr) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0) {
+    return OK;
+  }
+
+  struct timespec ts;
+  aecp_aem_short_s *cmd = (aecp_aem_short_s *)msg;
+
+  /* Response: descriptor_type + descriptor_index + clock_source_index (2 bytes).
+   * We have a single clock source at index 0. */
+  uint8_t *clock_source_index = (uint8_t *)cmd + sizeof(aecp_aem_short_s);
+  clock_source_index[0] = 0;
+  clock_source_index[1] = 0;
+
+  cmd->common.header.msg_type = aecp_msg_type_aem_response;
+  uint16_t control_data_len =
+      sizeof(aecp_aem_short_s) + 2 - AVTP_CDL_PREAMBLE_LEN;
+  cmd->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
+  cmd->common.header.control_data_len = control_data_len & 0xFF;
+  uint16_t msg_len = sizeof(aecp_aem_short_s) + 2;
+
+  int ret = avb_net_send_to(state, ethertype_avtp, cmd, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP GET_CLOCK_SOURCE response failed: %d", errno);
+  }
+  return ret;
+}
+
 /* Process AECP command get stream info */
 int avb_process_aecp_cmd_get_stream_info(avb_state_s *state,
                                          aecp_message_u *msg,
@@ -2135,15 +2202,26 @@ int avb_send_aecp_rsp_get_as_path(avb_state_s *state, aecp_get_as_path_s *msg,
   memcpy(&response, msg, sizeof(aecp_get_as_path_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
 
-  // build path sequence: grandmaster -> this entity
+  // build path sequence: grandmaster -> [intermediate clocks] -> this entity
   uint16_t count = 0;
   if (state->ptp_status.clock_source_valid) {
+    // add grandmaster clock identity
     memcpy(&response.path_sequence[count],
            state->ptp_status.clock_source_info.gm_id, UNIQUE_ID_LEN);
     count++;
+    // if the selected source is not the grandmaster (i.e. an intermediate
+    // boundary clock like the AVB switch), add it to the path
+    if (memcmp(state->ptp_status.clock_source_info.id,
+               state->ptp_status.clock_source_info.gm_id,
+               UNIQUE_ID_LEN) != 0) {
+      memcpy(&response.path_sequence[count],
+             state->ptp_status.clock_source_info.id, UNIQUE_ID_LEN);
+      count++;
+    }
   }
-  memcpy(&response.path_sequence[count], state->ptp_status.clock_source_info.id,
-         UNIQUE_ID_LEN);
+  // always end with this entity's own clock identity
+  memcpy(&response.path_sequence[count],
+         state->ptp_status.own_identity_info.id, UNIQUE_ID_LEN);
   count++;
   int_to_octets(&count, response.count, 2);
 
@@ -2568,12 +2646,12 @@ int avb_process_acmp_connect_tx_command(avb_state_s *state, acmp_message_s *msg,
                                          ? acmp_msg_type_disconnect_tx_response
                                          : acmp_msg_type_connect_tx_response;
 
-  // check if listener is valid
-  uint16_t listener_uid = octets_to_uint(msg->listener_uid, 2);
-  if (!avb_valid_talker_listener_uid(state, listener_uid,
-                                     avb_entity_type_listener)) {
+  // validate talker UID refers to one of our output streams
+  uint16_t talker_uid = octets_to_uint(msg->talker_uid, 2);
+  if (!avb_valid_talker_listener_uid(state, talker_uid,
+                                     avb_entity_type_talker)) {
     avb_send_acmp_response(state, tx_response_type, msg,
-                           acmp_status_listener_unknown_id);
+                           acmp_status_talker_unknown_id);
     return ERROR;
   }
 
@@ -2584,8 +2662,6 @@ int avb_process_acmp_connect_tx_command(avb_state_s *state, acmp_message_s *msg,
                            acmp_status_controller_not_authorized);
     return ERROR;
   }
-
-  uint16_t talker_uid = octets_to_uint(msg->talker_uid, 2);
   if (disconnect) {
     ret = avb_stop_stream_out(state, talker_uid);
   } else {
@@ -2744,47 +2820,11 @@ int avb_process_acmp_get_tx_state_command(avb_state_s *state,
                                 &response, acmp_status_success);
 }
 
-/* Process ACMP get tx connection command */
+/* Process ACMP get tx connection command — not supported (Milan v1.3 5.5.4.4) */
 int avb_process_acmp_get_tx_connection_command(avb_state_s *state,
                                                acmp_message_s *msg, bool tx) {
-  uint16_t talker_uid = octets_to_uint(msg->talker_uid, 2);
-
-  // validate talker UID
-  if (!avb_valid_talker_listener_uid(state, talker_uid,
-                                     avb_entity_type_talker)) {
-    avb_send_acmp_response(state, acmp_msg_type_get_tx_connection_response, msg,
-                           acmp_status_talker_unknown_id);
-    return ERROR;
-  }
-
-  avb_talker_stream_s *stream = &state->output_streams[talker_uid];
-
-  // the connection_count field in the command is used as the connection index
-  uint16_t conn_index = octets_to_uint(msg->connection_count, 2);
-  uint16_t num_connections = octets_to_uint(stream->connection_count, 2);
-
-  // check if the requested connection index exists
-  if (conn_index >= num_connections) {
-    avb_send_acmp_response(state, acmp_msg_type_get_tx_connection_response, msg,
-                           acmp_status_no_such_connection);
-    return ERROR;
-  }
-
-  // build response with the connected listener's identity
-  acmp_message_s response = {0};
-  memcpy(&response, msg, sizeof(acmp_message_s));
-
-  identity_pair_t *listener = &stream->connected_listeners[conn_index];
-  memcpy(&response.listener_entity_id, &listener->id, UNIQUE_ID_LEN);
-  memcpy(&response.listener_uid, &listener->uid, 2);
-  memcpy(&response.stream_id, &stream->stream_id, UNIQUE_ID_LEN);
-  memcpy(&response.stream_dest_addr, &stream->stream_dest_addr,
-         sizeof(eth_addr_t));
-  memcpy(&response.stream_vlan_id, &stream->vlan_id, 2);
-  memcpy(&response.connection_count, &stream->connection_count, 2);
-
   return avb_send_acmp_response(state, acmp_msg_type_get_tx_connection_response,
-                                &response, acmp_status_success);
+                                msg, acmp_status_not_supported);
 }
 
 /* Find an entity in the known list of talkers, listeners, or controllers */

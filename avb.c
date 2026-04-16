@@ -49,9 +49,11 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   memset(&entity_caps, 0, sizeof(avb_entity_cap_s));
   entity_caps.gptp_supported = true;
   entity_caps.class_a = true;
-  entity_caps.class_b = true;
+  entity_caps.class_b = false;
   entity_caps.aem_supported = true;
   entity_caps.aem_config_index_valid = true;
+  entity_caps.aem_identify_control_index_valid = true;
+  entity_caps.vendor_unique_supported = true;
   entity_caps.address_access_supported = true;
   memcpy(&state->own_entity.summary.entity_capabilities, &entity_caps,
          sizeof(avb_entity_cap_s));
@@ -609,17 +611,14 @@ static void avb_task(void *task_param) {
       avb_process_rx_message(state, protocol_idx, ret);
     }
 
-    if (state->config.listener || state->config.talker) {
-      // Get PTP status
-      struct timespec time_now;
-      struct timespec delta;
-      clock_gettime(CLOCK_MONOTONIC, &time_now);
-      clock_timespec_subtract(&time_now, &state->last_ptp_status_update,
-                              &delta);
-      if (timespec_to_ms(&delta) > PTP_STATUS_UPDATE_INTERVAL_MSEC) {
-        state->last_ptp_status_update = time_now;
-        avb_update_ptp_status(state);
-      }
+    // Get PTP status (needed for ADP and AECP responses, not just streaming)
+    struct timespec time_now;
+    struct timespec delta;
+    clock_gettime(CLOCK_MONOTONIC, &time_now);
+    clock_timespec_subtract(&time_now, &state->last_ptp_status_update, &delta);
+    if (timespec_to_ms(&delta) > PTP_STATUS_UPDATE_INTERVAL_MSEC) {
+      state->last_ptp_status_update = time_now;
+      avb_update_ptp_status(state);
     }
 
     // Send periodic messages such as announcing entity available, etc

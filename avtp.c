@@ -74,7 +74,7 @@ int avb_send_msrp_domain(avb_state_s *state, mrp_attr_event_t attr_event,
   msg.header.vechead_num_vals = 1;
   msg.sr_class_id = 6;       // class A
   msg.sr_class_priority = 3; // priority 3 for class A
-  int_to_octets(&vlan_id, msg.sr_class_vid, vlan_id);
+  int_to_octets(&vlan_id, msg.sr_class_vid, sizeof(msg.sr_class_vid));
   msg.attr_event[0] = int_to_3pe(attr_event, 0, 0);
 
   // Create an MSRP message buffer
@@ -991,9 +991,19 @@ static void avb_stream_out_task(void *task_param) {
   uint32_t overrun_count = 0;
   int64_t overrun_max = 0;
   uint32_t send_fail_count = 0;
-  bool mcr_cleared = false;
   uint32_t i2s_zero_reads = 0;    /* reads that returned 0 bytes */
   uint32_t i2s_nonzero_audio = 0; /* reads with non-zero audio data */
+
+  /* gPTP discontinuity detection — mr and tu bit management.
+   * mr toggles on media clock restart, tu=1 on gPTP GM change.
+   * Both held for MCR_HOLD_PACKETS after the event. */
+#define MCR_HOLD_PACKETS 8
+  uint8_t last_gm_id[8];
+  memcpy(last_gm_id, state->ptp_status.clock_source_info.gm_id, 8);
+  bool mr_state = true;         /* starts toggled (first packet = restart) */
+  int mcr_hold_remaining = MCR_HOLD_PACKETS;
+  bool tu_active = false;
+  int tu_hold_remaining = 0;
 
 /* I2S RX local ring — absorbs DMA buffer timing mismatch.
  * Read larger chunks when available, consume i2s_read_size per packet. */
@@ -1065,9 +1075,7 @@ static void avb_stream_out_task(void *task_param) {
     }
   }
 
-  while (octets_to_uint(
-             state->output_streams[params->stream_index].connection_count, 2) >
-         0) {
+  while (!state->output_streams[params->stream_index].stop_streaming) {
     /* Busy-wait until next send time */
     while (esp_timer_get_time() < next_send_time) {
     }
@@ -1091,13 +1099,31 @@ static void avb_stream_out_task(void *task_param) {
     pll_frac_accum -= (int64_t)correction_ns << PLL_FP_SHIFT;
     avtp_media_ts += (uint32_t)((int32_t)avtp_ts_increment + correction_ns);
 
-    /* Update per-packet fields in tx_frame */
-    avtp[1] = mcr_cleared ? 0x81 : 0x89; /* sv=1, tv=1, mr=1 on first pkt */
-    if (!mcr_cleared) {
-      avtp[1] = 0x89;
-      mcr_cleared = true;
-    } else {
-      avtp[1] = 0x81;
+    /* Check for gPTP grandmaster change every ~1 second (8000 packets at 125us) */
+    if ((loop_count & 0x1FFF) == 0 && loop_count > 0) {
+      if (memcmp(last_gm_id, state->ptp_status.clock_source_info.gm_id, 8) != 0) {
+        memcpy(last_gm_id, state->ptp_status.clock_source_info.gm_id, 8);
+        mr_state = !mr_state;
+        mcr_hold_remaining = MCR_HOLD_PACKETS;
+        tu_active = true;
+        tu_hold_remaining = MCR_HOLD_PACKETS;
+      }
+    }
+
+    /* Update per-packet fields in tx_frame.
+     * sv=1 always, tv=1 always, mr per state, tu per gPTP status. */
+    uint8_t hdr1 = 0x81; /* sv=1, version=0, mr=0, tv=1 */
+    if (mcr_hold_remaining > 0) {
+      if (mr_state)
+        hdr1 |= 0x08; /* mr=1 */
+      mcr_hold_remaining--;
+    }
+    avtp[1] = hdr1;
+    avtp[3] = tu_active ? 0x01 : 0x00;
+    if (tu_hold_remaining > 0) {
+      tu_hold_remaining--;
+      if (tu_hold_remaining == 0)
+        tu_active = false;
     }
     avtp[2] = seq_num++;
     uint32_t presentation_ts = avtp_media_ts + (is_am824 ? 2000000 : 4000000);
@@ -1352,6 +1378,9 @@ typedef struct {
   uint32_t drain_count;
   uint32_t drain_underrun; /* drain found ring empty */
   uint32_t stream_id_mismatch; /* packets dropped due to wrong stream_id */
+  uint32_t seq_num_mismatch;   /* sequence number gaps detected */
+  uint8_t last_seq_num;        /* last received sequence number */
+  bool seq_num_valid;          /* false until first packet received */
   /* first-packet snapshot (written by handler, printed by main loop) */
   uint8_t diag_subtype;
   uint16_t diag_sdl;
@@ -1403,6 +1432,16 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *ctx) {
     c->stream_id_mismatch++;
     return;
   }
+
+  /* Track sequence number gaps (avtp_data[2] = sequence_num) */
+  uint8_t seq_num = avtp_data[2];
+  if (c->seq_num_valid) {
+    uint8_t expected = c->last_seq_num + 1;
+    if (seq_num != expected)
+      c->seq_num_mismatch++;
+  }
+  c->last_seq_num = seq_num;
+  c->seq_num_valid = true;
 
   uint8_t subtype = avtp_data[0] & 0x7F;
   uint8_t *pcm_data = NULL;
@@ -1518,11 +1557,11 @@ void avb_stream_in_print_diag(void) {
     return;
   c->diag_captured = 2;
   avbinfo("STREAM: ok=%lu rfail=%lu drain=%lu underrun=%lu fill=%lu "
-          "id_skip=%lu sub=%d sdl=%d ch=%d samp=%d i2s=%d "
+          "id_skip=%lu seq_gap=%lu sub=%d sdl=%d ch=%d samp=%d i2s=%d "
           "audio=[%02x %02x %02x %02x %02x %02x %02x %02x]",
           c->ring_write_ok, c->ring_write_fail, c->drain_count,
           c->drain_underrun, ring_readable(&c->ring),
-          c->stream_id_mismatch, c->diag_subtype,
+          c->stream_id_mismatch, c->seq_num_mismatch, c->diag_subtype,
           c->diag_sdl, c->diag_channels, c->diag_samples, c->diag_i2s_bytes,
           c->diag_first_audio[0], c->diag_first_audio[1],
           c->diag_first_audio[2], c->diag_first_audio[3],
@@ -1721,7 +1760,8 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
   params->buffer_size =
       params->samples_per_packet * params->channels * bytes_per_sample;
 
-  // Start the stream output task
+  // Clear stop flag and start the stream output task
+  state->output_streams[index].stop_streaming = false;
   xTaskCreatePinnedToCore(avb_stream_out_task, "AVB-OUT", 8192, (void *)params,
                           configMAX_PRIORITIES - 1, NULL, 1);
 
@@ -1738,7 +1778,7 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
 
 /* Stop the AVB stream output task */
 int avb_stop_stream_out(avb_state_s *state, uint16_t index) {
-  // Reset connection count to signal task should stop
+  state->output_streams[index].stop_streaming = true;
   uint16_t count = 0;
   int_to_octets(&count, state->output_streams[index].connection_count, 2);
   avbinfo("Stream out %d stopped", index);
