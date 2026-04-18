@@ -1637,9 +1637,18 @@ err:
  * recompilation. Packet duration and byte count are bounded per-slot
  * rather than hard-coded so multi-sample-rate or larger-packet formats
  * work too. */
-#define AAF_MAX_PACKET_SAMPLES 64  /* generous upper bound for any AAF fmt */
+/* Upper bound on samples per AAF packet after listener downmix to
+ * stereo. Class B at 96 kHz = 96 samples/packet (1 ms × 96 kHz); Class
+ * A at 192 kHz = 24. We size the queue slots for the worst of the
+ * rates we currently test with. Bump this if 192 kHz Class B streams
+ * (192 sa/packet) ever need to be accepted — at the cost of queue
+ * memory (queue_capacity × max_packet_bytes of SRAM). */
+#define AAF_MAX_PACKET_SAMPLES 96
 #define AAF_MAX_PACKET_BYTES   (AAF_MAX_PACKET_SAMPLES * 2 /*ch*/ * 3 /*bytes*/)
-#define AAF_DEFAULT_PACKET_DURATION_NS 125000 /* 6 sa @ 48 kHz — updated runtime */
+/* Class A 48 kHz default used as the seed before the first packet is
+ * parsed. The stream RX handler overwrites both packet_duration_ns and
+ * packet_bytes with values derived from the packet header. */
+#define AAF_DEFAULT_PACKET_DURATION_NS 125000
 
 /* Queue depth: covers Class B's 50 ms of in-flight presentation offset
  * at the worst-case AAF packet rate (8000 pps for 6-sample frames).
@@ -1705,7 +1714,8 @@ typedef struct {
   /* Format-derived runtime constants (updated on first packet so the drain
    * stays class- and format-agnostic). */
   uint32_t packet_duration_ns;
-  uint16_t packet_bytes;   /* stereo 24-bit bytes per packet */
+  uint16_t packet_bytes;     /* stereo 24-bit bytes per packet */
+  uint32_t nominal_sample_rate; /* Hz, decoded from AAF/CIP header */
   /* Presentation-time anchoring (Milan §5.3/§7.3). The drain holds off
    * until the queue has accumulated startup_fill_target packets — that
    * fill depth then becomes the listener-internal delay, giving a
@@ -2133,14 +2143,37 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *arg) {
         ((uint32_t)avtp_data[12] << 24) | ((uint32_t)avtp_data[13] << 16) |
         ((uint32_t)avtp_data[14] << 8) | (uint32_t)avtp_data[15];
 
-    /* Refine the drain scheduler's packet-duration window based on the
-     * actual packet format we're receiving (class A/B and other AAF
-     * sample counts work without recompilation; assumes 48 kHz). */
+    /* Derive packet timing from the packet's own header fields so class
+     * (A/B) and sample rate (44.1/48/96/…) are picked up at runtime
+     * without recompilation. AAF packets carry a 4-bit sample_rate
+     * enum in the header; IEC 61883-6 carries a CIP SFC code in its
+     * data block header — both decode via helpers below. */
+    uint32_t stream_rate_hz = 0;
+    if (subtype == avtp_subtype_aaf) {
+      aaf_pcm_message_s *aaf_msg = (aaf_pcm_message_s *)avtp_data;
+      stream_rate_hz = aaf_code_to_sample_rate(aaf_msg->sample_rate);
+    } else if (subtype == avtp_subtype_61883) {
+      iec_61883_6_message_s *iec_msg = (iec_61883_6_message_s *)avtp_data;
+      uint8_t sfc = iec_msg->stream_data[4] & 0x07;
+      stream_rate_hz = cip_sfc_to_sample_rate(sfc);
+    }
+    /* Fall back to the listener's configured DAC rate if the stream
+     * header didn't decode cleanly (user-defined rate, etc.). */
+    if (stream_rate_hz == 0 && ctx->state) {
+      stream_rate_hz = ctx->state->media_clock.listener_sample_rate;
+    }
+
     uint16_t actual_bytes = (uint16_t)offset;
-    if (ctx->packet_bytes != actual_bytes) {
+    uint32_t duration_ns =
+        stream_rate_hz > 0
+            ? (uint32_t)((uint64_t)samples * 1000000000ULL / stream_rate_hz)
+            : AAF_DEFAULT_PACKET_DURATION_NS;
+    if (ctx->packet_bytes != actual_bytes ||
+        ctx->packet_duration_ns != duration_ns ||
+        ctx->nominal_sample_rate != stream_rate_hz) {
       ctx->packet_bytes = actual_bytes;
-      ctx->packet_duration_ns =
-          (uint32_t)((uint64_t)samples * 1000000000ULL / 48000ULL);
+      ctx->packet_duration_ns = duration_ns;
+      ctx->nominal_sample_rate = stream_rate_hz;
     }
 
     if (!aaf_queue_push(&ctx->queue, avtp_timestamp, packet_pcm,
@@ -2179,11 +2212,17 @@ void avb_stream_in_print_diag(void) {
    * Tear down the drain_enabled flag so that a resumption of traffic
    * re-runs the startup fill, re-anchors, and increments
    * media_locked_count again. */
-  const int64_t UNLOCK_TIMEOUT_US = 125000; /* 10× Class A packet period */
+  /* Timeout scales with the observed packet cadence so Class B (1 ms
+   * packets) doesn't trip it spuriously and Class A (125 µs) still
+   * unlocks within a few ms of silence. Minimum 10 ms floor so even
+   * very-fast cadences don't oscillate on single missed packets. */
+  int64_t unlock_timeout_us = (int64_t)ctx->packet_duration_ns / 1000 * 100;
+  if (unlock_timeout_us < 10000)
+    unlock_timeout_us = 10000;
   if (ctx->ever_locked &&
       atomic_load_explicit(&ctx->drain_enabled, memory_order_acquire) &&
       ctx->last_packet_us > 0 &&
-      (esp_timer_get_time() - ctx->last_packet_us) > UNLOCK_TIMEOUT_US) {
+      (esp_timer_get_time() - ctx->last_packet_us) > unlock_timeout_us) {
     atomic_store_explicit(&ctx->drain_enabled, false, memory_order_release);
     ctx->drain_enabled_logged = false;
     ctx->media_unlocked_count++;
@@ -2360,13 +2399,24 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   memcpy(ctx->expected_stream_id, state->input_streams[index].stream_id,
          UNIQUE_ID_LEN);
 
-  /* Packet queue starts empty; packet_bytes/duration are filled in by
-   * the first received packet. Seed them with the Class A default so a
-   * sensible value is available before the first packet arrives. */
+  /* Packet queue starts empty; packet_bytes/duration/rate are filled in
+   * by the first received packet. Seed them with a Class A 48 kHz default
+   * so a sensible value is available before any packet arrives; the RX
+   * handler updates to the real rate/class as soon as the first header
+   * is parsed. */
   atomic_store(&ctx->queue.head, 0);
   atomic_store(&ctx->queue.tail, 0);
-  ctx->packet_bytes = 6 /*samples*/ * 2 /*ch*/ * 3 /*bytes*/;
-  ctx->packet_duration_ns = AAF_DEFAULT_PACKET_DURATION_NS;
+  uint32_t default_rate = state->media_clock.listener_sample_rate;
+  if (default_rate == 0)
+    default_rate = 48000; /* guaranteed fallback */
+  ctx->nominal_sample_rate = default_rate;
+  /* 125 µs of audio at the configured rate — the Class A default */
+  uint32_t default_samples = default_rate / 8000;
+  if (default_samples == 0)
+    default_samples = 6;
+  ctx->packet_bytes = (uint16_t)(default_samples * 2u * 3u);
+  ctx->packet_duration_ns =
+      (uint32_t)((uint64_t)default_samples * 1000000000ULL / default_rate);
 
   /* Presentation-time anchor: wait until the queue has buffered enough
    * packets to cover the max_transit_time the SRP reservation carries

@@ -145,10 +145,12 @@ static struct {
   int32_t integrator_ppm_q16;  /* accumulated bias that P-term can't see */
 } s_pll;
 
-/* Nominal byte-rate of the stream we're measuring: 48000 frames × 2 ch ×
- * 3 bytes/sample after listener downmix. TODO: make this a runtime value
- * when we support rates other than 48 kHz. */
-#define AVB_PLL_NOMINAL_BYTERATE 288000
+/* Nominal listener byte-rate. Set by avbcodec.c at I2S init time to
+ * listener_sample_rate × 2 ch × 3 B/frame and stored in media_clock so
+ * any configured sample rate (44.1 kHz / 48 kHz / 96 kHz / …) works
+ * without a recompile. Fallback = 48 kHz × 2 × 3 if the field wasn't
+ * set (shouldn't happen in normal init). */
+#define AVB_PLL_FALLBACK_BYTERATE 288000u
 
 /* Minimum absolute correction to apply — avoid wearing on the APLL
  * coefficient for sub-ppm noise. */
@@ -250,10 +252,23 @@ static bool read_crf_anchor(avb_state_s *state, uint64_t *ts_out,
   return false;
 }
 
-/* Sample the time / byte-count pair the PLL will compare against. Uses
- * the CRF anchor (Milan §7.2 media-clock reference) when a recent CRF
- * PDU is available, otherwise falls back to local gPTP + current
- * bytes — useful for non-Milan AAF-only streams. */
+/* Clock source indices advertised in our CLOCK_DOMAIN descriptor.
+ * Mirrors atdecc.c avb_send_aecp_rsp_read_descr_clock_source ordering:
+ *   0 = INTERNAL — gPTP wall-clock is the media clock reference
+ *   1 = CRF INPUT STREAM — talker-stamped CRF PDUs drive the PLL */
+#define AVB_CLOCK_SOURCE_INTERNAL 0
+#define AVB_CLOCK_SOURCE_CRF_INPUT 1
+
+/* Sample the time / byte-count pair the PLL will compare against.
+ * Dispatches on the active CLOCK_SOURCE that AECP SET_CLOCK_SOURCE
+ * selected:
+ *   - INTERNAL: use local gPTP + current i2s_bytes_written. Works
+ *     for any Milan-compliant talker and for non-Milan AAF streams
+ *     that don't ship a CRF.
+ *   - CRF INPUT: use the CRF-anchor pair only. If no fresh CRF PDU
+ *     has arrived (anchor stale or missing), skip this PLL tick —
+ *     Milan §7.2 requires the media clock to follow the CRF stream
+ *     when CRF is the selected source, not silently revert to gPTP. */
 static bool read_sample(avb_state_s *state, uint64_t *bytes_out,
                         uint64_t *gptp_ns_out) {
   struct timespec gptp;
@@ -262,16 +277,21 @@ static bool read_sample(avb_state_s *state, uint64_t *bytes_out,
   uint64_t local_ns =
       (uint64_t)gptp.tv_sec * 1000000000ULL + (uint64_t)gptp.tv_nsec;
 
-  uint64_t crf_ts, crf_bytes;
-  if (read_crf_anchor(state, &crf_ts, &crf_bytes)) {
+  uint16_t active = state->media_clock.active_clock_source_index;
+
+  if (active == AVB_CLOCK_SOURCE_CRF_INPUT) {
+    uint64_t crf_ts, crf_bytes;
+    if (!read_crf_anchor(state, &crf_ts, &crf_bytes))
+      return false;
     uint64_t age = (local_ns > crf_ts) ? (local_ns - crf_ts) : 0;
-    if (age < AVB_PLL_CRF_ANCHOR_STALE_NS) {
-      *bytes_out = crf_bytes;
-      *gptp_ns_out = crf_ts;
-      return true;
-    }
+    if (age >= AVB_PLL_CRF_ANCHOR_STALE_NS)
+      return false;
+    *bytes_out = crf_bytes;
+    *gptp_ns_out = crf_ts;
+    return true;
   }
 
+  /* Default / AVB_CLOCK_SOURCE_INTERNAL */
   uint64_t bytes = atomic_load_explicit(&state->media_clock.i2s_bytes_written,
                                         memory_order_relaxed);
   *bytes_out = bytes;
@@ -279,11 +299,15 @@ static bool read_sample(avb_state_s *state, uint64_t *bytes_out,
   return true;
 }
 
-static int32_t compute_ppm_q16(uint64_t bytes_delta, uint64_t elapsed_ns) {
+static int32_t compute_ppm_q16(avb_state_s *state, uint64_t bytes_delta,
+                               uint64_t elapsed_ns) {
   if (elapsed_ns == 0 || bytes_delta == 0)
     return 0;
+  uint32_t byterate = state->media_clock.listener_byterate;
+  if (byterate == 0)
+    byterate = AVB_PLL_FALLBACK_BYTERATE;
   int64_t expected =
-      (int64_t)AVB_PLL_NOMINAL_BYTERATE * (int64_t)elapsed_ns / 1000000000LL;
+      (int64_t)byterate * (int64_t)elapsed_ns / 1000000000LL;
   int64_t byte_error = (int64_t)bytes_delta - expected;
   return (int32_t)((byte_error * 1000000LL * (1LL << 16)) / expected);
 }
@@ -409,10 +433,10 @@ void avb_pll_tick(avb_state_s *state) {
 
   /* Instant (5 s window) and cumulative ppm */
   int32_t inst_ppm_q16 =
-      compute_ppm_q16(bytes_now - s_pll.prev_i2s_bytes,
+      compute_ppm_q16(state, bytes_now - s_pll.prev_i2s_bytes,
                       gptp_now_ns - s_pll.prev_gptp_ns);
   int32_t cumul_ppm_q16 =
-      compute_ppm_q16(bytes_now - s_pll.base_i2s_bytes,
+      compute_ppm_q16(state, bytes_now - s_pll.base_i2s_bytes,
                       gptp_now_ns - s_pll.base_gptp_ns);
   state->media_clock.pll_last_ppm_error_q16 = inst_ppm_q16;
   state->media_clock.pll_cumulative_ppm_error_q16 = cumul_ppm_q16;

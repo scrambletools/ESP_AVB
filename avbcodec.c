@@ -138,6 +138,14 @@ esp_err_t avb_config_i2s(avb_state_s *state) {
   ESP_ERROR_CHECK(i2s_channel_enable(state->i2s_tx_handle));
   ESP_ERROR_CHECK(i2s_channel_enable(state->i2s_rx_handle));
 
+  /* Publish the effective listener-side rates so the PLL and the
+   * stream-input drain no longer hardcode 48 kHz / 288000 B/s. The
+   * drain always outputs stereo 24-bit (2 ch × 3 B/frame); only the
+   * sample rate changes with config. */
+  state->media_clock.listener_sample_rate = state->config.default_sample_rate;
+  state->media_clock.listener_byterate =
+      state->config.default_sample_rate * 2u * 3u;
+
   /* Initialise the media-clock PLL now that I2S (and hence APLL) is up */
   uint32_t nominal_mclk =
       state->config.default_sample_rate * AVB_MCLK_MULTIPLE;

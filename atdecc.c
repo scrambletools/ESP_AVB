@@ -1264,7 +1264,8 @@ int avb_send_aecp_rsp_read_descr_clock_domain(avb_state_s *state,
    * each clock domain that serves an AAF talker. */
   uint16_t clock_sources_count = 2;
   aem_clock_source_t clock_sources[2] = {{0, 0}, {0, 1}};
-  uint16_t clock_source_index = 0; /* active source: gPTP by default */
+  /* Currently-selected source — reflects any prior SET_CLOCK_SOURCE */
+  uint16_t clock_source_index = state->media_clock.active_clock_source_index;
 
   // create a clock domain descriptor
   aem_clock_domain_desc_s descriptor;
@@ -1943,6 +1944,9 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
     case aecp_cmd_code_get_clock_source:
       return avb_process_aecp_cmd_get_clock_source(state, msg, src_addr);
       break;
+    case aecp_cmd_code_set_clock_source:
+      return avb_process_aecp_cmd_set_clock_source(state, msg, src_addr);
+      break;
     case aecp_cmd_code_get_stream_info:
       return avb_process_aecp_cmd_get_stream_info(state, msg, src_addr);
       break;
@@ -2428,10 +2432,11 @@ int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
   aecp_aem_short_s *cmd = (aecp_aem_short_s *)msg;
 
   /* Response: descriptor_type + descriptor_index + clock_source_index (2 bytes).
-   * We have a single clock source at index 0. */
+   * Echo the currently-selected source the SET command committed, so
+   * controllers can read-after-write to confirm the change. */
   uint8_t *clock_source_index = (uint8_t *)cmd + sizeof(aecp_aem_short_s);
-  clock_source_index[0] = 0;
-  clock_source_index[1] = 0;
+  uint16_t active = state->media_clock.active_clock_source_index;
+  int_to_octets(&active, clock_source_index, 2);
 
   cmd->common.header.msg_type = aecp_msg_type_aem_response;
   uint16_t control_data_len =
@@ -2443,6 +2448,58 @@ int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
   int ret = avb_net_send_to(state, ethertype_avtp, cmd, msg_len, &ts, src_addr);
   if (ret < 0) {
     avberr("send AECP GET_CLOCK_SOURCE response failed: %d", errno);
+  }
+  return ret;
+}
+
+/* Process AECP command set clock source (IEEE 1722.1 §7.4.24, Milan
+ * §5.4.4). Command body after the AEM header is:
+ *   descriptor_type (2)       — must be CLOCK_DOMAIN (0x0024)
+ *   descriptor_index (2)      — must be 0 (we have one clock domain)
+ *   clock_source_index (2)    — which of our advertised sources to make active
+ *   reserved (2)
+ * The response mirrors the command; the status field signals success or
+ * the specific validation failure. Once committed, the PLL (avbpll.c)
+ * picks up the new active_clock_source_index on its next tick. */
+int avb_process_aecp_cmd_set_clock_source(avb_state_s *state,
+                                          aecp_message_u *msg,
+                                          eth_addr_t *src_addr) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0) {
+    return OK;
+  }
+
+  struct timespec ts;
+  aecp_aem_short_s *cmd = (aecp_aem_short_s *)msg;
+
+  uint16_t descriptor_type = octets_to_uint(cmd->descriptor_type, 2);
+  uint16_t descriptor_index = octets_to_uint(cmd->descriptor_index, 2);
+  uint8_t *csi_ptr = (uint8_t *)cmd + sizeof(aecp_aem_short_s);
+  uint16_t requested_index = (uint16_t)octets_to_uint(csi_ptr, 2);
+
+  aecp_status_t status = aecp_status_success;
+  if (descriptor_type != aem_desc_type_clock_domain || descriptor_index != 0) {
+    status = aecp_status_no_such_descriptor;
+  } else if (requested_index > 1) {
+    /* We only advertise clock sources 0 (INTERNAL/gPTP) and 1 (CRF). */
+    status = aecp_status_bad_arguments;
+  } else {
+    state->media_clock.active_clock_source_index = requested_index;
+    avbinfo("Clock source changed to %u (%s)", requested_index,
+            requested_index == 0 ? "INTERNAL/gPTP" : "CRF stream input");
+  }
+
+  cmd->common.header.msg_type = aecp_msg_type_aem_response;
+  cmd->common.header.status_valtime = (uint8_t)status;
+  uint16_t control_data_len =
+      sizeof(aecp_aem_short_s) + 2 - AVTP_CDL_PREAMBLE_LEN;
+  cmd->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
+  cmd->common.header.control_data_len = control_data_len & 0xFF;
+  uint16_t msg_len = sizeof(aecp_aem_short_s) + 2;
+
+  int ret = avb_net_send_to(state, ethertype_avtp, cmd, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP SET_CLOCK_SOURCE response failed: %d", errno);
   }
   return ret;
 }

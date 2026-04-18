@@ -369,7 +369,7 @@ typedef enum {
   aecp_cmd_code_get_stream_info = 0x000f,
   aecp_cmd_code_set_name = 0x0010,
   aecp_cmd_code_get_name = 0x0011,
-  aecp_cmd_code_set_clock_source = 0x0016, // unsupported
+  aecp_cmd_code_set_clock_source = 0x0016,
   aecp_cmd_code_get_clock_source = 0x0017,
   aecp_cmd_code_set_control = 0x0018,
   aecp_cmd_code_get_control = 0x0019,
@@ -2484,6 +2484,27 @@ typedef struct {
      * gPTP discontinuity detection resets the baseline. Read by
      * avb_get_stream_in_counters. */
     uint32_t media_reset_count;
+
+    /* Currently-selected CLOCK_SOURCE for the CLOCK_DOMAIN. Written by
+     * AECP SET_CLOCK_SOURCE, read by the PLL (picks CRF vs gPTP), and
+     * echoed in GET_CLOCK_SOURCE and the CLOCK_DOMAIN descriptor.
+     *   0 = INTERNAL (gPTP) — PLL measures against local gPTP wall clock
+     *   1 = CRF stream input — PLL requires a fresh CRF anchor to tick
+     * Uint16 to match on-wire width; atomic isn't needed because this is
+     * only written from the AECP RX task. */
+    uint16_t active_clock_source_index;
+
+    /* Effective listener-side sample rate and byterate, derived from
+     * state->config at I2S init time. `listener_byterate` is the
+     * nominal bytes/s the DAC should consume at zero ppm error — the
+     * PLL uses it as its reference in compute_ppm_q16. `sample_rate`
+     * is the audio sample rate in Hz. Both assume stereo 24-bit out
+     * (2 ch × 3 B/frame) which the drain always produces; only the
+     * rate varies across configurations. Set once at init; changing
+     * the DAC rate at runtime would require I2S reconfiguration so
+     * these stay constant for the lifetime of the AVB stack. */
+    uint32_t listener_sample_rate;
+    uint32_t listener_byterate;
   } media_clock;
 
   /* Our own entity */
@@ -2739,6 +2760,9 @@ int avb_process_aecp_cmd_get_stream_format(avb_state_s *state,
                                            aecp_message_u *msg,
                                            eth_addr_t *src_addr);
 int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
+                                          aecp_message_u *msg,
+                                          eth_addr_t *src_addr);
+int avb_process_aecp_cmd_set_clock_source(avb_state_s *state,
                                           aecp_message_u *msg,
                                           eth_addr_t *src_addr);
 int avb_process_aecp_cmd_get_max_transit_time(avb_state_s *state,
