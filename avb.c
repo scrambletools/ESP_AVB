@@ -53,7 +53,14 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   entity_caps.aem_supported = true;
   entity_caps.aem_config_index_valid = true;
   entity_caps.aem_identify_control_index_valid = true;
+  /* vendor_unique_supported signals the Milan MVU protocol. Only advertise
+   * it when CONFIG_ESP_AVB_MILAN is enabled so non-Milan controllers (e.g.
+   * macOS native AVDECC) don't run Milan-specific validation against us. */
+#if CONFIG_ESP_AVB_MILAN
   entity_caps.vendor_unique_supported = true;
+#else
+  entity_caps.vendor_unique_supported = false;
+#endif
   entity_caps.address_access_supported = true;
   memcpy(&state->own_entity.summary.entity_capabilities, &entity_caps,
          sizeof(avb_entity_cap_s));
@@ -99,9 +106,11 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
     avbinfo("AVB endpoint configured as TALKER");
   }
 
-  // Set listener sinks and capabilities
-  if (config->listener) {
-    uint16_t listener_sinks = 1;
+  // Set listener sinks and capabilities. When talker is enabled we still
+  // advertise the CRF media clock input (stream index 1), so listener_sinks
+  // = AVB_MAX_NUM_INPUT_STREAMS any time either role is active.
+  if (config->listener || config->talker) {
+    uint16_t listener_sinks = AVB_MAX_NUM_INPUT_STREAMS;
     int_to_octets(&listener_sinks,
                   state->own_entity.summary.listener_stream_sinks, 2);
     avb_listener_cap_s listener_caps;
@@ -110,7 +119,8 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
     listener_caps.audio_sink = 1;
     memcpy(&state->own_entity.summary.listener_capabilities, &listener_caps,
            sizeof(avb_listener_cap_s));
-    avbinfo("AVB endpoint configured as LISTENER");
+    if (config->listener)
+      avbinfo("AVB endpoint configured as LISTENER");
   }
 
   // Set entity detail info
@@ -142,22 +152,19 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   // avtp_stream_format_am824_s sf2 =
   //     AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_96k);
   uint8_t aaf_ch = 8; // 8 channels to match MOTU/Apple AVB expectations
-  // avtp_stream_format_aaf_pcm_s sf3 =
-  //     AVB_DEFAULT_FORMAT_AAF(16, aaf_pcm_sample_rate_44_1k, aaf_ch, false);
-  // avtp_stream_format_aaf_pcm_s sf4 =
-  //     AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_44_1k, aaf_ch, false);
   avtp_stream_format_aaf_pcm_s sf1 =
       AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_48k, aaf_ch, false);
-  // avtp_stream_format_aaf_pcm_s sf6 =
-  //     AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_96k, aaf_ch, false);
+  avtp_stream_format_aaf_pcm_s sf2 =
+      AVB_DEFAULT_FORMAT_AAF(32, aaf_pcm_sample_rate_48k, aaf_ch, false);
   state->supported_formats[0].am824 = sf0;
   state->supported_formats[1].aaf_pcm = sf1;
+  state->supported_formats[2].aaf_pcm = sf2;
   // state->supported_formats[2].am824 = sf2;
   // state->supported_formats[3].aaf_pcm = sf3;
   // state->supported_formats[4].aaf_pcm = sf4;
   // state->supported_formats[5].aaf_pcm = sf5;
   // state->supported_formats[6].aaf_pcm = sf6;
-  state->num_supported_formats = 2;
+  state->num_supported_formats = 3;
   avtp_stream_format_aaf_pcm_s format = sf1;
 
   // setup listener stream flags, and stream info flags, default vlan id and
@@ -171,8 +178,11 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
                                         .msrp_failure_valid = 1,
                                         .msrp_acc_lat_valid = 1};
 
-  // Build input streams
-  if (state->config.listener) {
+  // Build input streams — stream 0 is AAF audio, stream 1 is the Milan v1.3
+  // §7.2.2 CRF media clock input. The CRF input is required whenever we
+  // advertise an AAF talker, so set up both input streams whenever either
+  // talker or listener is enabled.
+  if (state->config.listener || state->config.talker) {
     state->num_input_streams = AVB_MAX_NUM_INPUT_STREAMS;
     avb_listener_stream_s input_stream = {0};
     memcpy(&input_stream.stream_flags, &flags,
@@ -187,6 +197,10 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
       memcpy(&state->input_streams[i], &input_stream,
              sizeof(avb_listener_stream_s));
     }
+    /* Stream 1 carries the Milan AVnu CRF format */
+    uint8_t crf_bytes[8] = MILAN_AVNU_CRF_FORMAT_BYTES;
+    memcpy(&state->input_streams[AVB_CRF_INPUT_INDEX].stream_format, crf_bytes,
+           sizeof(crf_bytes));
   }
 
   // Build output streams
@@ -621,6 +635,9 @@ static void avb_task(void *task_param) {
     // Stream-in diagnostics — avb_stream_in_print_diag (avtp.c) prints
     // one-shot first-packet info, safe to call from main loop context.
     avb_stream_in_print_diag();
+
+    // Media-clock PLL: measure, log, apply MCLK correction
+    avb_pll_tick(state);
 
     // Process status requests
     avb_process_statusreq(state);

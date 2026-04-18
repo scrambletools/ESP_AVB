@@ -109,12 +109,23 @@ esp_err_t avb_config_i2s(avb_state_s *state) {
           },
   };
   std_cfg.clk_cfg.mclk_multiple = AVB_MCLK_MULTIPLE;
+  /* Use APLL as the clock source so the Milan media-clock PLL
+   * (avb_mclk / avb_mclk_apll) can retune MCLK with sub-ppm precision
+   * without having to disable/reconfigure the I2S channel. */
+  std_cfg.clk_cfg.clk_src = I2S_CLK_SRC_APLL;
 
   // Initialize and enable the I2S TX and RX channels
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(state->i2s_tx_handle, &std_cfg));
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(state->i2s_rx_handle, &std_cfg));
   ESP_ERROR_CHECK(i2s_channel_enable(state->i2s_tx_handle));
   ESP_ERROR_CHECK(i2s_channel_enable(state->i2s_rx_handle));
+
+  /* Initialise the media-clock PLL now that I2S (and hence APLL) is up */
+  uint32_t nominal_mclk =
+      state->config.default_sample_rate * AVB_MCLK_MULTIPLE;
+  if (avb_pll_init(nominal_mclk) != 0) {
+    avbwarn("PLL init failed (sample clock will free-run)");
+  }
 
   avbinfo("I2S channels initialized");
   return ESP_OK;

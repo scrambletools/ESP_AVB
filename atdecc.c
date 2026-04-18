@@ -10,6 +10,7 @@
  */
 
 #include "avb.h"
+#include <stddef.h> /* offsetof */
 
 /* Send ADP entity available message */
 int avb_send_adp_entity_available(avb_state_s *state) {
@@ -307,9 +308,26 @@ int avb_send_aecp_rsp_read_descr_configuration(avb_state_s *state,
   for (int i = 0; i < descriptor_counts_count; i++) {
     aem_config_desc_count_s desc_count = {0};
     int_to_octets(&descriptors[i], desc_count.descriptor_type, 2);
-    size_t count = (descriptors[i] == aem_desc_type_control)
-                       ? AEM_NUM_CONTROLS
-                       : AEM_MAX_DESC_COUNT;
+    size_t count;
+    switch (descriptors[i]) {
+    case aem_desc_type_control:
+      count = AEM_NUM_CONTROLS;
+      break;
+    case aem_desc_type_stream_input:
+      /* Stream input 0: AAF audio; stream input 1: CRF media clock */
+      count = state->num_input_streams;
+      break;
+    case aem_desc_type_stream_output:
+      count = state->num_output_streams;
+      break;
+    case aem_desc_type_clock_source:
+      /* Clock source 0: gPTP (INTERNAL); clock source 1: CRF stream input */
+      count = 2;
+      break;
+    default:
+      count = AEM_MAX_DESC_COUNT;
+      break;
+    }
     int_to_octets(&count, desc_count.count, 2);
     memcpy(&config_desc.descriptor_counts[i], &desc_count,
            sizeof(aem_config_desc_count_s));
@@ -351,7 +369,11 @@ int avb_send_aecp_rsp_read_descr_audio_unit(avb_state_s *state,
 
   // data for the audio unit descriptor
   int localized_description = 1;
-  int num_input_ports = state->num_input_streams;
+  /* STREAM_PORT counts — only audio streams have a port. The Milan CRF
+   * media clock input (stream_input index 1) feeds the clock domain, not an
+   * audio map, so it has no STREAM_PORT_INPUT. Hence the port counts stay
+   * at 1 even though num_input_streams = 2. */
+  int num_input_ports = state->config.listener ? 1 : 0;
   int num_output_ports = state->num_output_streams;
   int sampling_rate = state->config.default_sample_rate;
   int offset = 144; // 144 for this version of AEM
@@ -426,8 +448,32 @@ int avb_send_aecp_rsp_read_descr_stream(avb_state_s *state,
   // octets_to_binary_string((uint8_t *)&current_format, sizeof(current_format),
   // current_format_str); avbinfo("current format: %s", current_format_str);
 
-  int formats_offset = 138; // 138 for 2021 version of AEM
-  int number_of_formats = state->num_supported_formats;
+  /* formats_offset is an offset from the start of the descriptor (which per
+   * IEEE 1722.1 begins at the descriptor_type field, 4 bytes before the
+   * object_name[] field where aem_stream_desc_s begins in memory). So the
+   * on-wire value is offsetof within the struct plus 4. */
+  int formats_offset = (int)offsetof(aem_stream_desc_s, formats) + 4;
+
+  /* Milan v1.3 §5.3.3.4: a stream supporting CRF must not also support AAF.
+   * The CRF input (index 1) advertises only the Milan AVnu CRF format; all
+   * other streams advertise the shared AAF/AM824 supported_formats list. */
+  bool is_crf_input =
+      !is_output && index == AVB_CRF_INPUT_INDEX;
+  avtp_stream_format_s crf_format = {0};
+  uint8_t crf_bytes[8] = MILAN_AVNU_CRF_FORMAT_BYTES;
+  memcpy(&crf_format, crf_bytes, sizeof(crf_bytes));
+
+  const avtp_stream_format_s *formats_list;
+  int number_of_formats;
+  if (is_crf_input) {
+    formats_list = &crf_format;
+    number_of_formats = 1;
+    current_format = crf_format;
+  } else {
+    formats_list = state->supported_formats;
+    number_of_formats = state->num_supported_formats;
+  }
+
   int buffer_length = 8; // 8ns ingress buffer
   int redundant_offset = formats_offset + 8 * number_of_formats;
 
@@ -450,7 +496,7 @@ int avb_send_aecp_rsp_read_descr_stream(avb_state_s *state,
   int_to_octets(&number_of_formats, descriptor.number_of_formats, 2);
   int_to_octets(&buffer_length, descriptor.buffer_length, 4);
   int_to_octets(&redundant_offset, descriptor.redundant_offset, 2);
-  memcpy(&descriptor.formats, state->supported_formats,
+  memcpy(&descriptor.formats, formats_list,
          sizeof(avtp_stream_format_s) * number_of_formats);
 
   // insert the descriptor into the response message
@@ -540,20 +586,33 @@ int avb_send_aecp_rsp_read_descr_clock_source(avb_state_s *state,
                                               eth_addr_t *dest_addr) {
   int ret = OK;
   struct timespec ts;
+  uint16_t index = octets_to_uint(msg->descriptor_index, 2);
 
-  // data for the stream input descriptor
-  int localized_description = 11; // strings desc 1, string_3
-  uint16_t location_type = aem_desc_type_audio_unit;
-
-  // create a stream input descriptor
+  // create a clock source descriptor
   aem_clock_source_desc_s descriptor;
   memset(&descriptor, 0, sizeof(aem_clock_source_desc_s));
 
-  // populate the descriptor (only non-zero fields)
-  int_to_octets(&localized_description, descriptor.localized_description, 2);
-  memcpy(&descriptor.clock_source_id, state->ptp_status.clock_source_info.gm_id,
-         sizeof(unique_id_t));
-  int_to_octets(&location_type, &descriptor.clock_source_location_type, 2);
+  if (index == 1) {
+    /* Clock source 1: CRF media clock input stream (Milan v1.3 §7.2.2).
+     * Sourced from STREAM_INPUT at AVB_CRF_INPUT_INDEX. */
+    int localized_description = 12; /* strings desc 1, string_4 (CRF) */
+    uint16_t source_type = aem_clock_source_type_input_stream;
+    uint16_t location_type = aem_desc_type_stream_input;
+    uint16_t location_index = AVB_CRF_INPUT_INDEX;
+    int_to_octets(&localized_description, descriptor.localized_description, 2);
+    int_to_octets(&source_type, descriptor.clock_source_type, 2);
+    int_to_octets(&location_type, &descriptor.clock_source_location_type, 2);
+    int_to_octets(&location_index, &descriptor.clock_source_location_index, 2);
+    /* clock_source_id stays zero for stream-derived source */
+  } else {
+    /* Clock source 0: gPTP (INTERNAL), sourced from AVB interface */
+    int localized_description = 11; /* strings desc 1, string_3 */
+    uint16_t location_type = aem_desc_type_audio_unit;
+    int_to_octets(&localized_description, descriptor.localized_description, 2);
+    memcpy(&descriptor.clock_source_id,
+           state->ptp_status.clock_source_info.gm_id, sizeof(unique_id_t));
+    int_to_octets(&location_type, &descriptor.clock_source_location_type, 2);
+  }
 
   // insert the descriptor into the response message
   memcpy(msg->descriptor_data, &descriptor, sizeof(aem_clock_source_desc_s));
@@ -1193,31 +1252,43 @@ int avb_send_aecp_rsp_read_descr_clock_domain(avb_state_s *state,
   int ret = OK;
   struct timespec ts;
 
-  // data for the stream input descriptor
-  int localized_description = 10;     // strings desc 1, string_2
-  uint16_t clock_sources_offset = 76; // Required by spec
-  uint16_t clock_sources_count = 1;
-  aem_clock_source_t clock_sources[1] = {0}; // only one source with id 0
+  // data for the clock domain descriptor
+  int localized_description = 10; // strings desc 1, string_2
+  /* clock_sources_offset is from the start of the descriptor (the
+   * descriptor_type field, 4 bytes before the struct body). Add 4 to the
+   * struct-relative offsetof to get the on-wire value. */
+  uint16_t clock_sources_offset =
+      (uint16_t)offsetof(aem_clock_domain_desc_s, clock_sources) + 4;
+  /* Two clock sources: [0]=gPTP (INTERNAL), [1]=CRF input stream.
+   * Milan v1.3 §7.2.2 requires the CRF source to be selectable for
+   * each clock domain that serves an AAF talker. */
+  uint16_t clock_sources_count = 2;
+  aem_clock_source_t clock_sources[2] = {{0, 0}, {0, 1}};
+  uint16_t clock_source_index = 0; /* active source: gPTP by default */
 
-  // create a stream input descriptor
+  // create a clock domain descriptor
   aem_clock_domain_desc_s descriptor;
   memset(&descriptor, 0, sizeof(aem_clock_domain_desc_s));
 
   // populate the descriptor (only non-zero fields)
   int_to_octets(&localized_description, descriptor.localized_description, 2);
+  int_to_octets(&clock_source_index, descriptor.clock_source_index, 2);
   int_to_octets(&clock_sources_offset, &descriptor.clock_sources_offset, 2);
   int_to_octets(&clock_sources_count, &descriptor.clock_sources_count, 2);
-  memcpy(descriptor.clock_sources, clock_sources, sizeof(aem_clock_source_t));
+  memcpy(descriptor.clock_sources, clock_sources,
+         sizeof(aem_clock_source_t) * clock_sources_count);
 
   // insert the descriptor into the response message
   memcpy(msg->descriptor_data, &descriptor, sizeof(aem_clock_domain_desc_s));
 
-  // calc control data length
+  // calc control data length — trim to the actual clock_sources_count
   uint16_t control_data_len =
       AECP_DESC_PREAMBLE_LEN -
       AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
       + sizeof(aem_clock_domain_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      4 // add the stream descriptor size including the type and index
+      - (AEM_MAX_NUM_CLOCK_SOURCES - clock_sources_count) *
+            sizeof(aem_clock_source_t);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -1573,12 +1644,270 @@ int avb_process_aecp_addr_access(avb_state_s *state, aecp_message_u *msg,
   return ret;
 }
 
+/* ---- Milan Vendor Unique (MVU) command handlers ---- */
+
+/* Send an MVU response. The caller passes a pointer to a struct whose first
+ * member is aecp_mvu_common_s (which starts with aecp_common_s.header).
+ * Sets msg_type, status, control_data_length, then sends. */
+static int avb_send_mvu_response(avb_state_s *state, void *msg,
+                                 eth_addr_t *src_addr, uint16_t msg_len,
+                                 uint8_t status) {
+  struct timespec ts;
+  aecp_mvu_common_s *mvu = (aecp_mvu_common_s *)msg;
+  mvu->common.header.msg_type = aecp_msg_type_vendor_unique_response;
+  mvu->common.header.status_valtime = status;
+  uint16_t cdl = msg_len - AVTP_CDL_PREAMBLE_LEN;
+  mvu->common.header.control_data_len_h = (cdl >> 8) & 0x07;
+  mvu->common.header.control_data_len = cdl & 0xFF;
+  mvu->u = 0; /* direct response, not notification */
+  int ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  if (ret < 0)
+    avberr("send MVU response failed: %d", errno);
+  return ret;
+}
+
+/* GET_MILAN_INFO (MVU 0x0000) — returns Milan protocol info.
+ *
+ * Hive uses the success/failure of this command to decide whether an entity
+ * is Milan-compatible. When CONFIG_ESP_AVB_MILAN is disabled we reflect the
+ * command with NOT_IMPLEMENTED so Hive treats us as non-Milan and skips
+ * Milan-specific validation — useful for interop with pure IEEE 1722.1
+ * controllers/talkers that refuse to connect to Milan-advertised devices. */
+int avb_process_aecp_cmd_mvu_get_milan_info(avb_state_s *state,
+                                            aecp_message_u *msg,
+                                            eth_addr_t *src_addr) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0)
+    return OK;
+
+#if !CONFIG_ESP_AVB_MILAN
+  /* Reflect command with NOT_IMPLEMENTED — same length as incoming */
+  uint16_t cdl = (msg->header.control_data_len_h << 8) |
+                 msg->header.control_data_len;
+  uint16_t msg_len = AVTP_CDL_PREAMBLE_LEN + cdl;
+  return avb_send_mvu_response(state, msg, src_addr, msg_len,
+                               aecp_status_not_implemented);
+#else
+  aecp_mvu_get_milan_info_rsp_s rsp;
+  memset(&rsp, 0, sizeof(rsp));
+  memcpy(&rsp.mvu, msg, sizeof(aecp_mvu_common_s));
+
+  uint32_t protocol_version = 1;
+  int_to_octets(&protocol_version, rsp.protocol_version, 4);
+  uint32_t features = 0x04; /* bit 29: MVU_BINDING */
+  int_to_octets(&features, rsp.features_flags, 4);
+  rsp.specification_version[0] = 1;
+  rsp.specification_version[1] = 3;
+
+  return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
+                               aecp_status_success);
+#endif
+}
+
+/* GET_SYSTEM_UNIQUE_ID (MVU 0x0002) — returns system-wide unique ID */
+int avb_process_aecp_cmd_mvu_get_system_unique_id(avb_state_s *state,
+                                                  aecp_message_u *msg,
+                                                  eth_addr_t *src_addr) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0)
+    return OK;
+
+  aecp_mvu_system_unique_id_s rsp;
+  memset(&rsp, 0, sizeof(rsp));
+  memcpy(&rsp.mvu, msg, sizeof(aecp_mvu_common_s));
+  /* number: 0 (not assigned), name: empty string (defaults) */
+
+  return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
+                               aecp_status_success);
+}
+
+/* BIND_STREAM / UNBIND_STREAM (MVU 0x0005 / 0x0006)
+ * Binds/unbinds a listener stream input to a talker.
+ * BIND layout after aecp_mvu_s: flags(2) descriptor_type(2) descriptor_index(2)
+ *   talker_entity_id(8) talker_stream_index(2) reserved(2)
+ * UNBIND layout after aecp_mvu_s: reserved(2) descriptor_type(2)
+ *   descriptor_index(2) */
+int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
+                                         aecp_message_u *msg,
+                                         eth_addr_t *src_addr, bool unbind) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0)
+    return OK;
+
+  if (unbind) {
+    aecp_mvu_unbind_stream_s *cmd = (aecp_mvu_unbind_stream_s *)msg;
+    uint16_t desc_type = octets_to_uint(cmd->descriptor_type, 2);
+    uint16_t desc_index = octets_to_uint(cmd->descriptor_index, 2);
+
+    if (desc_type != aem_desc_type_stream_input ||
+        desc_index >= state->num_input_streams) {
+      return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
+                                   aecp_status_no_such_descriptor);
+    }
+
+    avb_listener_stream_s *stream = &state->input_streams[desc_index];
+    if (stream->connected) {
+      avb_stop_stream_in(state, desc_index);
+      stream->connected = false;
+      memset(stream->talker_id, 0, UNIQUE_ID_LEN);
+    }
+    avbinfo("MVU: unbind stream input %d", desc_index);
+    return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
+                                 aecp_status_success);
+  }
+
+  aecp_mvu_bind_stream_s *cmd = (aecp_mvu_bind_stream_s *)msg;
+  uint16_t desc_type = octets_to_uint(cmd->descriptor_type, 2);
+  uint16_t desc_index = octets_to_uint(cmd->descriptor_index, 2);
+
+  if (desc_type != aem_desc_type_stream_input ||
+      desc_index >= state->num_input_streams) {
+    return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
+                                 aecp_status_no_such_descriptor);
+  }
+
+  avb_listener_stream_s *stream = &state->input_streams[desc_index];
+  memcpy(stream->talker_id, cmd->talker_entity_id, UNIQUE_ID_LEN);
+  memcpy(stream->talker_uid, cmd->talker_stream_index, 2);
+  uint16_t flags = octets_to_uint(cmd->flags, 2);
+  /* Milan v1.3 §5.4.4.6: STREAMING_WAIT is bit 15 (MSB) of the flags field */
+  stream->stream_flags.streaming_wait = (flags & 0x8000) ? 1 : 0;
+
+  /* Send ACMP CONNECT_TX_COMMAND to the talker to get stream info */
+  acmp_message_s acmp_cmd = {0};
+  acmp_cmd.header.subtype = avtp_subtype_acmp;
+  acmp_cmd.header.msg_type = acmp_msg_type_connect_tx_command;
+  memcpy(acmp_cmd.talker_entity_id, stream->talker_id, UNIQUE_ID_LEN);
+  memcpy(acmp_cmd.talker_uid, stream->talker_uid, 2);
+  memcpy(acmp_cmd.listener_entity_id, state->own_entity.summary.entity_id,
+         UNIQUE_ID_LEN);
+  uint16_t listener_uid = desc_index;
+  int_to_octets(&listener_uid, acmp_cmd.listener_uid, 2);
+  memcpy(acmp_cmd.controller_entity_id, msg->common.controller_entity_id,
+         UNIQUE_ID_LEN);
+
+  avb_send_acmp_command(state, acmp_msg_type_connect_tx_command, &acmp_cmd,
+                        false);
+  stream->pending_connection = true;
+  avbinfo("MVU: bind stream input %d to talker", desc_index);
+  return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
+                               aecp_status_success);
+}
+
+/* GET_MEDIA_CLOCK_REFERENCE_INFO (MVU 0x0004)
+ * Layout after aecp_mvu_s: clock_domain_index(2)
+ * Response adds: flags(2) default_mcr_prio(1) user_mcr_prio(1)
+ *   media_clock_domain_name(64) */
+int avb_process_aecp_cmd_mvu_get_media_clock_ref_info(avb_state_s *state,
+                                                      aecp_message_u *msg,
+                                                      eth_addr_t *src_addr) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0)
+    return OK;
+
+  aecp_mvu_media_clock_ref_info_s *cmd =
+      (aecp_mvu_media_clock_ref_info_s *)msg;
+
+  aecp_mvu_media_clock_ref_info_s rsp;
+  memset(&rsp, 0, sizeof(rsp));
+  memcpy(&rsp.mvu, &cmd->mvu, sizeof(aecp_mvu_common_s));
+  memcpy(rsp.clock_domain_index, cmd->clock_domain_index, 2);
+  rsp.flags = 0x03; /* bits 7+6: user_mcr_prio and domain_name valid */
+  rsp.default_mcr_prio = 192; /* Stageboxes/audio interfaces */
+  rsp.user_mcr_prio = 192;
+  strncpy((char *)rsp.media_clock_domain_name, "DEFAULT",
+          sizeof(rsp.media_clock_domain_name));
+
+  return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
+                               aecp_status_success);
+}
+
+/* GET_STREAM_INPUT_INFO_EX (MVU 0x0007)
+ * Command layout after aecp_mvu_s: reserved(2) descriptor_type(2)
+ *   descriptor_index(2)
+ * Response adds: talker_entity_id(8) talker_unique_id(2)
+ *   probing_acmp_status(1) reserved(1) */
+int avb_process_aecp_cmd_mvu_get_stream_input_info_ex(avb_state_s *state,
+                                                      aecp_message_u *msg,
+                                                      eth_addr_t *src_addr) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0)
+    return OK;
+
+  aecp_mvu_get_stream_input_info_ex_cmd_s *cmd =
+      (aecp_mvu_get_stream_input_info_ex_cmd_s *)msg;
+  uint16_t desc_index = octets_to_uint(cmd->descriptor_index, 2);
+
+  aecp_mvu_get_stream_input_info_ex_rsp_s rsp;
+  memset(&rsp, 0, sizeof(rsp));
+  memcpy(&rsp.mvu, &cmd->mvu, sizeof(aecp_mvu_common_s));
+  memcpy(rsp.descriptor_type, cmd->descriptor_type, 2);
+  memcpy(rsp.descriptor_index, cmd->descriptor_index, 2);
+
+  if (desc_index >= state->num_input_streams) {
+    return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
+                                 aecp_status_no_such_descriptor);
+  }
+
+  avb_listener_stream_s *stream = &state->input_streams[desc_index];
+  memcpy(rsp.talker_entity_id, stream->talker_id, UNIQUE_ID_LEN);
+  memcpy(rsp.talker_unique_id, stream->talker_uid, 2);
+  /* probing_status (Milan Table 5.22): 0=Disabled, 3=Completed.
+   * acmp_status mirrors IEEE 1722.1 ACMP status (0=SUCCESS). */
+  uint8_t probing = stream->connected ? 3 : 0;
+  uint8_t acmp = 0;
+  rsp.probing_acmp_status = ((probing << 5) & 0xe0) | (acmp & 0x1f);
+
+  return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
+                               aecp_status_success);
+}
+
 int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
                      eth_addr_t *src_addr) {
 
   /* Process ADDRESS_ACCESS command (separate message type from AEM) */
   if (msg->header.msg_type == aecp_msg_type_addr_access_command) {
     return avb_process_aecp_addr_access(state, msg, src_addr);
+  }
+
+  /* Process Milan Vendor Unique command */
+  if (msg->header.msg_type == aecp_msg_type_vendor_unique_command) {
+    /* Validate MVU protocol ID */
+    aecp_mvu_common_s *mvu = (aecp_mvu_common_s *)msg;
+    uint8_t expected_pid[] = MVU_PROTOCOL_ID;
+    if (memcmp(mvu->protocol_id, expected_pid, 6) != 0) {
+      return OK; /* Not Milan MVU — ignore */
+    }
+    uint16_t mvu_cmd = (mvu->command_type_h << 8) | mvu->command_type;
+    switch (mvu_cmd) {
+    case mvu_cmd_get_milan_info:
+      return avb_process_aecp_cmd_mvu_get_milan_info(state, msg, src_addr);
+    case mvu_cmd_bind_stream:
+      return avb_process_aecp_cmd_mvu_bind_stream(state, msg, src_addr, false);
+    case mvu_cmd_unbind_stream:
+      return avb_process_aecp_cmd_mvu_bind_stream(state, msg, src_addr, true);
+    case mvu_cmd_get_system_unique_id:
+      return avb_process_aecp_cmd_mvu_get_system_unique_id(state, msg, src_addr);
+    case mvu_cmd_get_media_clock_ref_info:
+      return avb_process_aecp_cmd_mvu_get_media_clock_ref_info(state, msg,
+                                                               src_addr);
+    case mvu_cmd_get_stream_input_info_ex:
+      return avb_process_aecp_cmd_mvu_get_stream_input_info_ex(state, msg,
+                                                               src_addr);
+    default:
+      /* Milan v1.3 §5.4.3: unsupported MVU commands must be reflected back
+       * with NOT_IMPLEMENTED status rather than silently dropped */
+      if (memcmp(msg->common.target_entity_id,
+                 state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0)
+        return OK;
+      avbinfo("MVU: unsupported command 0x%04x, returning NOT_IMPLEMENTED",
+              mvu_cmd);
+      uint16_t cdl = (mvu->common.header.control_data_len_h << 8) |
+                     mvu->common.header.control_data_len;
+      uint16_t msg_len = AVTP_CDL_PREAMBLE_LEN + cdl;
+      return avb_send_mvu_response(state, msg, src_addr, msg_len,
+                                   aecp_status_not_implemented);
+    }
   }
 
   /* Process AECP command */
@@ -1626,6 +1955,10 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
     case aecp_cmd_code_get_counters:
       return avb_process_aecp_cmd_get_counters(state, msg, src_addr);
       break;
+    case aecp_cmd_code_set_max_transit_time:
+    case aecp_cmd_code_get_max_transit_time:
+      return avb_process_aecp_cmd_get_max_transit_time(state, msg, src_addr);
+      break;
     case aecp_cmd_code_set_name:
       return avb_process_aecp_cmd_set_name(state, msg, src_addr);
       break;
@@ -1638,8 +1971,22 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
     case aecp_cmd_code_get_control:
       return avb_process_aecp_cmd_get_control(state, msg, src_addr);
       break;
-    default:
-      return OK;
+    default: {
+      /* IEEE 1722.1-2021 §9.2.1.3.1.4: unhandled AEM commands must be reflected
+       * back with NOT_IMPLEMENTED status rather than silently dropped */
+      if (memcmp(msg->common.target_entity_id,
+                 state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0)
+        return OK;
+      avbinfo("AECP: unhandled AEM command 0x%04x, returning NOT_IMPLEMENTED",
+              msg->basic.aem.command_type);
+      struct timespec ts;
+      uint16_t cdl = (msg->header.control_data_len_h << 8) |
+                     msg->header.control_data_len;
+      uint16_t msg_len = AVTP_CDL_PREAMBLE_LEN + cdl;
+      msg->header.msg_type = aecp_msg_type_aem_response;
+      msg->header.status_valtime = aecp_status_not_implemented;
+      return avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+    }
     }
   }
   /* Process AECP response */
@@ -1983,14 +2330,23 @@ int avb_process_aecp_cmd_set_stream_format(avb_state_s *state,
     return ERROR;
   }
 
-  // check requested format against supported formats
+  // check requested format against supported formats. The CRF input
+  // (stream_input index 1) only accepts the Milan AVnu CRF format per
+  // Milan v1.3 §5.3.3.4 (AAF and CRF mutually exclusive in one stream).
   avtp_stream_format_s *requested = &msg->stream_format.stream_format;
+  bool is_crf_input = !is_output && index == AVB_CRF_INPUT_INDEX;
   bool format_supported = false;
-  for (size_t i = 0; i < state->num_supported_formats; i++) {
-    if (memcmp(requested, &state->supported_formats[i],
-               sizeof(avtp_stream_format_s)) == 0) {
+  if (is_crf_input) {
+    uint8_t crf_bytes[8] = MILAN_AVNU_CRF_FORMAT_BYTES;
+    if (memcmp(requested, crf_bytes, sizeof(crf_bytes)) == 0)
       format_supported = true;
-      break;
+  } else {
+    for (size_t i = 0; i < state->num_supported_formats; i++) {
+      if (memcmp(requested, &state->supported_formats[i],
+                 sizeof(avtp_stream_format_s)) == 0) {
+        format_supported = true;
+        break;
+      }
     }
   }
 
@@ -2075,6 +2431,43 @@ int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
   int ret = avb_net_send_to(state, ethertype_avtp, cmd, msg_len, &ts, src_addr);
   if (ret < 0) {
     avberr("send AECP GET_CLOCK_SOURCE response failed: %d", errno);
+  }
+  return ret;
+}
+
+/* Process AECP command get max transit time (IEEE 1722.1 §7.4.78) */
+int avb_process_aecp_cmd_get_max_transit_time(avb_state_s *state,
+                                              aecp_message_u *msg,
+                                              eth_addr_t *src_addr) {
+  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0) {
+    return OK;
+  }
+
+  struct timespec ts;
+  /* Echo command back as response, preserving payload.
+   * For SET: accept the value. For GET: append max_transit_time. */
+  uint16_t incoming_cdl =
+      (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
+  msg->header.msg_type = aecp_msg_type_aem_response;
+
+  bool is_get = (msg->basic.aem.command_type == aecp_cmd_code_get_max_transit_time);
+  if (is_get) {
+    /* GET response: append max_transit_time (uint64 ns) to command payload */
+    aecp_max_transit_time_s *rsp = (aecp_max_transit_time_s *)msg;
+    uint64_t transit_ns = 2000000; /* Class A: 2 ms */
+    int_to_octets(&transit_ns, rsp->max_transit_time, 8);
+    uint16_t cdl = sizeof(aecp_max_transit_time_s) - AVTP_CDL_PREAMBLE_LEN;
+    msg->header.control_data_len_h = (cdl >> 8) & 0x07;
+    msg->header.control_data_len = cdl & 0xFF;
+    incoming_cdl = cdl;
+  }
+  uint16_t msg_len =
+      sizeof(atdecc_header_s) + sizeof(unique_id_t) + incoming_cdl;
+
+  int ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  if (ret < 0) {
+    avberr("send AECP MAX_TRANSIT_TIME response failed: %d", errno);
   }
   return ret;
 }
@@ -2302,43 +2695,38 @@ int avb_process_aecp_cmd_get_counters(avb_state_s *state, aecp_message_u *msg,
     /* no entity specific counters */
     break;
   case aem_desc_type_stream_input:
-    // create stream input counters valid flags
-    aem_stream_in_counters_val_s stream_in_counters_val;
-    memset(&stream_in_counters_val, 0, sizeof(aem_stream_in_counters_val_s));
-    // create stream input counters block
-    aem_stream_in_counters_s stream_in_counters;
-    memset(&stream_in_counters, 0, sizeof(aem_stream_in_counters_s));
-    // TBD put in counters
+    avb_get_stream_in_counters(&response.counters_valid.stream_in_counters_val,
+                               &response.counters_block.stream_in_counters);
     break;
-  case aem_desc_type_stream_output:
-    // create stream output counters valid flags
-    aem_stream_out_counters_val_s stream_out_counters_val;
-    memset(&stream_out_counters_val, 0, sizeof(aem_stream_out_counters_val_s));
-    // create stream output counters block
-    aem_stream_out_counters_s stream_out_counters;
-    memset(&stream_out_counters, 0, sizeof(aem_stream_out_counters_s));
-    // TBD put in counters
+  case aem_desc_type_stream_output: {
+    /* Set valid flags for Milan mandatory counters (Table 5.14) */
+    aem_stream_out_counters_val_s *out_valid =
+        &response.counters_valid.stream_out_counters_val;
+    out_valid->stream_start = true;
+    out_valid->stream_stop = true;
+    out_valid->media_reset = true;
+    out_valid->ts_uncertain = true;
+    out_valid->frames_tx = true;
+    /* Counter values are zero-initialized from memset above */
     break;
-  case aem_desc_type_avb_interface:
-    // create avb interface counters valid flags
-    aem_avb_interface_counters_val_s avb_interface_counters_val;
-    memset(&avb_interface_counters_val, 0,
-           sizeof(aem_avb_interface_counters_val_s));
-    // create avb interface counters block
-    aem_avb_interface_counters_s avb_interface_counters;
-    memset(&avb_interface_counters, 0, sizeof(aem_avb_interface_counters_s));
-    // TBD put in counters
+  }
+  case aem_desc_type_avb_interface: {
+    /* Set valid flags for Milan mandatory counters (Table 5.10) */
+    aem_avb_interface_counters_val_s *iface_valid =
+        &response.counters_valid.avb_interface_counters_val;
+    iface_valid->link_up = true;
+    iface_valid->link_down = true;
+    iface_valid->gptp_gm_changed = true;
     break;
-  case aem_desc_type_clock_domain:
-    // create clock domain counters valid flags
-    aem_clock_domain_counters_val_s clock_domain_counters_val;
-    memset(&clock_domain_counters_val, 0,
-           sizeof(aem_clock_domain_counters_val_s));
-    // create clock domain counters block
-    aem_clock_domain_counters_s clock_domain_counters;
-    memset(&clock_domain_counters, 0, sizeof(aem_clock_domain_counters_s));
-    // TBD put in counters
+  }
+  case aem_desc_type_clock_domain: {
+    /* Set valid flags for Milan mandatory counters (Table 5.12) */
+    aem_clock_domain_counters_val_s *clock_valid =
+        &response.counters_valid.clock_domain_counters_val;
+    clock_valid->locked = true;
+    clock_valid->unlocked = true;
     break;
+  }
   default:
     char desc_type_str[7];
     octets_to_hex_string(msg->get_counters.descriptor_type, 2, desc_type_str,
@@ -3187,7 +3575,7 @@ acmp_status_t avb_disconnect_listener(avb_state_s *state,
   uint16_t index = octets_to_uint(response->listener_uid, 2);
 
   // Stop stream-in handler if active
-  avb_stop_stream_in(state);
+  avb_stop_stream_in(state, index);
 
   // Reset connection state but preserve stream format and vlan_id
   avtp_stream_format_s saved_format = state->input_streams[index].stream_format;

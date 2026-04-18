@@ -71,9 +71,14 @@
 /* Maximum number of inflight commands */
 #define AVB_MAX_NUM_INFLIGHT_COMMANDS 20
 
-/* Maximum number of streams */
-#define AVB_MAX_NUM_INPUT_STREAMS 1
+/* Maximum number of streams.
+ * Input stream 0: AAF/61883 audio. Input stream 1: CRF media clock
+ * (Milan v1.3 §7.2.2 — mandatory for AAF talkers). The CRF input is
+ * present regardless of CONFIG_ESP_AVB_MILAN; the Kconfig option only
+ * toggles whether we *advertise* Milan compliance in discovery. */
+#define AVB_MAX_NUM_INPUT_STREAMS 2
 #define AVB_MAX_NUM_OUTPUT_STREAMS 1
+#define AVB_CRF_INPUT_INDEX 1
 
 /* Periodic message intervals */
 #define MSRP_DOMAIN_INTERVAL_MSEC 500
@@ -106,7 +111,16 @@
 #define EMPTY_ID (uint8_t[8]){0, 0, 0, 0, 0, 0, 0, 0}
 
 /* MVU Protocol ID */
-#define MVU_PROTOCOL_ID (uint8_t[6]){0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00}
+#define MVU_PROTOCOL_ID                                                        \
+  { 0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00 }
+
+/* Milan v1.3 §7.3 — the only CRF format an AVnu Milan CRF Media Clock Input
+ * may advertise. 64-bit value; encoded as 8 big-endian bytes in the
+ * stream_format field:
+ *   subtype=0x04 (CRF), crf_type=1 (AudioSample), timestamp_interval=96,
+ *   timestamps_per_pdu=1, pull=0 (1.0x), base_frequency=48000 Hz. */
+#define MILAN_AVNU_CRF_FORMAT_BYTES                                            \
+  { 0x04, 0x10, 0x60, 0x01, 0x00, 0x00, 0xBB, 0x80 }
 
 /* Poll interval for checking for incoming frames on L2TAP FDs */
 #define AVB_POLL_INTERVAL_MS 1
@@ -158,6 +172,7 @@ typedef enum {
   AVB_NAME_CONTROL_1, // Speaker Volume
   AVB_NAME_CONTROL_2, // Mic Gain
   AVB_NAME_STREAM_INPUT_0,
+  AVB_NAME_STREAM_INPUT_1, // CRF media clock input (Milan v1.3 §7.2.2)
   AVB_NAME_STREAM_OUTPUT_0,
   AVB_NAME_COUNT // total number of settable names
 } avb_name_index_t;
@@ -308,6 +323,7 @@ typedef enum {
 typedef enum {
   avtp_subtype_61883 = 0x00,
   avtp_subtype_aaf = 0x02,
+  avtp_subtype_crf = 0x04,
   avtp_subtype_adp = 0xfa,
   avtp_subtype_aecp = 0xfb,
   avtp_subtype_acmp = 0xfc,
@@ -364,6 +380,8 @@ typedef enum {
   aecp_cmd_code_get_avb_info = 0x0027,
   aecp_cmd_code_get_as_path = 0x0028, // unsupported
   aecp_cmd_code_get_counters = 0x0029,
+  aecp_cmd_code_set_max_transit_time = 0x004c,
+  aecp_cmd_code_get_max_transit_time = 0x004d,
   aecp_cmd_code_expansion = 0xffff // for milan
 } aecp_cmd_code_t;
 
@@ -1060,35 +1078,104 @@ typedef struct {
   uint8_t tlv_data[AVB_MAX_MSG_LEN];
 } aecp_addr_access_s; // 624 bytes
 
-/* AECP Milan vendor unique command */
+/* AECP Milan vendor unique common header (Milan v1.3 Figure 5.4) */
 typedef struct {
   aecp_common_s common;
-  uint8_t protocol_id[6]; // protocol ID
-  uint8_t reserved1 : 1;
-  uint8_t command_type_h : 7; // command type high order bits
-  uint8_t command_type;       // command type
-  uint8_t reserved2[2];
-} aecp_mvu_s; // 32 bytes
+  uint8_t protocol_id[6];       // MVU protocol ID (00-1B-C5-0A-C1-00)
+  uint8_t u : 1;                // 0=command/response, 1=notification
+  uint8_t command_type_h : 7;   // command type high bits
+  uint8_t command_type;         // command type low byte
+} aecp_mvu_common_s;            // 30 bytes
 
-/* AECP Milan vendor unique response */
+/* GET_MILAN_INFO command (Figure 5.5) — no command-specific data */
 typedef struct {
-  aecp_common_s common;
-  uint8_t protocol_id[6]; // protocol ID
-  uint8_t reserved : 1;
-  uint8_t command_type_h : 7; // command type high order bits
-  uint8_t command_type;       // command type
-  uint8_t reserved2[2];
-  uint8_t protocol_version[4]; // protocol version = 1
-  uint8_t
-      features_flags[4]; // only one flag (lsb): 1 = supports Milan redundancy
-  uint8_t certification_verison
-      [4]; // The certification_version field shall be set to the version number
-           // of the Milan certification that the PAAD-AE has passed. It is
-           // composed of four 8-bit numbers which, when read from MSB to LSB
-           // and noted as dot-separated decimal numbers, are the human-readable
-           // representation of the version. This field is set to 0 if the
-           // PAAD-AE has not passed any Milan
-} aecp_mvu_rsp_s; // 44 bytes
+  aecp_mvu_common_s mvu;
+  uint8_t reserved[2];
+} aecp_mvu_get_milan_info_cmd_s; // 32 bytes
+
+/* GET_MILAN_INFO response (Figure 5.6) */
+typedef struct {
+  aecp_mvu_common_s mvu;
+  uint8_t reserved[2];
+  uint8_t protocol_version[4];       // Milan protocol version (= 1)
+  uint8_t features_flags[4];         // Table 5.17
+  uint8_t certification_version[4];  // 4x uint8 dotted version, 0 if uncertified
+  uint8_t specification_version[4];  // Milan spec version (1.3.0.0)
+} aecp_mvu_get_milan_info_rsp_s;     // 48 bytes
+
+/* BIND_STREAM command and response (Figure 5.10) */
+typedef struct {
+  aecp_mvu_common_s mvu;
+  uint8_t flags[2];                  // bit 15: STREAMING_WAIT
+  uint8_t descriptor_type[2];        // always STREAM_INPUT
+  uint8_t descriptor_index[2];       // stream input index
+  unique_id_t talker_entity_id;      // talker to bind to
+  uint8_t talker_stream_index[2];    // talker stream output index
+  uint8_t reserved[2];
+} aecp_mvu_bind_stream_s;            // 48 bytes
+
+/* UNBIND_STREAM command and response (Figure 5.11) */
+typedef struct {
+  aecp_mvu_common_s mvu;
+  uint8_t reserved[2];
+  uint8_t descriptor_type[2];        // always STREAM_INPUT
+  uint8_t descriptor_index[2];       // stream input index
+} aecp_mvu_unbind_stream_s;          // 36 bytes
+
+/* SET/GET_MEDIA_CLOCK_REFERENCE_INFO command and response (Figure 5.8) */
+typedef struct {
+  aecp_mvu_common_s mvu;
+  uint8_t clock_domain_index[2];     // CLOCK_DOMAIN descriptor index
+  uint8_t flags;                     // Table 5.18
+  uint8_t reserved1;
+  uint8_t default_mcr_prio;          // default media clock reference priority
+  uint8_t user_mcr_prio;             // user media clock reference priority
+  uint8_t reserved2[4];
+  uint8_t media_clock_domain_name[64]; // UTF-8 name
+} aecp_mvu_media_clock_ref_info_s;   // 104 bytes
+
+/* GET_STREAM_INPUT_INFO_EX command (Figure 5.11 — same as UNBIND) */
+typedef aecp_mvu_unbind_stream_s aecp_mvu_get_stream_input_info_ex_cmd_s;
+
+/* GET_STREAM_INPUT_INFO_EX response (Figure 5.12)
+ * Milan v1.3 §5.4.4.8: probing_status (3 bits) and acmp_status (5 bits) are
+ * packed into a single byte, followed by 1 reserved byte. */
+typedef struct {
+  aecp_mvu_common_s mvu;
+  uint8_t reserved1[2];
+  uint8_t descriptor_type[2];        // always STREAM_INPUT
+  uint8_t descriptor_index[2];       // stream input index
+  unique_id_t talker_entity_id;      // bound talker entity ID
+  uint8_t talker_unique_id[2];       // bound talker stream index
+  uint8_t probing_acmp_status;       // probing_status<<5 | acmp_status
+  uint8_t reserved2;
+} aecp_mvu_get_stream_input_info_ex_rsp_s; // 48 bytes
+
+/* GET_SYSTEM_UNIQUE_ID command — same as GET_MILAN_INFO (no data) */
+typedef aecp_mvu_get_milan_info_cmd_s aecp_mvu_get_system_unique_id_cmd_s;
+
+/* SET/GET_SYSTEM_UNIQUE_ID response (Figure 5.7) */
+typedef struct {
+  aecp_mvu_common_s mvu;
+  uint8_t reserved[2];
+  uint8_t number[8];            // 64-bit network-wide unique identifier
+  uint8_t name[64];             // UTF-8 name
+} aecp_mvu_system_unique_id_s;  // 104 bytes
+
+/* Legacy alias for aecp_message_u compatibility */
+typedef aecp_mvu_get_milan_info_cmd_s aecp_mvu_s;
+
+/* MVU command types (Milan v1.3 Table 5.15) */
+typedef enum {
+  mvu_cmd_get_milan_info = 0x0000,
+  mvu_cmd_set_system_unique_id = 0x0001,
+  mvu_cmd_get_system_unique_id = 0x0002,
+  mvu_cmd_set_media_clock_ref_info = 0x0003,
+  mvu_cmd_get_media_clock_ref_info = 0x0004,
+  mvu_cmd_bind_stream = 0x0005,
+  mvu_cmd_unbind_stream = 0x0006,
+  mvu_cmd_get_stream_input_info_ex = 0x0007
+} mvu_cmd_type_t;
 
 /* AECP AEM common data */
 typedef struct {
@@ -1368,12 +1455,29 @@ typedef struct {
   uint8_t reserved3;
 } avtp_stream_format_aaf_pcm_s; // 8 bytes
 
+/* CRF stream format (IEEE 1722-2016 §10, Milan v1.3 §7.3).
+ * Bit layout matches the 8-byte wire encoding above. */
+typedef struct {
+  uint8_t subtype : 7;             // 0x04 for CRF
+  uint8_t vendor_defined : 1;
+  uint8_t timestamp_interval_h : 4; // high 4 bits of timestamp_interval
+  uint8_t crf_type : 4;             // 1 = AudioSample (Milan)
+  uint8_t timestamp_interval_l;     // low 8 bits of timestamp_interval
+  uint8_t timestamps_per_pdu;       // Milan uses 1
+  uint8_t base_frequency_h : 5;     // high 5 bits of base_frequency
+  uint8_t pull : 3;                 // 0 = 1.0x
+  uint8_t base_frequency_mh;        // middle-high byte
+  uint8_t base_frequency_ml;        // middle-low byte
+  uint8_t base_frequency_l;         // low byte
+} avtp_stream_format_crf_s;         // 8 bytes
+
 /* AVTP Stream Format */
 typedef union {
   uint8_t subtype : 7;
   uint8_t vendor_defined : 1;
   avtp_stream_format_am824_s am824;
   avtp_stream_format_aaf_pcm_s aaf_pcm;
+  avtp_stream_format_crf_s crf;
 } avtp_stream_format_s; // 64 bytes
 
 /* Stream descriptor (input or output) */
@@ -1772,6 +1876,18 @@ typedef union {
 
 /* AECP get counters command uses basic command format */
 typedef aecp_aem_short_s aecp_get_counters_s; // 28 bytes
+
+/* SET/GET_MAX_TRANSIT_TIME command and response (IEEE 1722.1-2021 §7.4.77/78)
+ * max_transit_time is a 64-bit uint in nanoseconds. GET command omits the
+ * max_transit_time field (payload = 4 bytes); SET command and both responses
+ * include it (payload = 12 bytes). */
+typedef struct {
+  aecp_common_s common;
+  aecp_common_aem_s aem;
+  uint8_t descriptor_type[2];   // always STREAM_OUTPUT
+  uint8_t descriptor_index[2];  // stream output index
+  uint8_t max_transit_time[8];  // max transit time in nanoseconds (uint64)
+} aecp_max_transit_time_s;      // 36 bytes
 
 /* AECP get counters response */
 typedef struct {
@@ -2315,6 +2431,42 @@ typedef struct {
   volatile uint32_t ptp_avtp_ts; // AVTP-format timestamp (lower 32b of PTP ns)
   volatile int64_t ptp_snapshot_us; // esp_timer_get_time() at moment of read
 
+  /* Media-clock drift tracking — Phase 2a instrumentation.
+   * Measures how far the talker's media clock (carried in AAF avtp_timestamp
+   * or CRF payload timestamps) has drifted from our local gPTP clock.
+   * Updated inline by RX handlers (EMAC task); read by periodic log + the
+   * Phase 2b MCLK PLL. Values are plain (not atomic) — occasional torn reads
+   * in log output are acceptable. */
+  struct {
+    /* CRF Media Clock input (STREAM_INPUT[AVB_CRF_INPUT_INDEX]).
+     * drift_ns = crf_timestamp - local_gptp_ns at moment of reception. */
+    int64_t crf_last_drift_ns;
+    int32_t crf_drift_min_ns;
+    int32_t crf_drift_max_ns;
+    int64_t crf_drift_sum_ns;  /* for running mean */
+    uint32_t crf_samples;
+    /* AAF audio input (STREAM_INPUT[0]).
+     * drift_ns = avtp_timestamp (32-bit) - local_gptp_ns & 0xFFFFFFFF.
+     * Expected to be ~+max_transit_time (2 ms Class A). */
+    int32_t aaf_last_drift_ns;
+    int32_t aaf_drift_min_ns;
+    int32_t aaf_drift_max_ns;
+    int64_t aaf_drift_sum_ns;
+    uint32_t aaf_samples;
+
+    /* MCLK PLL counter: cumulative bytes accepted by I2S DMA. Pumped by
+     * the stream-in drain callback (avtp.c) using i2s_channel_write's
+     * `bytes_written` return — which counts bytes the DMA actually
+     * consumed. avb_pll.c reads this against gPTP wall time to measure
+     * I2S rate error and apply corrections. */
+    _Atomic uint64_t i2s_bytes_written;
+
+    /* PLL state owned by avb_pll.c. Fields public for log visibility. */
+    int32_t pll_last_ppm_error_q16;       /* last 5 s window, Q16 */
+    int32_t pll_cumulative_ppm_error_q16; /* since baseline, Q16 */
+    int32_t pll_applied_ppm_q16;          /* last correction written to HW */
+  } media_clock;
+
   /* Our own entity */
   aem_entity_desc_s own_entity;
 
@@ -2570,6 +2722,9 @@ int avb_process_aecp_cmd_get_stream_format(avb_state_s *state,
 int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
                                           aecp_message_u *msg,
                                           eth_addr_t *src_addr);
+int avb_process_aecp_cmd_get_max_transit_time(avb_state_s *state,
+                                              aecp_message_u *msg,
+                                              eth_addr_t *src_addr);
 int avb_process_aecp_cmd_get_stream_info(avb_state_s *state,
                                          aecp_message_u *msg,
                                          eth_addr_t *src_addr);
@@ -2579,6 +2734,21 @@ int avb_process_aecp_cmd_get_as_path(avb_state_s *state, aecp_message_u *msg,
                                      eth_addr_t *src_addr);
 int avb_process_aecp_cmd_get_counters(avb_state_s *state, aecp_message_u *msg,
                                       eth_addr_t *src_addr);
+int avb_process_aecp_cmd_mvu_get_milan_info(avb_state_s *state,
+                                           aecp_message_u *msg,
+                                           eth_addr_t *src_addr);
+int avb_process_aecp_cmd_mvu_get_system_unique_id(avb_state_s *state,
+                                                  aecp_message_u *msg,
+                                                  eth_addr_t *src_addr);
+int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
+                                         aecp_message_u *msg,
+                                         eth_addr_t *src_addr, bool unbind);
+int avb_process_aecp_cmd_mvu_get_media_clock_ref_info(avb_state_s *state,
+                                                      aecp_message_u *msg,
+                                                      eth_addr_t *src_addr);
+int avb_process_aecp_cmd_mvu_get_stream_input_info_ex(avb_state_s *state,
+                                                      aecp_message_u *msg,
+                                                      eth_addr_t *src_addr);
 int avb_process_aecp_rsp_register_unsol_notif(avb_state_s *state,
                                               aecp_message_u *msg);
 int avb_process_aecp_rsp_deregister_unsol_notif(avb_state_s *state,
@@ -2620,8 +2790,22 @@ int avb_process_acmp_get_tx_connection_command(avb_state_s *state,
 
 /* Stream functions */
 int avb_start_stream_in(avb_state_s *state, uint16_t index);
-void avb_stop_stream_in(avb_state_s *state);
+void avb_stop_stream_in(avb_state_s *state, uint16_t index);
 void avb_stream_in_print_diag(void);
+
+/* avbpll.c — Milan media-clock PLL: measures I2S MCLK rate vs gPTP and
+ * retunes the underlying hardware (APLL on ESP32-P4) to close the loop.
+ * The hardware backend is kept behind a thin internal abstraction so
+ * porting to a different SoC / to an external clock chip (e.g. Cirrus
+ * CS2000) only touches avbpll.c. */
+int avb_pll_init(uint32_t nominal_mclk_hz);
+void avb_pll_deinit(void);
+/* Called ~once per second from the AVB main loop. Updates measurements,
+ * logs stats (including the drift sums maintained by the RX handlers),
+ * and applies any due MCLK correction. */
+void avb_pll_tick(avb_state_s *state);
+void avb_get_stream_in_counters(aem_stream_in_counters_val_s *valid,
+                                aem_stream_in_counters_s *counters);
 uint32_t aaf_code_to_sample_rate(uint8_t code);
 int avb_start_stream_out(avb_state_s *state, uint16_t index);
 int avb_stop_stream_out(avb_state_s *state, uint16_t index);

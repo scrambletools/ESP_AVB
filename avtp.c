@@ -1664,6 +1664,7 @@ static inline uint32_t ring_read(jitter_ring_t *r, uint8_t *dst, uint32_t len) {
 /* Stream RX handler context — file-static, accessed by EMAC task and
  * esp_timer task. Allocated by avb_start_stream_in. */
 typedef struct {
+  avb_state_s *state; /* for media_clock stats update */
   i2s_chan_handle_t i2s_tx_handle;
   uint8_t *i2s_drain_buf; /* buffer for drain callback reads */
   size_t i2s_drain_buf_size;
@@ -1694,6 +1695,26 @@ typedef struct {
 
 static stream_rx_ctx_t *s_stream_rx_ctx = NULL;
 
+/* CRF stream RX context — Milan v1.3 CRF media clock input. Allocated by
+ * avb_start_stream_in when index == AVB_CRF_INPUT_INDEX. Unlike the AAF
+ * context this has no I2S/jitter-buffer machinery, just packet reception
+ * state for Phase 2 media-clock recovery. */
+typedef struct {
+  avb_state_s *state; /* for media_clock stats update */
+  uint8_t expected_stream_id[UNIQUE_ID_LEN]; /* filter: CRF talker's stream_id */
+  uint32_t pkt_count;
+  uint32_t stream_id_mismatch;
+  uint32_t seq_num_mismatch;
+  uint8_t last_seq_num;
+  bool seq_num_valid;
+  /* Last CRF timestamp observed (IEEE 1722-2016 §10, 64-bit gPTP ns).
+   * Reserved for Phase 2 PLL. */
+  uint64_t last_timestamp_ns;
+  uint32_t timestamp_count;
+} crf_rx_ctx_t;
+
+static crf_rx_ctx_t *s_crf_rx_ctx = NULL;
+
 /* Drain timer callback — reads from ring, writes to I2S.
  * Runs in esp_timer task context (prio 22), fired every 1ms. */
 static void stream_in_drain_cb(void *arg) {
@@ -1717,6 +1738,72 @@ static void stream_in_drain_cb(void *arg) {
   uint32_t got = ring_read(&c->ring, c->i2s_drain_buf, to_read);
   size_t bytes_written = 0;
   i2s_channel_write(c->i2s_tx_handle, c->i2s_drain_buf, got, &bytes_written, 1);
+  /* Feed the PLL counter: accumulate bytes the DMA actually consumed
+   * (not bytes the drain attempted). avb_pll.c reads this against gPTP
+   * time to measure the real I2S MCLK rate. */
+  if (c->state) {
+    atomic_fetch_add_explicit(&c->state->media_clock.i2s_bytes_written,
+                              (uint64_t)bytes_written, memory_order_relaxed);
+  }
+}
+
+/* CRF stream RX handler — counts CRF AVTPDUs and records the most recent
+ * media-clock timestamp. Called inline from EMAC RX task via the
+ * dispatcher; must return quickly. Phase 2 will use the collected
+ * timestamps for a media-clock PLL. */
+static void avb_crf_rx_handler(uint8_t *avtp_data, uint16_t len,
+                               crf_rx_ctx_t *ctx) {
+  if (!ctx || len < 28)
+    return;
+
+  ctx->pkt_count++;
+
+  /* Track sequence number gaps (avtp_data[2] = sequence_num) */
+  uint8_t seq_num = avtp_data[2];
+  if (ctx->seq_num_valid) {
+    uint8_t expected = ctx->last_seq_num + 1;
+    if (seq_num != expected)
+      ctx->seq_num_mismatch++;
+  }
+  ctx->last_seq_num = seq_num;
+  ctx->seq_num_valid = true;
+
+  /* CRF AVTPDU layout (IEEE 1722-2016 §10.4, Figure 13):
+   *   bytes 0-3:   subtype, sv|version|mr, seq_num, type_specific
+   *   bytes 4-11:  stream_id
+   *   bytes 12-15: pull(3) | base_frequency(29)
+   *   bytes 16-17: crf_data_length
+   *   bytes 18-19: timestamp_interval
+   *   bytes 20+:   CRF timestamps, 8 bytes each (big-endian uint64 ns)
+   * For Milan's 1-timestamp-per-PDU format the 8 bytes at offset 20 hold
+   * the single sample-time timestamp. */
+  if (len < 28)
+    return;
+  uint64_t timestamp_ns = 0;
+  for (int i = 0; i < 8; i++)
+    timestamp_ns = (timestamp_ns << 8) | avtp_data[20 + i];
+  ctx->last_timestamp_ns = timestamp_ns;
+  ctx->timestamp_count++;
+
+  /* Compute drift vs local gPTP for the Phase 2b media-clock PLL */
+  struct timespec now;
+  if (ctx->state && clock_gettime(CLOCK_PTP_SYSTEM, &now) == 0) {
+    uint64_t local_ns =
+        (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+    int64_t drift = (int64_t)(timestamp_ns - local_ns);
+    avb_state_s *state = ctx->state;
+    state->media_clock.crf_last_drift_ns = drift;
+    state->media_clock.crf_drift_sum_ns += drift;
+    state->media_clock.crf_samples++;
+    if (state->media_clock.crf_samples == 1 ||
+        drift < state->media_clock.crf_drift_min_ns) {
+      state->media_clock.crf_drift_min_ns = (int32_t)drift;
+    }
+    if (state->media_clock.crf_samples == 1 ||
+        drift > state->media_clock.crf_drift_max_ns) {
+      state->media_clock.crf_drift_max_ns = (int32_t)drift;
+    }
+  }
 }
 
 /* Stream RX handler — called inline from EMAC RX task for each
@@ -1743,6 +1830,37 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *ctx) {
   }
   c->last_seq_num = seq_num;
   c->seq_num_valid = true;
+
+  /* Extract AVTP presentation time (bytes 12-15) and track drift vs
+   * local gPTP. AAF packets arrive at 8000/s; clock_gettime() on every
+   * one burns real CPU in the EMAC RX task (contended internally) and
+   * can starve the watchdog. Sample every 10th packet — 800/s — still
+   * plenty for averaging stats, and enough to feed any future presentation-
+   * time scheduler. */
+  if (c->state && (c->pkt_count % 10) == 0) {
+    struct timespec now;
+    uint32_t avtp_timestamp =
+        ((uint32_t)avtp_data[12] << 24) | ((uint32_t)avtp_data[13] << 16) |
+        ((uint32_t)avtp_data[14] << 8) | (uint32_t)avtp_data[15];
+    if (clock_gettime(CLOCK_PTP_SYSTEM, &now) == 0) {
+      uint32_t local_timestamp =
+          (uint32_t)((uint64_t)now.tv_sec * 1000000000ULL +
+                     (uint64_t)now.tv_nsec);
+      int32_t drift = (int32_t)(avtp_timestamp - local_timestamp);
+      avb_state_s *state = c->state;
+      state->media_clock.aaf_last_drift_ns = drift;
+      state->media_clock.aaf_drift_sum_ns += drift;
+      state->media_clock.aaf_samples++;
+      if (state->media_clock.aaf_samples == 1 ||
+          drift < state->media_clock.aaf_drift_min_ns) {
+        state->media_clock.aaf_drift_min_ns = drift;
+      }
+      if (state->media_clock.aaf_samples == 1 ||
+          drift > state->media_clock.aaf_drift_max_ns) {
+        state->media_clock.aaf_drift_max_ns = drift;
+      }
+    }
+  }
 
   uint8_t subtype = avtp_data[0] & 0x7F;
   uint8_t *pcm_data = NULL;
@@ -1870,9 +1988,91 @@ void avb_stream_in_print_diag(void) {
           c->diag_first_audio[6], c->diag_first_audio[7]);
 }
 
+/* Fill stream input counters for GET_COUNTERS response (Milan Table 5.13) */
+void avb_get_stream_in_counters(aem_stream_in_counters_val_s *valid,
+                                aem_stream_in_counters_s *counters) {
+  memset(valid, 0, sizeof(*valid));
+  memset(counters, 0, sizeof(*counters));
+
+  stream_rx_ctx_t *ctx = s_stream_rx_ctx;
+
+  /* Set valid flags for all Milan mandatory counters (Table 5.13) */
+  valid->media_locked = true;
+  valid->media_unlocked = true;
+  valid->stream_interrupted = true;
+  valid->seq_num_mismatch = true;
+  valid->media_reset = true;
+  valid->ts_uncertain = true;
+  valid->unsupported_format = true;
+  valid->late_ts = true;
+  valid->early_ts = true;
+  valid->frames_rx = true;
+
+  if (!ctx)
+    return;
+
+  /* Populate counters from stream RX context */
+  uint32_t counter_val;
+  counter_val = ctx->pkt_count;
+  int_to_octets(&counter_val, counters->frames_rx, 4);
+  counter_val = ctx->seq_num_mismatch;
+  int_to_octets(&counter_val, counters->seq_num_mismatch, 4);
+  counter_val = ctx->ring_write_fail;
+  int_to_octets(&counter_val, counters->stream_interrupted, 4);
+}
+
+/* Stream RX dispatcher — registered with the net layer; routes incoming
+ * VLAN AVTP frames by stream_id to either the AAF handler or the CRF
+ * handler. Both contexts are checked because either may be active. */
+static void avb_stream_rx_dispatcher(uint8_t *avtp_data, uint16_t len,
+                                     void *unused_ctx) {
+  (void)unused_ctx;
+  if (!avtp_data || len < 12)
+    return;
+  /* stream_id lives at bytes [4..11] in all AVTP stream subtypes */
+  if (s_crf_rx_ctx != NULL &&
+      memcmp(avtp_data + 4, s_crf_rx_ctx->expected_stream_id,
+             UNIQUE_ID_LEN) == 0) {
+    avb_crf_rx_handler(avtp_data, len, s_crf_rx_ctx);
+    return;
+  }
+  if (s_stream_rx_ctx != NULL) {
+    avb_stream_rx_handler(avtp_data, len, s_stream_rx_ctx);
+  }
+}
+
+/* Start CRF media clock input (Milan v1.3 §7.2.2).
+ * Lightweight compared to AAF: no I2S, no jitter buffer — just a context
+ * for packet reception and stats. Phase 2 will use the recorded
+ * timestamps to drive a media-clock PLL. */
+static int avb_start_stream_in_crf(avb_state_s *state, uint16_t index) {
+  if (s_crf_rx_ctx != NULL) {
+    avberr("CRF stream-in already running");
+    return ERROR;
+  }
+  crf_rx_ctx_t *ctx = calloc(1, sizeof(crf_rx_ctx_t));
+  if (!ctx) {
+    avberr("CRF stream in: no memory for context");
+    return ERROR;
+  }
+  ctx->state = state;
+  memcpy(ctx->expected_stream_id, state->input_streams[index].stream_id,
+         UNIQUE_ID_LEN);
+  s_crf_rx_ctx = ctx;
+  state->input_streams[index].connected = true;
+  /* Ensure the dispatcher is registered even if AAF isn't running yet */
+  avb_net_set_stream_rx_handler(avb_stream_rx_dispatcher, NULL);
+  avbinfo("CRF stream in started (stream index %d)", index);
+  return OK;
+}
+
 /* Start AVB stream input — opens codec, creates jitter buffer,
  * starts drain timer, registers stream RX handler. */
 int avb_start_stream_in(avb_state_s *state, uint16_t index) {
+
+  if (index == AVB_CRF_INPUT_INDEX) {
+    return avb_start_stream_in_crf(state, index);
+  }
 
   if (state->stream_in_active) {
     avberr("Another instance of stream-in is already running");
@@ -1888,6 +2088,7 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
     avberr("Stream in: no memory for context");
     return ERROR;
   }
+  ctx->state = state;
   ctx->i2s_tx_handle = state->i2s_tx_handle;
   memcpy(ctx->expected_stream_id, state->input_streams[index].stream_id,
          UNIQUE_ID_LEN);
@@ -1947,21 +2148,42 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   state->stream_in_active = true;
   state->input_streams[index].connected = true;
 
-  // Register the stream handler — VLAN AVTP frames dispatched to handler
-  avb_net_set_stream_rx_handler(avb_stream_rx_handler, ctx);
+  /* Register the shared dispatcher — routes to AAF or CRF by stream_id */
+  avb_net_set_stream_rx_handler(avb_stream_rx_dispatcher, NULL);
 
   avbinfo("Stream in started (jitter buffer %d bytes, pre-fill %d bytes)",
           JITTER_RING_SIZE, JITTER_PREFILL);
   return OK;
 }
 
+/* Stop CRF media clock input. Symmetric with avb_start_stream_in_crf. */
+static void avb_stop_stream_in_crf(avb_state_s *state, uint16_t index) {
+  if (!s_crf_rx_ctx)
+    return;
+  avbinfo("CRF stream in stopped: %lu pkts, ts=%lu, last_ts_ns=%llu, "
+          "id_skip=%lu, seq_miss=%lu",
+          s_crf_rx_ctx->pkt_count, s_crf_rx_ctx->timestamp_count,
+          s_crf_rx_ctx->last_timestamp_ns, s_crf_rx_ctx->stream_id_mismatch,
+          s_crf_rx_ctx->seq_num_mismatch);
+  free(s_crf_rx_ctx);
+  s_crf_rx_ctx = NULL;
+  state->input_streams[index].connected = false;
+  /* Unregister the dispatcher only if no other stream is active */
+  if (!state->stream_in_active) {
+    avb_net_set_stream_rx_handler(NULL, NULL);
+  }
+}
+
 /* Stop AVB stream input — unregisters handler, stops timer, frees resources */
-void avb_stop_stream_in(avb_state_s *state) {
+void avb_stop_stream_in(avb_state_s *state, uint16_t index) {
+
+  if (index == AVB_CRF_INPUT_INDEX) {
+    avb_stop_stream_in_crf(state, index);
+    return;
+  }
+
   if (!state->stream_in_active)
     return;
-
-  // Unregister handler first to stop new packets
-  avb_net_set_stream_rx_handler(NULL, NULL);
 
   state->stream_in_active = false;
 
@@ -1983,6 +2205,11 @@ void avb_stop_stream_in(avb_state_s *state) {
     free(s_stream_rx_ctx->i2s_drain_buf);
     free(s_stream_rx_ctx);
     s_stream_rx_ctx = NULL;
+  }
+
+  /* Unregister dispatcher only if no other stream is active */
+  if (!s_crf_rx_ctx) {
+    avb_net_set_stream_rx_handler(NULL, NULL);
   }
 
   // Codec stays open — shared with talker stream-out. Closed at AVB shutdown.
