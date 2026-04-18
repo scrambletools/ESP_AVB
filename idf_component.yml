@@ -1,4 +1,4 @@
-version: "1.0.4"
+version: "1.0.5"
 description: "AVB talker and listener for ESP32"
 url: "https://github.com/scrambletools/esp_avb"
 license: "MIT"

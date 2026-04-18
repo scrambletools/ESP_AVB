@@ -142,6 +142,7 @@ static struct {
   uint64_t prev_gptp_ns;
   int64_t next_print_us;
   int64_t next_correction_us;
+  int32_t integrator_ppm_q16;  /* accumulated bias that P-term can't see */
 } s_pll;
 
 /* Nominal byte-rate of the stream we're measuring: 48000 frames × 2 ch ×
@@ -154,14 +155,11 @@ static struct {
 #define AVB_PLL_CORRECTION_DEADBAND_Q16 (1 * 65536 / 2) /* 0.5 ppm */
 
 /* How long to let the cumulative window build up before applying a
- * correction. The measurement noise is dominated by ~1 ms drain-cycle
- * phase aliasing on the 5 s log boundary; that aliasing averages down
- * as 1/sqrt(N) with the number of 5 s windows covered, so a 60 s
- * correction window cuts the per-correction noise roughly in half
- * compared to 30 s. 60 s + gain 0.5 gives an effective PLL time
- * constant of ~120 s — slow enough to ignore noise, still fast enough
- * to track a real crystal drift over a few minutes. */
-#define AVB_PLL_CORRECTION_INTERVAL_US (60 * 1000 * 1000)
+ * correction. 30 s + gain 0.5 gives an effective PLL time constant of
+ * ~60 s — fast enough that a typical ±50 ppm crystal offset converges
+ * in a couple of minutes, slow enough that per-window measurement
+ * noise averages down to well under a ppm. */
+#define AVB_PLL_CORRECTION_INTERVAL_US (30 * 1000 * 1000)
 
 /* Proportional gain, Q16. At 1.0 (65536) a single correction would
  * theoretically zero out the observed error — but that also pumps the
@@ -172,16 +170,43 @@ static struct {
  * out across many corrections. */
 #define AVB_PLL_GAIN_Q16 (65536 / 2) /* 0.5 */
 
+/* Integral gain, Q16. The P-term alone can't distinguish a persistent
+ * sub-ppm bias (e.g. thermal crystal drift, CRF-vs-local-gPTP quantisation)
+ * from per-window measurement noise, so P-only converges to the error
+ * floor and stops — leaving a ~few-ppm steady-state residual that
+ * manifests as slow qfill drift. The integrator sums cumul across
+ * correction cycles; random noise averages toward zero while real bias
+ * accumulates, letting the loop drive the residual to true zero.
+ *   I_gain = 1/32: for a 1 ppm bias, each cycle adds 1/32 ppm to the
+ * integrator, so ~32 cycles (16 min at 30 s interval) to fully cancel.
+ * Much smaller than P_gain (0.5) to avoid oscillation. */
+#define AVB_PLL_I_GAIN_Q16 (65536 / 32) /* 0.03125 */
+
+/* Anti-windup clamp on the integrator alone. If the real plant bias is
+ * bigger than this the P-term will dominate anyway; preventing integrator
+ * run-away avoids long lag when the input changes direction (e.g. after a
+ * media-clock source switch). */
+#define AVB_PLL_MAX_INTEGRATOR_PPM_Q16 ((int32_t)(50 * 65536))
+
 /* Safety clamp on the total applied correction. A healthy crystal is
  * ≤±100 ppm; anything larger is almost certainly a measurement error
  * (e.g. drain underruns at stream startup) and we'd rather leave MCLK
  * near nominal than drag it far off on bad data. */
 #define AVB_PLL_MAX_APPLIED_PPM_Q16 ((int32_t)(100 * 65536))
 
-/* Safety clamp on a single correction step. Prevents a single noisy
- * cumulative sample from yanking MCLK; the loop can still converge
- * quickly for real offsets by accumulating small steps. */
-#define AVB_PLL_MAX_STEP_PPM_Q16 ((int32_t)(10 * 65536))
+/* Maximum rate-of-change of the applied MCLK correction, in ppm per
+ * second, averaged over the correction interval. Milan §7.2 caps this
+ * so upstream rate estimators don't mis-track; the spec ceiling is
+ * several ppm/s and audibly the ear detects continuous drift well below
+ * 5 ppm/s, so 1 ppm/s is a conservative target that also keeps the
+ * startup convergence time bounded (a ±75 ppm crystal offset takes at
+ * most 75 seconds of active correction to absorb). The per-step clamp
+ * below is derived from this so any future retune of the correction
+ * interval automatically preserves the rate limit. */
+#define AVB_PLL_MAX_RATE_PPM_PER_SEC 1
+#define AVB_PLL_MAX_STEP_PPM_Q16                                              \
+  ((int32_t)(AVB_PLL_MAX_RATE_PPM_PER_SEC *                                   \
+             (AVB_PLL_CORRECTION_INTERVAL_US / 1000000) * 65536))
 
 /* Reject clearly-anomalous cumulative measurements — e.g. the cumul
  * briefly explodes to tens of thousands of ppm when gPTP resyncs after
@@ -193,18 +218,64 @@ static struct {
  * recovery, which would produce a large spurious "cumulative" error. */
 #define AVB_PLL_STARTUP_SKIP_TICKS 3
 
-/* Read i2s_bytes_written + gPTP together; returns false when either is
- * unavailable (stream not running, gPTP not synced). */
+/* How stale the CRF anchor may be before the PLL falls back to local
+ * gPTP. CRF arrives at 300+ pps when streaming; 1 s of silence is many
+ * missed PDUs so the CRF source is almost certainly gone. */
+#define AVB_PLL_CRF_ANCHOR_STALE_NS (1000ULL * 1000000ULL)
+
+/* Read the most recent CRF-anchor pair (CRF timestamp, bytes_written
+ * at CRF arrival) using the seqlock in media_clock. Bounded retry —
+ * the writer holds the seq for only a handful of instructions so a
+ * couple of retries is more than enough. Returns false if no CRF has
+ * ever been received, or if the anchor is torn after retries. */
+static bool read_crf_anchor(avb_state_s *state, uint64_t *ts_out,
+                            uint64_t *bytes_out) {
+  for (int retry = 0; retry < 4; retry++) {
+    uint32_t s1 = atomic_load_explicit(&state->media_clock.crf_anchor.seq,
+                                       memory_order_acquire);
+    if (s1 == 0)
+      return false;
+    if (s1 & 1u)
+      continue;
+    uint64_t ts = state->media_clock.crf_anchor.ts_ns;
+    uint64_t bytes = state->media_clock.crf_anchor.bytes;
+    uint32_t s2 = atomic_load_explicit(&state->media_clock.crf_anchor.seq,
+                                       memory_order_acquire);
+    if (s1 == s2) {
+      *ts_out = ts;
+      *bytes_out = bytes;
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Sample the time / byte-count pair the PLL will compare against. Uses
+ * the CRF anchor (Milan §7.2 media-clock reference) when a recent CRF
+ * PDU is available, otherwise falls back to local gPTP + current
+ * bytes — useful for non-Milan AAF-only streams. */
 static bool read_sample(avb_state_s *state, uint64_t *bytes_out,
                         uint64_t *gptp_ns_out) {
   struct timespec gptp;
   if (clock_gettime(CLOCK_PTP_SYSTEM, &gptp) != 0)
     return false;
+  uint64_t local_ns =
+      (uint64_t)gptp.tv_sec * 1000000000ULL + (uint64_t)gptp.tv_nsec;
+
+  uint64_t crf_ts, crf_bytes;
+  if (read_crf_anchor(state, &crf_ts, &crf_bytes)) {
+    uint64_t age = (local_ns > crf_ts) ? (local_ns - crf_ts) : 0;
+    if (age < AVB_PLL_CRF_ANCHOR_STALE_NS) {
+      *bytes_out = crf_bytes;
+      *gptp_ns_out = crf_ts;
+      return true;
+    }
+  }
+
   uint64_t bytes = atomic_load_explicit(&state->media_clock.i2s_bytes_written,
                                         memory_order_relaxed);
   *bytes_out = bytes;
-  *gptp_ns_out =
-      (uint64_t)gptp.tv_sec * 1000000000ULL + (uint64_t)gptp.tv_nsec;
+  *gptp_ns_out = local_ns;
   return true;
 }
 
@@ -253,7 +324,7 @@ static void print_stats(avb_state_s *state, int32_t inst_ppm_q16,
           (applied_centippm < 0 ? -applied_centippm : applied_centippm) % 100,
           hw_applied_ppm);
 
-  /* Drift-stat windows reset per log; last_drift preserved as latest */
+  /* Drift-stat windows reset per log; last_* preserved as latest sample */
   state->media_clock.crf_drift_sum_ns = 0;
   state->media_clock.crf_drift_min_ns = 0;
   state->media_clock.crf_drift_max_ns = 0;
@@ -268,6 +339,7 @@ int avb_pll_init(uint32_t nominal_mclk_hz) {
   s_pll.valid = false;
   s_pll.next_print_us = 0;
   s_pll.next_correction_us = 0;
+  s_pll.integrator_ppm_q16 = 0;
   return mclk_hw_init(nominal_mclk_hz);
 }
 
@@ -311,10 +383,12 @@ void avb_pll_tick(avb_state_s *state) {
   if (elapsed_since_prev_ns > 20ULL * 1000000000ULL) {
     ESP_LOGW(TAG, "gPTP discontinuity (%llu ns gap) — resetting baseline",
              elapsed_since_prev_ns);
+    state->media_clock.media_reset_count++; /* Milan counter */
     s_pll.base_i2s_bytes = bytes_now;
     s_pll.base_gptp_ns = gptp_now_ns;
     s_pll.prev_i2s_bytes = bytes_now;
     s_pll.prev_gptp_ns = gptp_now_ns;
+    s_pll.integrator_ppm_q16 = 0; /* I-term: gPTP reset invalidates history */
     s_pll.next_correction_us = now_us + AVB_PLL_CORRECTION_INTERVAL_US;
     return;
   }
@@ -364,6 +438,7 @@ void avb_pll_tick(avb_state_s *state) {
              (long)(cumul_ppm_q16 / 65536));
     s_pll.base_i2s_bytes = bytes_now;
     s_pll.base_gptp_ns = gptp_now_ns;
+    s_pll.integrator_ppm_q16 = 0; /* I-term: anomalous input invalidates it */
     s_pll.next_correction_us = now_us + AVB_PLL_CORRECTION_INTERVAL_US;
     return;
   }
@@ -371,9 +446,23 @@ void avb_pll_tick(avb_state_s *state) {
   if (now_us >= s_pll.next_correction_us &&
       (cumul_ppm_q16 > AVB_PLL_CORRECTION_DEADBAND_Q16 ||
        cumul_ppm_q16 < -AVB_PLL_CORRECTION_DEADBAND_Q16)) {
-    /* Proportional controller with gain < 1 to damp measurement noise */
-    int32_t step_q16 =
+    /* Accumulate the per-cycle error into the integrator. Random
+     * measurement noise averages toward zero over many cycles; any
+     * persistent bias drives the integrator toward the value that will
+     * cancel the bias. */
+    int32_t i_delta =
+        (int32_t)(((int64_t)cumul_ppm_q16 * AVB_PLL_I_GAIN_Q16) >> 16);
+    s_pll.integrator_ppm_q16 += i_delta;
+    if (s_pll.integrator_ppm_q16 > AVB_PLL_MAX_INTEGRATOR_PPM_Q16)
+      s_pll.integrator_ppm_q16 = AVB_PLL_MAX_INTEGRATOR_PPM_Q16;
+    if (s_pll.integrator_ppm_q16 < -AVB_PLL_MAX_INTEGRATOR_PPM_Q16)
+      s_pll.integrator_ppm_q16 = -AVB_PLL_MAX_INTEGRATOR_PPM_Q16;
+
+    /* PI step: P-term tracks transient errors quickly, I-term holds
+     * the offset needed to cancel persistent bias in steady state. */
+    int32_t p_step_q16 =
         (int32_t)(((int64_t)cumul_ppm_q16 * AVB_PLL_GAIN_Q16) >> 16);
+    int32_t step_q16 = p_step_q16 + s_pll.integrator_ppm_q16;
     /* Clamp per-step — single-window noise can still be big. */
     if (step_q16 > AVB_PLL_MAX_STEP_PPM_Q16)
       step_q16 = AVB_PLL_MAX_STEP_PPM_Q16;

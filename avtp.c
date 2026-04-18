@@ -358,6 +358,25 @@ int avb_process_msrp_talker(avb_state_s *state, msrp_msgbuf_s *msg_data,
     memcpy(&state->talkers[index].info, &msg.talker.info,
            sizeof(talker_adv_info_s));
   }
+
+  /* Propagate the SRP-accumulated latency onto any listener input_stream
+   * with a matching stream_id. This is the authoritative end-to-end
+   * max_transit_time (talker origination + bridge hops), per
+   * IEEE 802.1Qat / Milan §5.4. avb_start_stream_in reads it at connect
+   * time to size the presentation-time startup fill.
+   * Guard against a zero-stream-id malformed MSRP packet matching an
+   * unconnected slot's zeroed stream_id. */
+  static const uint8_t zero_stream_id[UNIQUE_ID_LEN] = {0};
+  if (memcmp(msg.talker.info.stream_id, zero_stream_id, UNIQUE_ID_LEN) != 0) {
+    for (int i = 0; i < AVB_MAX_NUM_INPUT_STREAMS; i++) {
+      if (memcmp(state->input_streams[i].stream_id, msg.talker.info.stream_id,
+                 UNIQUE_ID_LEN) == 0) {
+        memcpy(state->input_streams[i].msrp_accumulated_latency,
+               msg.talker.info.accumulated_latency, 4);
+        break;
+      }
+    }
+  }
   // If the talker is not known then remember it
   // else {
   //   // create a new talker entity
@@ -1603,86 +1622,125 @@ err:
 
 #include <stdatomic.h>
 
-/* Lock-free single-producer single-consumer ring buffer.
- * Capacity MUST be a power of 2 for fast index masking. */
+/* Time-scheduled packet queue for presentation-time rendering
+ * (IEEE 1722 §AAF + Milan v1.3 §7.2): each received packet is stored
+ * with its avtp_timestamp; the drain emits the packet whose
+ * presentation time has come rather than in arrival order.
+ *
+ * Producer: AAF RX handler (EMAC task).
+ * Consumer: drain callback (esp_timer task).
+ * Single-producer / single-consumer ring of fixed-size packet slots.
+ *
+ * Class-agnostic: queue depth is sized for Class B's 50 ms
+ * max_transit_time plus a safety margin, so the same queue works for
+ * both Class A (2 ms presentation offset) and Class B (50 ms) without
+ * recompilation. Packet duration and byte count are bounded per-slot
+ * rather than hard-coded so multi-sample-rate or larger-packet formats
+ * work too. */
+#define AAF_MAX_PACKET_SAMPLES 64  /* generous upper bound for any AAF fmt */
+#define AAF_MAX_PACKET_BYTES   (AAF_MAX_PACKET_SAMPLES * 2 /*ch*/ * 3 /*bytes*/)
+#define AAF_DEFAULT_PACKET_DURATION_NS 125000 /* 6 sa @ 48 kHz — updated runtime */
+
+/* Queue depth: covers Class B's 50 ms of in-flight presentation offset
+ * at the worst-case AAF packet rate (8000 pps for 6-sample frames).
+ * 50 ms × 8 pkts/ms = 400 → round up to next power of two for masking. */
+#define AAF_QUEUE_CAPACITY     512
+
 typedef struct {
-  uint8_t *buf;
-  uint32_t capacity;     /* power of 2 */
-  _Atomic uint32_t head; /* write position (producer only) */
-  _Atomic uint32_t tail; /* read position (consumer only) */
-} jitter_ring_t;
+  uint32_t presentation_ns; /* avtp_timestamp (lower 32 b of gPTP ns) */
+  uint16_t pcm_len;         /* actual bytes in pcm_data, ≤ AAF_MAX_PACKET_BYTES */
+  uint8_t  pcm_data[AAF_MAX_PACKET_BYTES]; /* converted stereo 24-bit samples */
+} aaf_packet_slot_t;
 
-#define JITTER_RING_SIZE 2048 /* ~7ms at 48kHz stereo 24-bit */
-#define JITTER_PREFILL 576    /* ~2ms of silence pre-fill */
+typedef struct {
+  aaf_packet_slot_t slots[AAF_QUEUE_CAPACITY];
+  _Atomic uint32_t head; /* next write index (producer only) */
+  _Atomic uint32_t tail; /* next read index (consumer only) */
+} aaf_packet_queue_t;
 
-static inline uint32_t ring_readable(const jitter_ring_t *r) {
-  return atomic_load_explicit(&r->head, memory_order_acquire) -
-         atomic_load_explicit(&r->tail, memory_order_relaxed);
+static inline uint32_t aaf_queue_fill(const aaf_packet_queue_t *queue) {
+  return atomic_load_explicit(&queue->head, memory_order_acquire) -
+         atomic_load_explicit(&queue->tail, memory_order_relaxed);
 }
 
-static inline uint32_t ring_writable(const jitter_ring_t *r) {
-  return r->capacity - ring_readable(r);
+/* Push a packet. Returns true on success, false if queue is full. */
+static inline bool aaf_queue_push(aaf_packet_queue_t *queue,
+                                  uint32_t presentation_ns,
+                                  const uint8_t *pcm, uint16_t pcm_len) {
+  if (aaf_queue_fill(queue) >= AAF_QUEUE_CAPACITY)
+    return false;
+  uint32_t head = atomic_load_explicit(&queue->head, memory_order_relaxed);
+  aaf_packet_slot_t *slot = &queue->slots[head & (AAF_QUEUE_CAPACITY - 1)];
+  slot->presentation_ns = presentation_ns;
+  if (pcm_len > AAF_MAX_PACKET_BYTES)
+    pcm_len = AAF_MAX_PACKET_BYTES;
+  slot->pcm_len = pcm_len;
+  memcpy(slot->pcm_data, pcm, pcm_len);
+  atomic_store_explicit(&queue->head, head + 1, memory_order_release);
+  return true;
 }
 
-static inline uint32_t ring_write(jitter_ring_t *r, const uint8_t *data,
-                                  uint32_t len) {
-  uint32_t avail = ring_writable(r);
-  if (len > avail)
-    len = avail;
-  if (len == 0)
-    return 0;
-  uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
-  uint32_t mask = r->capacity - 1;
-  uint32_t first = r->capacity - (h & mask);
-  if (first > len)
-    first = len;
-  memcpy(r->buf + (h & mask), data, first);
-  if (len > first)
-    memcpy(r->buf, data + first, len - first);
-  atomic_store_explicit(&r->head, h + len, memory_order_release);
-  return len;
+/* Peek at the next packet due for consumption (oldest by arrival = oldest
+ * by presentation_ns when packets arrive in order). Returns NULL if empty. */
+static inline const aaf_packet_slot_t *
+aaf_queue_peek(const aaf_packet_queue_t *queue) {
+  if (aaf_queue_fill(queue) == 0)
+    return NULL;
+  uint32_t tail = atomic_load_explicit(&queue->tail, memory_order_relaxed);
+  return &queue->slots[tail & (AAF_QUEUE_CAPACITY - 1)];
 }
 
-static inline uint32_t ring_read(jitter_ring_t *r, uint8_t *dst, uint32_t len) {
-  uint32_t avail = ring_readable(r);
-  if (len > avail)
-    len = avail;
-  if (len == 0)
-    return 0;
-  uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
-  uint32_t mask = r->capacity - 1;
-  uint32_t first = r->capacity - (t & mask);
-  if (first > len)
-    first = len;
-  memcpy(dst, r->buf + (t & mask), first);
-  if (len > first)
-    memcpy(dst + first, r->buf, len - first);
-  atomic_store_explicit(&r->tail, t + len, memory_order_release);
-  return len;
+static inline void aaf_queue_pop(aaf_packet_queue_t *queue) {
+  uint32_t tail = atomic_load_explicit(&queue->tail, memory_order_relaxed);
+  atomic_store_explicit(&queue->tail, tail + 1, memory_order_release);
 }
 
 /* Stream RX handler context — file-static, accessed by EMAC task and
- * esp_timer task. Allocated by avb_start_stream_in. */
+ * I2S on_sent ISR. Allocated by avb_start_stream_in. */
 typedef struct {
   avb_state_s *state; /* for media_clock stats update */
   i2s_chan_handle_t i2s_tx_handle;
-  uint8_t *i2s_drain_buf; /* buffer for drain callback reads */
-  size_t i2s_drain_buf_size;
-  uint8_t *i2s_convert_buf; /* buffer for AVTP→PCM conversion in handler */
-  size_t i2s_convert_buf_size;
-  jitter_ring_t ring;
-  esp_timer_handle_t drain_timer;
+  aaf_packet_queue_t queue;
   uint8_t expected_stream_id[UNIQUE_ID_LEN]; /* filter: only accept this stream */
+  /* Format-derived runtime constants (updated on first packet so the drain
+   * stays class- and format-agnostic). */
+  uint32_t packet_duration_ns;
+  uint16_t packet_bytes;   /* stereo 24-bit bytes per packet */
+  /* Presentation-time anchoring (Milan §5.3/§7.3). The drain holds off
+   * until the queue has accumulated startup_fill_target packets — that
+   * fill depth then becomes the listener-internal delay, giving a
+   * *deterministic* offset between avtp_timestamp and DAC output so the
+   * relative timing of samples is preserved. Rate-matched PLL (gap 2)
+   * keeps the depth constant; only a gPTP discontinuity or real packet
+   * loss can perturb it, at which point the next stream connect will
+   * re-anchor. */
+  uint16_t startup_fill_target;  /* packets to queue before draining */
+  _Atomic bool drain_enabled;    /* ISR-safe flag: false until fill hit */
+  bool drain_enabled_logged;     /* main loop has logged the transition */
+  /* Partial-packet cursor — carries across on_sent events when a DMA
+   * descriptor ends mid-AAF-packet. Bytes already copied out of the
+   * current queue-head slot; 0 means "start of a fresh packet". Only
+   * the on_sent ISR touches this. */
+  uint16_t partial_bytes_drained;
   /* diagnostics */
-  uint32_t pkt_count;
-  uint32_t ring_write_fail; /* ring full — packets dropped */
-  uint32_t ring_write_ok;
-  uint32_t drain_count;
-  uint32_t drain_underrun; /* drain found ring empty */
+  uint32_t pkt_count;          /* total AAF packets received */
+  uint32_t queue_full_drops;   /* packet arrivals refused because queue full */
+  uint32_t silence_inserts;    /* drain events where queue was empty */
+  uint32_t on_time_emits;      /* drain events that emitted a real packet */
+  uint32_t drain_count;        /* total on_sent events */
   uint32_t stream_id_mismatch; /* packets dropped due to wrong stream_id */
   uint32_t seq_num_mismatch;   /* sequence number gaps detected */
   uint8_t last_seq_num;        /* last received sequence number */
   bool seq_num_valid;          /* false until first packet received */
+  int64_t drain_enabled_at_us; /* esp_timer_get_time when drain turned on */
+  /* Milan GET_COUNTERS state (Table 5.13). All monotonic 32-bit. */
+  uint32_t media_locked_count;     /* drain transitioned into locked state */
+  uint32_t media_unlocked_count;   /* lost lock due to packet-arrival timeout */
+  uint32_t ts_uncertain_count;     /* AVTPDU with tu=1 received */
+  uint32_t late_ts_count;          /* avtp_timestamp already past at RX */
+  uint32_t early_ts_count;         /* avtp_timestamp too far in future at RX */
+  int64_t last_packet_us;          /* esp_timer at most recent packet RX */
+  bool ever_locked;                /* first-lock gate for unlock detection */
   /* first-packet snapshot (written by handler, printed by main loop) */
   uint8_t diag_subtype;
   uint16_t diag_sdl;
@@ -1715,36 +1773,110 @@ typedef struct {
 
 static crf_rx_ctx_t *s_crf_rx_ctx = NULL;
 
-/* Drain timer callback — reads from ring, writes to I2S.
- * Runs in esp_timer task context (prio 22), fired every 1ms. */
-static void stream_in_drain_cb(void *arg) {
-  stream_rx_ctx_t *c = (stream_rx_ctx_t *)arg;
-  c->drain_count++;
+/* I2S on_sent callback — DMA-event-driven drain.
+ *
+ * Fires from I2S ISR every time a DMA descriptor finishes transmitting
+ * (one descriptor = one AAF packet = 125 µs at 48 kHz / 6 frames). The
+ * rate therefore tracks the APLL-tuned DAC clock exactly, so feeding
+ * one packet per event keeps the DMA ring full without either overfill
+ * or underrun — and i2s_bytes_written now measures actual DAC rate,
+ * which is what the PLL needs to close the loop.
+ *
+ * The channel is configured with auto_clear_before_cb=true so
+ * event->dma_buf arrives pre-zeroed; a short packet or empty queue
+ * automatically becomes silence without us having to write anything.
+ *
+ * Registered once at i2s init (before channel_enable, which is a
+ * precondition of i2s_channel_register_event_callback). The active
+ * stream context is looked up via the file-static s_stream_rx_ctx so
+ * listener start/stop doesn't touch the i2s callback registration.
+ *
+ * ISR restrictions apply: no blocking calls, no float, keep it short.
+ * CONFIG_I2S_ISR_IRAM_SAFE is not set so flash code is acceptable. */
+static bool IRAM_ATTR stream_in_i2s_sent_cb(i2s_chan_handle_t handle,
+                                             i2s_event_data_t *event,
+                                             void *user_ctx) {
+  (void)handle;
+  avb_state_s *state = (avb_state_s *)user_ctx;
+  stream_rx_ctx_t *ctx = s_stream_rx_ctx;
 
-  uint32_t avail = ring_readable(&c->ring);
-  if (avail == 0) {
-    c->drain_underrun++;
-    return;
+  if (ctx) {
+    ctx->drain_count++;
+
+    /* Startup-fill gate: hold the drain until the queue has reached
+     * the target depth. The resulting buffer level becomes the
+     * deterministic listener-internal offset from avtp_timestamp to
+     * DAC output — identical on every connect, preserved forever by
+     * the rate-matched PLL. While waiting, the buffer stays zero
+     * (auto_clear_before_cb), so the DAC emits silence. */
+    if (!atomic_load_explicit(&ctx->drain_enabled, memory_order_acquire)) {
+      if (aaf_queue_fill(&ctx->queue) >= ctx->startup_fill_target) {
+        atomic_store_explicit(&ctx->drain_enabled, true, memory_order_release);
+        ctx->drain_enabled_at_us = esp_timer_get_time();
+        ctx->media_locked_count++; /* Milan media_locked counter */
+      } else {
+        ctx->silence_inserts++;
+        goto pll_accounting;
+      }
+    }
+
+    /* The DMA descriptor size is cache-line-aligned (192 B = 32 frames
+     * at stereo 24-bit) which is not a whole number of AAF packets
+     * (36 B each). So AAF packets straddle descriptor boundaries and
+     * we carry a partial cursor across on_sent events:
+     *   - start each event by finishing whatever partial packet from
+     *     the queue head we had left over last time;
+     *   - then copy whole packets while they fit;
+     *   - if the last one only partially fits, copy its prefix and
+     *     remember how far we got so the next event finishes it. */
+    uint8_t *dst = (uint8_t *)event->dma_buf;
+    size_t remaining = event->size;
+    bool emitted_any = false;
+    while (remaining > 0) {
+      const aaf_packet_slot_t *slot = aaf_queue_peek(&ctx->queue);
+      if (!slot)
+        break;
+      uint16_t bytes_left_in_slot =
+          slot->pcm_len - ctx->partial_bytes_drained;
+      size_t to_copy =
+          (bytes_left_in_slot <= remaining) ? bytes_left_in_slot : remaining;
+      memcpy(dst, slot->pcm_data + ctx->partial_bytes_drained, to_copy);
+      dst += to_copy;
+      remaining -= to_copy;
+      ctx->partial_bytes_drained += to_copy;
+      emitted_any = true;
+      if (ctx->partial_bytes_drained >= slot->pcm_len) {
+        /* Finished this packet — pop and move to the next. */
+        aaf_queue_pop(&ctx->queue);
+        ctx->partial_bytes_drained = 0;
+        ctx->on_time_emits++;
+      }
+      /* If we didn't finish the packet, remaining must now be 0 and we
+       * fall out of the loop naturally on the next iteration's check. */
+    }
+    if (!emitted_any)
+      ctx->silence_inserts++;
   }
+pll_accounting:;
 
-  uint32_t to_read = avail;
-  if (to_read > c->i2s_drain_buf_size)
-    to_read = c->i2s_drain_buf_size;
-  /* Align to frame boundary (6 bytes per stereo 24-bit frame) */
-  to_read = (to_read / 6) * 6;
-  if (to_read == 0)
-    return;
-
-  uint32_t got = ring_read(&c->ring, c->i2s_drain_buf, to_read);
-  size_t bytes_written = 0;
-  i2s_channel_write(c->i2s_tx_handle, c->i2s_drain_buf, got, &bytes_written, 1);
-  /* Feed the PLL counter: accumulate bytes the DMA actually consumed
-   * (not bytes the drain attempted). avb_pll.c reads this against gPTP
-   * time to measure the real I2S MCLK rate. */
-  if (c->state) {
-    atomic_fetch_add_explicit(&c->state->media_clock.i2s_bytes_written,
-                              (uint64_t)bytes_written, memory_order_relaxed);
+  /* PLL counter: bytes about to be sent to the DAC on this descriptor.
+   * Cadence now equals the APLL-tuned DAC rate, closing the PLL loop.
+   * Updated even when no listener stream is active so the PLL has a
+   * valid baseline if/when a stream connects. */
+  if (state) {
+    atomic_fetch_add_explicit(&state->media_clock.i2s_bytes_written,
+                              (uint64_t)event->size, memory_order_relaxed);
   }
+  return false;
+}
+
+/* Register the on_sent callback on the TX channel. Must be called
+ * between i2s_channel_init_std_mode and i2s_channel_enable — the
+ * driver rejects callback registration while the channel is running. */
+int avb_stream_in_register_i2s_cb(avb_state_s *state) {
+  i2s_event_callbacks_t cbs = { .on_sent = stream_in_i2s_sent_cb };
+  return i2s_channel_register_event_callback(state->i2s_tx_handle, &cbs,
+                                              state) == ESP_OK ? OK : ERROR;
 }
 
 /* CRF stream RX handler — counts CRF AVTPDUs and records the most recent
@@ -1785,7 +1917,24 @@ static void avb_crf_rx_handler(uint8_t *avtp_data, uint16_t len,
   ctx->last_timestamp_ns = timestamp_ns;
   ctx->timestamp_count++;
 
-  /* Compute drift vs local gPTP for the Phase 2b media-clock PLL */
+  /* Publish a (crf_ts, bytes_written) anchor for the PLL (seqlock).
+   * Done before the drift log below so the snapshot captures
+   * bytes_written as close to CRF arrival as possible. */
+  if (ctx->state) {
+    avb_state_s *state = ctx->state;
+    uint64_t bytes_snapshot = atomic_load_explicit(
+        &state->media_clock.i2s_bytes_written, memory_order_acquire);
+    uint32_t seq = atomic_load_explicit(
+        &state->media_clock.crf_anchor.seq, memory_order_relaxed);
+    atomic_store_explicit(&state->media_clock.crf_anchor.seq, seq + 1,
+                          memory_order_release); /* odd: write in progress */
+    state->media_clock.crf_anchor.ts_ns = timestamp_ns;
+    state->media_clock.crf_anchor.bytes = bytes_snapshot;
+    atomic_store_explicit(&state->media_clock.crf_anchor.seq, seq + 2,
+                          memory_order_release); /* even: complete */
+  }
+
+  /* Compute drift vs local gPTP for diagnostic log output */
   struct timespec now;
   if (ctx->state && clock_gettime(CLOCK_PTP_SYSTEM, &now) == 0) {
     uint64_t local_ns =
@@ -1809,45 +1958,55 @@ static void avb_crf_rx_handler(uint8_t *avtp_data, uint16_t len,
 /* Stream RX handler — called inline from EMAC RX task for each
  * VLAN-tagged AVTP packet. Parses AVTP, converts audio to 24-bit
  * stereo, writes to jitter ring buffer. Must return quickly. */
-static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *ctx) {
-  stream_rx_ctx_t *c = (stream_rx_ctx_t *)ctx;
-  if (!c || len < 24)
+static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *arg) {
+  stream_rx_ctx_t *ctx = (stream_rx_ctx_t *)arg;
+  if (!ctx || len < 24)
     return;
 
   /* Filter by stream_id — only accept packets from the connected talker.
    * Stream_id is at AVTP header bytes [4..11] for both AAF and IEC 61883. */
-  if (memcmp(avtp_data + 4, c->expected_stream_id, UNIQUE_ID_LEN) != 0) {
-    c->stream_id_mismatch++;
+  if (memcmp(avtp_data + 4, ctx->expected_stream_id, UNIQUE_ID_LEN) != 0) {
+    ctx->stream_id_mismatch++;
     return;
   }
 
   /* Track sequence number gaps (avtp_data[2] = sequence_num) */
   uint8_t seq_num = avtp_data[2];
-  if (c->seq_num_valid) {
-    uint8_t expected = c->last_seq_num + 1;
+  if (ctx->seq_num_valid) {
+    uint8_t expected = ctx->last_seq_num + 1;
     if (seq_num != expected)
-      c->seq_num_mismatch++;
+      ctx->seq_num_mismatch++;
   }
-  c->last_seq_num = seq_num;
-  c->seq_num_valid = true;
+  ctx->last_seq_num = seq_num;
+  ctx->seq_num_valid = true;
 
-  /* Extract AVTP presentation time (bytes 12-15) and track drift vs
-   * local gPTP. AAF packets arrive at 8000/s; clock_gettime() on every
-   * one burns real CPU in the EMAC RX task (contended internally) and
-   * can starve the watchdog. Sample every 10th packet — 800/s — still
-   * plenty for averaging stats, and enough to feed any future presentation-
-   * time scheduler. */
-  if (c->state && (c->pkt_count % 10) == 0) {
+  /* Timestamp-uncertain (tu) bit — IEEE 1722-2016 §5.3, byte 3 bit 0.
+   * When the talker sets tu=1 it's declaring the avtp_timestamp not
+   * reliable (e.g. during gPTP re-lock). Milan counts these so a
+   * controller can see that the stream is passing but timestamps
+   * shouldn't be trusted. */
+  if (avtp_data[3] & 0x01)
+    ctx->ts_uncertain_count++;
+
+  /* Packet-arrival timestamp for lock / unlock detection. */
+  ctx->last_packet_us = esp_timer_get_time();
+
+  /* Sample drift (avtp_timestamp vs local gPTP) every 10th packet —
+   * AAF arrives at 8000/s and clock_gettime(CLOCK_PTP_SYSTEM) is
+   * contended internally, so calling it on every packet burns real CPU
+   * in the EMAC RX task and can starve the watchdog. 800/s is plenty
+   * for averaging stats. */
+  if (ctx->state && (ctx->pkt_count % 10) == 0) {
     struct timespec now;
     uint32_t avtp_timestamp =
         ((uint32_t)avtp_data[12] << 24) | ((uint32_t)avtp_data[13] << 16) |
         ((uint32_t)avtp_data[14] << 8) | (uint32_t)avtp_data[15];
     if (clock_gettime(CLOCK_PTP_SYSTEM, &now) == 0) {
-      uint32_t local_timestamp =
-          (uint32_t)((uint64_t)now.tv_sec * 1000000000ULL +
-                     (uint64_t)now.tv_nsec);
+      uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL +
+                        (uint64_t)now.tv_nsec;
+      uint32_t local_timestamp = (uint32_t)now_ns;
       int32_t drift = (int32_t)(avtp_timestamp - local_timestamp);
-      avb_state_s *state = c->state;
+      avb_state_s *state = ctx->state;
       state->media_clock.aaf_last_drift_ns = drift;
       state->media_clock.aaf_drift_sum_ns += drift;
       state->media_clock.aaf_samples++;
@@ -1859,6 +2018,18 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *ctx) {
           drift > state->media_clock.aaf_drift_max_ns) {
         state->media_clock.aaf_drift_max_ns = drift;
       }
+
+      /* Milan late_ts / early_ts counters. drift is the signed
+       * (avtp_ts − now) difference: negative = ts has already passed,
+       * positive large = ts is unexpectedly far in the future. Sampled
+       * at the same 1-in-10 rate as the drift stats; absolute counts
+       * are therefore approximate, but the *trend* relative to
+       * frames_rx still tells a controller whether the stream is
+       * timing-healthy. */
+      if (drift < 0)
+        ctx->late_ts_count++;
+      else if (drift > 50 * 1000 * 1000) /* 50 ms in future = anomalous */
+        ctx->early_ts_count++;
     }
   }
 
@@ -1903,89 +2074,167 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len, void *ctx) {
     return;
 
   /* Capture first packet diagnostics (main loop prints) */
-  if (c->diag_captured == 0) {
-    c->diag_subtype = subtype;
-    c->diag_sdl =
+  if (ctx->diag_captured == 0) {
+    ctx->diag_subtype = subtype;
+    ctx->diag_sdl =
         (subtype == avtp_subtype_61883)
             ? ((iec_61883_6_message_s *)avtp_data)->stream_data_len[0] << 8 |
                   ((iec_61883_6_message_s *)avtp_data)->stream_data_len[1]
             : 0;
-    c->diag_channels = channels;
-    c->diag_samples = samples;
+    ctx->diag_channels = channels;
+    ctx->diag_samples = samples;
     int copy = pcm_len < 8 ? pcm_len : 8;
-    memcpy(c->diag_first_audio, pcm_data, copy);
-    c->diag_captured = 1;
+    memcpy(ctx->diag_first_audio, pcm_data, copy);
+    ctx->diag_captured = 1;
   }
 
-  /* Convert AVTP 24-bit audio to 24-bit stereo for I2S.
-   * I2S slot config: 24-bit data, 24-bit slot (3 bytes/sample, little-endian)
-   * Downmix multi-channel to stereo: ch0 → L, ch1 → R */
-  uint8_t *buf = c->i2s_convert_buf;
+  /* Convert AVTP 24-bit audio to 24-bit stereo for I2S into a local
+   * packet buffer, then enqueue with its presentation time (bytes 12-15
+   * of the AVTP header). The time-scheduled drain will emit the packet
+   * when its presentation_ns matches the current gPTP time + DMA depth.
+   * I2S slot config: 24-bit data, 24-bit slot (3 bytes/sample, little-endian).
+   * Downmix multi-channel to stereo: ch0 → L, ch1 → R. */
+  uint8_t packet_pcm[AAF_MAX_PACKET_BYTES];
   int offset = 0;
-  for (int s = 0; s < samples && offset + 6 <= (int)c->i2s_convert_buf_size;
-       s++) {
-    for (int ch = 0; ch < 2; ch++) {
-      int src_ch = (ch < channels) ? ch : 0;
-      int src_offset = (s * channels + src_ch) * 4;
+  for (int sample_idx = 0;
+       sample_idx < samples && offset + 6 <= (int)sizeof(packet_pcm);
+       sample_idx++) {
+    for (int channel = 0; channel < 2; channel++) {
+      int src_channel = (channel < channels) ? channel : 0;
+      int src_offset = (sample_idx * channels + src_channel) * 4;
 
       if (subtype == avtp_subtype_aaf) {
         if (src_offset + 2 < pcm_len) {
-          buf[offset + 0] = pcm_data[src_offset + 2]; // LSB
-          buf[offset + 1] = pcm_data[src_offset + 1]; // MID
-          buf[offset + 2] = pcm_data[src_offset + 0]; // MSB
+          packet_pcm[offset + 0] = pcm_data[src_offset + 2]; // LSB
+          packet_pcm[offset + 1] = pcm_data[src_offset + 1]; // MID
+          packet_pcm[offset + 2] = pcm_data[src_offset + 0]; // MSB
         } else {
-          buf[offset + 0] = 0;
-          buf[offset + 1] = 0;
-          buf[offset + 2] = 0;
+          packet_pcm[offset + 0] = 0;
+          packet_pcm[offset + 1] = 0;
+          packet_pcm[offset + 2] = 0;
         }
       } else {
         if (src_offset + 3 < pcm_len) {
-          buf[offset + 0] = pcm_data[src_offset + 3]; // LSB
-          buf[offset + 1] = pcm_data[src_offset + 2]; // MID
-          buf[offset + 2] = pcm_data[src_offset + 1]; // MSB
+          packet_pcm[offset + 0] = pcm_data[src_offset + 3]; // LSB
+          packet_pcm[offset + 1] = pcm_data[src_offset + 2]; // MID
+          packet_pcm[offset + 2] = pcm_data[src_offset + 1]; // MSB
         } else {
-          buf[offset + 0] = 0;
-          buf[offset + 1] = 0;
-          buf[offset + 2] = 0;
+          packet_pcm[offset + 0] = 0;
+          packet_pcm[offset + 1] = 0;
+          packet_pcm[offset + 2] = 0;
         }
       }
       offset += 3;
     }
   }
 
-  /* Write converted PCM into jitter ring — non-blocking.
-   * All-or-nothing to preserve 6-byte frame alignment. */
   if (offset > 0) {
-    if (ring_writable(&c->ring) >= (uint32_t)offset) {
-      ring_write(&c->ring, buf, offset);
-      c->ring_write_ok++;
-    } else {
-      c->ring_write_fail++;
+    uint32_t avtp_timestamp =
+        ((uint32_t)avtp_data[12] << 24) | ((uint32_t)avtp_data[13] << 16) |
+        ((uint32_t)avtp_data[14] << 8) | (uint32_t)avtp_data[15];
+
+    /* Refine the drain scheduler's packet-duration window based on the
+     * actual packet format we're receiving (class A/B and other AAF
+     * sample counts work without recompilation; assumes 48 kHz). */
+    uint16_t actual_bytes = (uint16_t)offset;
+    if (ctx->packet_bytes != actual_bytes) {
+      ctx->packet_bytes = actual_bytes;
+      ctx->packet_duration_ns =
+          (uint32_t)((uint64_t)samples * 1000000000ULL / 48000ULL);
     }
-    if (!c->diag_i2s_bytes)
-      c->diag_i2s_bytes = offset;
+
+    if (!aaf_queue_push(&ctx->queue, avtp_timestamp, packet_pcm,
+                        (uint16_t)offset)) {
+      ctx->queue_full_drops++;
+    }
+    if (!ctx->diag_i2s_bytes)
+      ctx->diag_i2s_bytes = offset;
   }
-  c->pkt_count++;
+  ctx->pkt_count++;
 }
 
 /* Print stream-in diagnostics — called from AVB main loop (safe for UART).
  * One-shot: prints first-packet info once, then suppressed. */
 void avb_stream_in_print_diag(void) {
-  stream_rx_ctx_t *c = s_stream_rx_ctx;
-  if (!c || c->diag_captured != 1)
+  stream_rx_ctx_t *ctx = s_stream_rx_ctx;
+  if (!ctx)
     return;
-  c->diag_captured = 2;
-  avbinfo("STREAM: ok=%lu rfail=%lu drain=%lu underrun=%lu fill=%lu "
-          "id_skip=%lu seq_gap=%lu sub=%d sdl=%d ch=%d samp=%d i2s=%d "
-          "audio=[%02x %02x %02x %02x %02x %02x %02x %02x]",
-          c->ring_write_ok, c->ring_write_fail, c->drain_count,
-          c->drain_underrun, ring_readable(&c->ring),
-          c->stream_id_mismatch, c->seq_num_mismatch, c->diag_subtype,
-          c->diag_sdl, c->diag_channels, c->diag_samples, c->diag_i2s_bytes,
-          c->diag_first_audio[0], c->diag_first_audio[1],
-          c->diag_first_audio[2], c->diag_first_audio[3],
-          c->diag_first_audio[4], c->diag_first_audio[5],
-          c->diag_first_audio[6], c->diag_first_audio[7]);
+
+  /* One-shot "drain enabled" snapshot — the startup fill has completed
+   * and the drain is now presenting audio from a fixed-depth queue. The
+   * reported fill_ms is the deterministic listener-internal offset
+   * between avtp_timestamp and DAC output. */
+  if (!ctx->drain_enabled_logged &&
+      atomic_load_explicit(&ctx->drain_enabled, memory_order_acquire)) {
+    ctx->drain_enabled_logged = true;
+    ctx->ever_locked = true;
+    uint32_t fill_us = (uint32_t)(ctx->startup_fill_target *
+                                  (uint64_t)ctx->packet_duration_ns / 1000);
+    avbinfo("STREAM: drain enabled (fill=%u pkts ≈ %lu us internal delay)",
+            ctx->startup_fill_target, (unsigned long)fill_us);
+  }
+
+  /* Milan media_unlocked detection — if we have been locked and no AAF
+   * packet has arrived in UNLOCK_TIMEOUT_US, the stream has stalled.
+   * Tear down the drain_enabled flag so that a resumption of traffic
+   * re-runs the startup fill, re-anchors, and increments
+   * media_locked_count again. */
+  const int64_t UNLOCK_TIMEOUT_US = 125000; /* 10× Class A packet period */
+  if (ctx->ever_locked &&
+      atomic_load_explicit(&ctx->drain_enabled, memory_order_acquire) &&
+      ctx->last_packet_us > 0 &&
+      (esp_timer_get_time() - ctx->last_packet_us) > UNLOCK_TIMEOUT_US) {
+    atomic_store_explicit(&ctx->drain_enabled, false, memory_order_release);
+    ctx->drain_enabled_logged = false;
+    ctx->media_unlocked_count++;
+    /* Drain whatever stale packets remain so the next lock re-anchors
+     * from freshly-arriving packets. */
+    uint32_t head = atomic_load_explicit(&ctx->queue.head,
+                                         memory_order_acquire);
+    atomic_store_explicit(&ctx->queue.tail, head, memory_order_release);
+    avbinfo("STREAM: media unlocked (no packets for %lld ms)",
+            (long long)((esp_timer_get_time() - ctx->last_packet_us) / 1000));
+  }
+
+  /* One-shot "first packet received" snapshot */
+  if (ctx->diag_captured == 1) {
+    ctx->diag_captured = 2;
+    avbinfo("STREAM: first packet sub=%d sdl=%d ch=%d samp=%d i2s=%d "
+            "audio=[%02x %02x %02x %02x %02x %02x %02x %02x]",
+            ctx->diag_subtype, ctx->diag_sdl, ctx->diag_channels,
+            ctx->diag_samples, ctx->diag_i2s_bytes, ctx->diag_first_audio[0],
+            ctx->diag_first_audio[1], ctx->diag_first_audio[2],
+            ctx->diag_first_audio[3], ctx->diag_first_audio[4],
+            ctx->diag_first_audio[5], ctx->diag_first_audio[6],
+            ctx->diag_first_audio[7]);
+  }
+
+  /* Periodic drain-health snapshot (~every 5 s) — shows whether the
+   * DMA-driven drain is staying locked: emits should match packet
+   * arrivals, silence/full should stay near zero in steady state.
+   * Uses deltas so each window is independent. */
+  static int64_t next_print_us = 0;
+  static uint32_t last_pkt = 0, last_emit = 0, last_silence = 0;
+  static uint32_t last_full = 0, last_drain = 0;
+  int64_t now_us = esp_timer_get_time();
+  if (now_us < next_print_us)
+    return;
+  next_print_us = now_us + 5 * 1000 * 1000;
+
+  uint32_t packets = ctx->pkt_count, emits = ctx->on_time_emits,
+           silence = ctx->silence_inserts,
+           full = ctx->queue_full_drops, drain = ctx->drain_count;
+  avbinfo("STREAM: pkts=%lu emit=%lu silence=%lu "
+          "full_drop=%lu drain=%lu qfill=%lu id_skip=%lu seq_gap=%lu",
+          packets - last_pkt, emits - last_emit, silence - last_silence,
+          full - last_full, drain - last_drain,
+          aaf_queue_fill(&ctx->queue), ctx->stream_id_mismatch,
+          ctx->seq_num_mismatch);
+  last_pkt = packets;
+  last_emit = emits;
+  last_silence = silence;
+  last_full = full;
+  last_drain = drain;
 }
 
 /* Fill stream input counters for GET_COUNTERS response (Milan Table 5.13) */
@@ -2011,14 +2260,32 @@ void avb_get_stream_in_counters(aem_stream_in_counters_val_s *valid,
   if (!ctx)
     return;
 
-  /* Populate counters from stream RX context */
+  /* Populate counters from stream RX context + media_clock state.
+   * All are 32-bit monotonic rollovers per Milan §5.4.8. The
+   * valid->unsupported_format flag MUST stay true (set above) — some
+   * Milan controllers reject enumeration if any of the mandatory
+   * Table 5.13 flags are false, even when the counter itself is zero. */
   uint32_t counter_val;
   counter_val = ctx->pkt_count;
   int_to_octets(&counter_val, counters->frames_rx, 4);
   counter_val = ctx->seq_num_mismatch;
   int_to_octets(&counter_val, counters->seq_num_mismatch, 4);
-  counter_val = ctx->ring_write_fail;
+  counter_val = ctx->queue_full_drops;
   int_to_octets(&counter_val, counters->stream_interrupted, 4);
+  counter_val = ctx->media_locked_count;
+  int_to_octets(&counter_val, counters->media_locked, 4);
+  counter_val = ctx->media_unlocked_count;
+  int_to_octets(&counter_val, counters->media_unlocked, 4);
+  counter_val = ctx->ts_uncertain_count;
+  int_to_octets(&counter_val, counters->ts_uncertain, 4);
+  counter_val = ctx->late_ts_count;
+  int_to_octets(&counter_val, counters->late_ts, 4);
+  counter_val = ctx->early_ts_count;
+  int_to_octets(&counter_val, counters->early_ts, 4);
+  if (ctx->state) {
+    counter_val = ctx->state->media_clock.media_reset_count;
+    int_to_octets(&counter_val, counters->media_reset, 4);
+  }
 }
 
 /* Stream RX dispatcher — registered with the net layer; routes incoming
@@ -2093,57 +2360,48 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   memcpy(ctx->expected_stream_id, state->input_streams[index].stream_id,
          UNIQUE_ID_LEN);
 
-  // Conversion buffer — used by handler to build stereo PCM per packet.
-  // All shared buffers use DMA-capable memory to avoid L1 cache coherency
-  // issues between the EMAC RX handler (producer) and drain timer (consumer)
-  // which may run on different CPU cores on ESP32-P4.
-  ctx->i2s_convert_buf_size = (AVTP_STREAM_DATA_PER_MSG / 4) * 2 * 3;
-  ctx->i2s_convert_buf =
-      heap_caps_calloc(1, ctx->i2s_convert_buf_size, MALLOC_CAP_DMA);
+  /* Packet queue starts empty; packet_bytes/duration are filled in by
+   * the first received packet. Seed them with the Class A default so a
+   * sensible value is available before the first packet arrives. */
+  atomic_store(&ctx->queue.head, 0);
+  atomic_store(&ctx->queue.tail, 0);
+  ctx->packet_bytes = 6 /*samples*/ * 2 /*ch*/ * 3 /*bytes*/;
+  ctx->packet_duration_ns = AAF_DEFAULT_PACKET_DURATION_NS;
 
-  // Drain buffer — used by timer callback to read from ring
-  ctx->i2s_drain_buf_size = 512; /* ~85 frames, well above 1ms worth */
-  ctx->i2s_drain_buf = heap_caps_calloc(1, ctx->i2s_drain_buf_size, MALLOC_CAP_DMA);
-
-  if (!ctx->i2s_convert_buf || !ctx->i2s_drain_buf) {
-    avberr("Stream in: no memory for buffers");
-    free(ctx->i2s_convert_buf);
-    free(ctx->i2s_drain_buf);
-    free(ctx);
-    return ERROR;
+  /* Presentation-time anchor: wait until the queue has buffered enough
+   * packets to cover the max_transit_time the SRP reservation carries
+   * for this stream. That makes listener-internal latency predictable
+   * and controller-visible. Fallback = 8 packets (1 ms) when no
+   * MSRP advertise has reached us yet — covers the case where a
+   * controller ACMP-connects before the network delivers the SRP
+   * talker-advertise. */
+  uint32_t msrp_latency_ns =
+      (uint32_t)octets_to_uint(
+          state->input_streams[index].msrp_accumulated_latency, 4);
+  uint16_t target_pkts;
+  if (msrp_latency_ns > 0 && ctx->packet_duration_ns > 0) {
+    uint32_t derived = msrp_latency_ns / ctx->packet_duration_ns;
+    /* Floor at 2 packets (any less can't absorb a single DMA descriptor
+     * worth of jitter) and cap at a safe fraction of the queue so the
+     * fill always fits with headroom for arrival bursts. */
+    if (derived < 2)
+      derived = 2;
+    if (derived > AAF_QUEUE_CAPACITY / 2)
+      derived = AAF_QUEUE_CAPACITY / 2;
+    target_pkts = (uint16_t)derived;
+  } else {
+    target_pkts = 8; /* Class A default */
   }
+  ctx->startup_fill_target = target_pkts;
+  atomic_store(&ctx->drain_enabled, false);
+  ctx->drain_enabled_at_us = 0;
+  ctx->partial_bytes_drained = 0;
+  avbinfo("Stream in: MSRP latency=%lu ns, startup_fill_target=%u pkts",
+          (unsigned long)msrp_latency_ns, (unsigned)target_pkts);
 
-  // Allocate jitter ring buffer
-  ctx->ring.buf = calloc(1, JITTER_RING_SIZE);
-  if (!ctx->ring.buf) {
-    avberr("Stream in: no memory for ring buffer");
-    free(ctx->i2s_convert_buf);
-    free(ctx->i2s_drain_buf);
-    free(ctx);
-    return ERROR;
-  }
-  ctx->ring.capacity = JITTER_RING_SIZE;
-  atomic_store(&ctx->ring.head, JITTER_PREFILL); /* pre-fill silence */
-  atomic_store(&ctx->ring.tail, 0);
-  /* Ring buf is calloc'd (zeros) so pre-fill region is already silence */
-
-  // Create and start drain timer (1ms period)
-  esp_timer_create_args_t timer_args = {
-      .callback = stream_in_drain_cb,
-      .arg = ctx,
-      .dispatch_method = ESP_TIMER_TASK,
-      .name = "avb_drain",
-  };
-  if (esp_timer_create(&timer_args, &ctx->drain_timer) != ESP_OK) {
-    avberr("Stream in: failed to create drain timer");
-    free(ctx->ring.buf);
-    free(ctx->i2s_convert_buf);
-    free(ctx->i2s_drain_buf);
-    free(ctx);
-    return ERROR;
-  }
-  esp_timer_start_periodic(ctx->drain_timer, 1000); /* 1000μs = 1ms */
-
+  /* The on_sent callback was already registered once at i2s init time
+   * (avb_stream_in_register_i2s_cb). It checks s_stream_rx_ctx on each
+   * fire, so all we need to do here is publish the new context. */
   s_stream_rx_ctx = ctx;
   state->stream_in_active = true;
   state->input_streams[index].connected = true;
@@ -2151,8 +2409,8 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   /* Register the shared dispatcher — routes to AAF or CRF by stream_id */
   avb_net_set_stream_rx_handler(avb_stream_rx_dispatcher, NULL);
 
-  avbinfo("Stream in started (jitter buffer %d bytes, pre-fill %d bytes)",
-          JITTER_RING_SIZE, JITTER_PREFILL);
+  avbinfo("Stream in started (packet queue %d slots, DMA on_sent drain)",
+          AAF_QUEUE_CAPACITY);
   return OK;
 }
 
@@ -2188,23 +2446,22 @@ void avb_stop_stream_in(avb_state_s *state, uint16_t index) {
   state->stream_in_active = false;
 
   if (s_stream_rx_ctx) {
-    // Stop and delete drain timer
-    esp_timer_stop(s_stream_rx_ctx->drain_timer);
-    esp_timer_delete(s_stream_rx_ctx->drain_timer);
-
-    avbinfo("Stream in stopped: %lu pkts, ring ok=%lu fail=%lu, "
-            "drain=%lu underrun=%lu, ring fill=%lu, id_skip=%lu",
-            s_stream_rx_ctx->pkt_count, s_stream_rx_ctx->ring_write_ok,
-            s_stream_rx_ctx->ring_write_fail, s_stream_rx_ctx->drain_count,
-            s_stream_rx_ctx->drain_underrun,
-            ring_readable(&s_stream_rx_ctx->ring),
-            s_stream_rx_ctx->stream_id_mismatch);
-
-    free(s_stream_rx_ctx->ring.buf);
-    free(s_stream_rx_ctx->i2s_convert_buf);
-    free(s_stream_rx_ctx->i2s_drain_buf);
-    free(s_stream_rx_ctx);
+    /* The on_sent callback remains registered on the TX channel; it
+     * becomes a no-op once s_stream_rx_ctx is cleared (see ISR). We
+     * can't unregister it here anyway because the channel is still
+     * running on behalf of the talker side. */
+    stream_rx_ctx_t *ctx_to_free = s_stream_rx_ctx;
     s_stream_rx_ctx = NULL;
+
+    avbinfo("Stream in stopped: pkts=%lu emit=%lu silence=%lu "
+            "full_drop=%lu drain=%lu qfill=%lu id_skip=%lu",
+            ctx_to_free->pkt_count, ctx_to_free->on_time_emits,
+            ctx_to_free->silence_inserts,
+            ctx_to_free->queue_full_drops, ctx_to_free->drain_count,
+            aaf_queue_fill(&ctx_to_free->queue),
+            ctx_to_free->stream_id_mismatch);
+
+    free(ctx_to_free);
   }
 
   /* Unregister dispatcher only if no other stream is active */

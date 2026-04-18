@@ -2454,17 +2454,36 @@ typedef struct {
     int64_t aaf_drift_sum_ns;
     uint32_t aaf_samples;
 
+
     /* MCLK PLL counter: cumulative bytes accepted by I2S DMA. Pumped by
-     * the stream-in drain callback (avtp.c) using i2s_channel_write's
-     * `bytes_written` return — which counts bytes the DMA actually
-     * consumed. avb_pll.c reads this against gPTP wall time to measure
-     * I2S rate error and apply corrections. */
+     * the stream-in drain callback (avtp.c) using the bytes-sent count
+     * reported per DMA descriptor. avb_pll.c reads this paired with a
+     * CRF-timestamp anchor to measure I2S rate error. */
     _Atomic uint64_t i2s_bytes_written;
+
+    /* CRF-driven PLL anchor — atomically-published pair of
+     *   (crf_ts_ns, i2s_bytes_written at the moment the CRF PDU arrived)
+     * Writer: avb_crf_rx_handler (EMAC RX task). Reader: avb_pll_tick.
+     * Uses a seqlock pattern: `seq` odd = write in progress, even =
+     * complete; readers retry if they observe a torn pair. Milan §7.2
+     * designates the CRF stream as the media clock reference, so the
+     * PLL uses these timestamps rather than local gPTP wall-clock
+     * reads whenever a CRF stream is connected. */
+    struct {
+      _Atomic uint32_t seq;
+      uint64_t ts_ns;
+      uint64_t bytes;
+    } crf_anchor;
 
     /* PLL state owned by avb_pll.c. Fields public for log visibility. */
     int32_t pll_last_ppm_error_q16;       /* last 5 s window, Q16 */
     int32_t pll_cumulative_ppm_error_q16; /* since baseline, Q16 */
     int32_t pll_applied_ppm_q16;          /* last correction written to HW */
+
+    /* Milan GET_COUNTERS media_reset counter — bumped by the PLL when
+     * gPTP discontinuity detection resets the baseline. Read by
+     * avb_get_stream_in_counters. */
+    uint32_t media_reset_count;
   } media_clock;
 
   /* Our own entity */
@@ -2792,6 +2811,7 @@ int avb_process_acmp_get_tx_connection_command(avb_state_s *state,
 int avb_start_stream_in(avb_state_s *state, uint16_t index);
 void avb_stop_stream_in(avb_state_s *state, uint16_t index);
 void avb_stream_in_print_diag(void);
+int avb_stream_in_register_i2s_cb(avb_state_s *state);
 
 /* avbpll.c — Milan media-clock PLL: measures I2S MCLK rate vs gPTP and
  * retunes the underlying hardware (APLL on ESP32-P4) to close the loop.

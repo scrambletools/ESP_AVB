@@ -2016,21 +2016,30 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
   }
 }
 
-/* Process AECP command register unsolicited notification */
+/* Process AECP command register unsolicited notification.
+ * Response body is target + controller + seq + u+cmd_type + flags = 24
+ * bytes, so cdl = 24 and the on-wire frame is 28 bytes (4-byte AVTP
+ * common header + cdl). Previously this handler sent 44 bytes from a
+ * 28-byte stack buffer (leaking 16 bytes of stack memory) and echoed
+ * whatever cdl the command carried — which some Hive versions reject
+ * because the declared cdl then doesn't match the frame's effective
+ * body length. */
 int avb_process_aecp_cmd_register_unsol_notif(avb_state_s *state,
                                               aecp_message_u *msg,
                                               eth_addr_t *src_addr) {
   int ret = OK;
   struct timespec ts;
 
-  // create a response, copy the cmd message data and change the msg type and
-  // status
   aecp_register_unsol_notif_s response;
+  memset(&response, 0, sizeof(response));
   memcpy(&response, msg, sizeof(aecp_register_unsol_notif_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
 
-  // send the response message
-  uint16_t msg_len = sizeof(atdecc_header_s) + sizeof(aecp_acquire_entity_s);
+  uint16_t cdl = sizeof(aecp_register_unsol_notif_s) - AVTP_CDL_PREAMBLE_LEN;
+  response.common.header.control_data_len_h = (cdl >> 8) & 0x07;
+  response.common.header.control_data_len = cdl & 0xFF;
+
+  uint16_t msg_len = sizeof(aecp_register_unsol_notif_s);
   ret =
       avb_net_send_to(state, ethertype_avtp, &response, msg_len, &ts, src_addr);
   if (ret < 0) {
@@ -2042,21 +2051,24 @@ int avb_process_aecp_cmd_register_unsol_notif(avb_state_s *state,
   return ret;
 }
 
-/* Process AECP command deregister unsolicited notification */
+/* Process AECP command deregister unsolicited notification. Same
+ * size/cdl hygiene as the register handler above. */
 int avb_process_aecp_cmd_deregister_unsol_notif(avb_state_s *state,
                                                 aecp_message_u *msg,
                                                 eth_addr_t *src_addr) {
   int ret = OK;
   struct timespec ts;
 
-  // create a response, copy the cmd message data and change the msg type and
-  // status
   aecp_register_unsol_notif_s response;
+  memset(&response, 0, sizeof(response));
   memcpy(&response, msg, sizeof(aecp_register_unsol_notif_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
 
-  // send the response message
-  uint16_t msg_len = sizeof(atdecc_header_s) + sizeof(aecp_acquire_entity_s);
+  uint16_t cdl = sizeof(aecp_register_unsol_notif_s) - AVTP_CDL_PREAMBLE_LEN;
+  response.common.header.control_data_len_h = (cdl >> 8) & 0x07;
+  response.common.header.control_data_len = cdl & 0xFF;
+
+  uint16_t msg_len = sizeof(aecp_register_unsol_notif_s);
   ret =
       avb_net_send_to(state, ethertype_avtp, &response, msg_len, &ts, src_addr);
   if (ret < 0) {
