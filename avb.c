@@ -420,6 +420,13 @@ static int avb_periodic_send(avb_state_s *state) {
       }
     }
   }
+
+  /* Attempt fast-connect for any listener stream with a saved binding
+   * that hasn't reconnected yet. Self-throttled per-stream. */
+  if (state->config.listener) {
+    avb_periodic_fast_connect(state);
+  }
+
   return OK;
 } // avb_periodic_send
 
@@ -839,38 +846,65 @@ void avb_identify_tone(avb_state_s *state, uint32_t duration_ms) {
 #define AVB_NVS_NAMESPACE "avb"
 #define AVB_NVS_KEY "persist"
 
+/* Helper: true if any byte in an 8-byte array is non-zero.
+ * Used to distinguish "never saved" (all zero) from a valid persisted
+ * stream_format, since the AM824 format has subtype byte 0x00. */
+static inline bool any_nonzero8(const uint8_t *b) {
+  return (b[0] | b[1] | b[2] | b[3] | b[4] | b[5] | b[6] | b[7]) != 0;
+}
+
 /* Populate the persist struct from current state */
 static void avb_persist_gather(avb_state_s *state) {
   avb_persistent_data_s *p = &state->persist;
   memset(p, 0, sizeof(*p));
   p->version = AVB_PERSIST_VERSION;
 
-  /* All descriptor names from the unified array */
-  memcpy(p->descriptor_names, state->descriptor_names,
-         sizeof(state->descriptor_names));
+  /* Descriptor names */
+  int n = AVB_NAME_COUNT < AVB_PERSIST_MAX_NAMES ? AVB_NAME_COUNT
+                                                 : AVB_PERSIST_MAX_NAMES;
+  memcpy(p->descriptor_names, state->descriptor_names, n * 64);
 
-  /* Control values */
+  /* Per-input-stream state (connection + format + streaming_wait) */
+  int n_in = state->num_input_streams < AVB_PERSIST_MAX_INPUT_STREAMS
+                 ? state->num_input_streams
+                 : AVB_PERSIST_MAX_INPUT_STREAMS;
+  for (int i = 0; i < n_in; i++) {
+    avb_persist_input_stream_s *dst = &p->input_streams[i];
+    const avb_listener_stream_s *src = &state->input_streams[i];
+    memcpy(dst->talker_id, src->talker_id, 8);
+    memcpy(dst->talker_uid, src->talker_uid, 2);
+    memcpy(dst->controller_id, src->controller_id, 8);
+    memcpy(dst->stream_format, &src->stream_format, 8);
+    dst->connected = src->connected ? 1 : 0;
+    dst->streaming_wait = src->stream_flags.streaming_wait ? 1 : 0;
+  }
+
+  /* Per-output-stream state (format; presentation offset is placeholder) */
+  int n_out = state->num_output_streams < AVB_PERSIST_MAX_OUTPUT_STREAMS
+                  ? state->num_output_streams
+                  : AVB_PERSIST_MAX_OUTPUT_STREAMS;
+  for (int i = 0; i < n_out; i++) {
+    avb_persist_output_stream_s *dst = &p->output_streams[i];
+    const avb_talker_stream_s *src = &state->output_streams[i];
+    memcpy(dst->stream_format, &src->stream_format, 8);
+    dst->presentation_time_offset_ns = 0; /* TODO: wire once talker exposes it */
+  }
+
+  /* Controls */
   p->speaker_vol_db = state->ctrl_speaker_vol;
   p->mic_gain_db = state->ctrl_mic_gain;
-
-  /* Stream formats */
-  for (int i = 0; i < state->num_input_streams && i < AVB_MAX_NUM_INPUT_STREAMS;
-       i++)
-    memcpy(p->stream_input_formats[i], &state->input_streams[i].stream_format,
-           8);
-  for (int i = 0;
-       i < state->num_output_streams && i < AVB_MAX_NUM_OUTPUT_STREAMS; i++)
-    memcpy(p->stream_output_formats[i],
-           &state->output_streams[i].stream_format, 8);
+  p->active_clock_source_index = state->media_clock.active_clock_source_index;
+  p->audio_unit_sample_rate_hz = 0; /* TODO: wire when sample-rate policy lands */
 }
 
 /* Apply loaded persist data to current state */
 static void avb_persist_apply(avb_state_s *state) {
   avb_persistent_data_s *p = &state->persist;
 
-  /* Restore all descriptor names */
-  memcpy(state->descriptor_names, p->descriptor_names,
-         sizeof(state->descriptor_names));
+  /* Descriptor names */
+  int n = AVB_NAME_COUNT < AVB_PERSIST_MAX_NAMES ? AVB_NAME_COUNT
+                                                 : AVB_PERSIST_MAX_NAMES;
+  memcpy(state->descriptor_names, p->descriptor_names, n * 64);
 
   /* Copy entity name and group name into their canonical locations too,
    * since the entity descriptor builder reads from there */
@@ -884,24 +918,57 @@ static void avb_persist_apply(avb_state_s *state) {
     memcpy(state->avb_interface.object_name,
            state->descriptor_names[AVB_NAME_AVB_INTERFACE], 64);
 
-  /* Control values — apply if non-zero (default struct is zeroed) */
+  /* Per-input-stream state */
+  int n_in = AVB_MAX_NUM_INPUT_STREAMS < AVB_PERSIST_MAX_INPUT_STREAMS
+                 ? AVB_MAX_NUM_INPUT_STREAMS
+                 : AVB_PERSIST_MAX_INPUT_STREAMS;
+  for (int i = 0; i < n_in; i++) {
+    const avb_persist_input_stream_s *src = &p->input_streams[i];
+    avb_listener_stream_s *dst = &state->input_streams[i];
+    if (any_nonzero8(src->stream_format))
+      memcpy(&dst->stream_format, src->stream_format, 8);
+    /* Restore the binding identity only. Do NOT restore `connected` —
+     * stream_id, stream_dest_addr, and vlan_id are derived on reconnect
+     * (not persisted), so setting connected=true here would make
+     * GET_RX_STATE report "connected=1 with zero stream_id/dest", which
+     * both violates Milan §5.5.3.6.16 (fields must be zero when not
+     * settled) and triggers a Hive enumeration fatal. Fast-connect
+     * fires on any stream with a non-zero talker_id and, on success,
+     * avb_connect_listener atomically sets connected=true together
+     * with stream_id / stream_dest_addr. */
+    if (any_nonzero8(src->talker_id)) {
+      memcpy(dst->talker_id, src->talker_id, 8);
+      memcpy(dst->talker_uid, src->talker_uid, 2);
+      memcpy(dst->controller_id, src->controller_id, 8);
+      dst->stream_flags.streaming_wait = src->streaming_wait ? 1 : 0;
+      avbinfo("NVS: restored binding for stream_input %d (pending fast-connect)",
+              i);
+    }
+  }
+
+  /* Per-output-stream state */
+  int n_out = AVB_MAX_NUM_OUTPUT_STREAMS < AVB_PERSIST_MAX_OUTPUT_STREAMS
+                  ? AVB_MAX_NUM_OUTPUT_STREAMS
+                  : AVB_PERSIST_MAX_OUTPUT_STREAMS;
+  for (int i = 0; i < n_out; i++) {
+    const avb_persist_output_stream_s *src = &p->output_streams[i];
+    avb_talker_stream_s *dst = &state->output_streams[i];
+    if (any_nonzero8(src->stream_format))
+      memcpy(&dst->stream_format, src->stream_format, 8);
+    /* src->presentation_time_offset_ns ignored for now — placeholder */
+  }
+
+  /* Controls — apply if non-zero (default struct is zeroed) */
   if (p->speaker_vol_db != 0.0f || p->mic_gain_db != 0.0f) {
     state->ctrl_speaker_vol = p->speaker_vol_db;
     state->ctrl_mic_gain = p->mic_gain_db;
   }
-
-  /* Stream formats — apply if any byte is non-zero
-   * (can't check just byte[0] since AM824 subtype is 0x00) */
-  for (int i = 0; i < AVB_MAX_NUM_INPUT_STREAMS; i++) {
-    uint8_t *f = p->stream_input_formats[i];
-    if (f[0] | f[1] | f[2] | f[3] | f[4] | f[5] | f[6] | f[7])
-      memcpy(&state->input_streams[i].stream_format, f, 8);
-  }
-  for (int i = 0; i < AVB_MAX_NUM_OUTPUT_STREAMS; i++) {
-    uint8_t *f = p->stream_output_formats[i];
-    if (f[0] | f[1] | f[2] | f[3] | f[4] | f[5] | f[6] | f[7])
-      memcpy(&state->output_streams[i].stream_format, f, 8);
-  }
+  /* active_clock_source_index: 0 is a valid value (INTERNAL/gPTP), so we
+   * always restore it — but only if the blob looks non-trivial. A freshly
+   * zeroed persist struct would leave this at 0, which happens to be the
+   * compile-time default anyway, so unconditional restore is safe. */
+  state->media_clock.active_clock_source_index = p->active_clock_source_index;
+  /* p->audio_unit_sample_rate_hz ignored for now — placeholder */
 }
 
 /* Load persistent data from NVS */
@@ -918,32 +985,53 @@ esp_err_t avb_persist_load(avb_state_s *state) {
     return err;
   }
 
+  bool need_reinit = false; /* true -> overwrite flash with a fresh v2 blob */
+
   nvs_handle_t handle;
   err = nvs_open(AVB_NVS_NAMESPACE, NVS_READONLY, &handle);
   if (err != ESP_OK) {
-    avbinfo("NVS: no saved data (namespace not found)");
-    return err;
+    avbinfo("NVS: no saved data (namespace not found) — initializing");
+    need_reinit = true;
+  } else {
+    /* Zero the whole struct first so any fields that aren't present in
+     * an older (shorter) stored blob stay zero after nvs_get_blob. */
+    memset(&state->persist, 0, sizeof(state->persist));
+    size_t stored_size = sizeof(avb_persistent_data_s);
+    err = nvs_get_blob(handle, AVB_NVS_KEY, &state->persist, &stored_size);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+      avbinfo("NVS: no saved data (key not found) — initializing");
+      need_reinit = true;
+    } else if (state->persist.version < 2 ||
+               state->persist.version > AVB_PERSIST_VERSION ||
+               stored_size > sizeof(avb_persistent_data_s)) {
+      /* Acceptance policy:
+       *  - version < 2: legacy blob with config-derived array sizes.
+       *  - version > current: written by newer firmware.
+       *  - stored_size > sizeof(current): struct shrank/reshaped.
+       * Forward-compat for stored_size < sizeof(current) is handled by
+       * the append-only rule + memset above. */
+      avbwarn("NVS: incompatible blob (size=%d ver=%d) — discarding and reinitializing",
+              (int)stored_size, state->persist.version);
+      memset(&state->persist, 0, sizeof(avb_persistent_data_s));
+      need_reinit = true;
+    } else {
+      avb_persist_apply(state);
+      avbinfo("NVS: loaded persistent data (%d bytes, version %d)",
+              (int)stored_size, state->persist.version);
+    }
   }
 
-  size_t size = sizeof(avb_persistent_data_s);
-  err = nvs_get_blob(handle, AVB_NVS_KEY, &state->persist, &size);
-  nvs_close(handle);
-
-  if (err != ESP_OK) {
-    avbinfo("NVS: no saved data (key not found)");
-    return err;
+  /* Replace missing/stale blobs with a fresh v2 snapshot of current
+   * state so the warning doesn't re-fire on every subsequent boot.
+   * apply() guards against clobbering runtime defaults with zeros,
+   * so it's safe to save here even if state is mostly default. */
+  if (need_reinit) {
+    avb_persist_save(state);
   }
 
-  if (state->persist.version != AVB_PERSIST_VERSION) {
-    avbwarn("NVS: version mismatch (%d != %d), ignoring",
-            state->persist.version, AVB_PERSIST_VERSION);
-    memset(&state->persist, 0, sizeof(avb_persistent_data_s));
-    return ESP_ERR_INVALID_VERSION;
-  }
-
-  avb_persist_apply(state);
-  avbinfo("NVS: loaded persistent data (%d bytes)", (int)size);
-  return ESP_OK;
+  return err;
 }
 
 /* Save persistent data to NVS */

@@ -93,6 +93,10 @@
 #define ADP_ENTITY_AVAIL_INTERVAL_MSEC 5000
 #define MAAP_ANNOUNCE_INTERVAL_MSEC 10000
 #define PTP_STATUS_UPDATE_INTERVAL_MSEC 3000
+/* Milan §5.5.3.6.x TMR_RETRY is 4s on probe failure. Use the same
+ * cadence for fast-connect retries while a saved binding waits for
+ * its talker to be discovered / respond. */
+#define AVB_FAST_CONNECT_RETRY_MSEC 4000
 #define UNSOL_NOTIF_INTERVAL_MSEC 2000
 
 // Commonly used mac addresses
@@ -178,23 +182,101 @@ typedef enum {
 } avb_name_index_t;
 
 /* Persistent data saved to NVS flash.
- * Holds user-settable names, control values, and stream formats that
- * survive reboots. Stored as a single blob under NVS key "avb_persist". */
-#define AVB_PERSIST_VERSION 1
+ * Holds user-settable names, control values, stream formats, and
+ * listener connection state that survive reboots. Stored as a single
+ * blob under NVS namespace "avb" / key "persist".
+ *
+ * ============================================================
+ *   WARNING — THIS STRUCT IS APPEND-ONLY.
+ * ============================================================
+ *   The on-disk layout is a raw memcpy of this struct. Loader
+ *   tolerance (see avb_persist_load) only works if every byte
+ *   offset of every existing field stays identical across
+ *   firmware versions.
+ *
+ *   YOU MUST:
+ *     * Only ADD new fields at the END of the struct.
+ *     * Bump AVB_PERSIST_VERSION when you do.
+ *
+ *   YOU MUST NOT:
+ *     * Reorder, resize, remove, or change the type of any
+ *       existing field.
+ *     * Change any AVB_PERSIST_MAX_* constant below — those
+ *       freeze array dimensions independent of the build-time
+ *       AVB_MAX_* constants, so config changes cannot shift
+ *       field offsets.
+ *
+ *   Breaking these rules silently corrupts saved data on every
+ *   device that upgrades through the broken version. There is
+ *   no wire integrity check that will catch it.
+ * ============================================================ */
+
+/* Fixed upper bounds for the NVS blob layout. Do NOT change these
+ * without also writing a migration path — see the warning above.
+ * Build-time AVB_MAX_* constants may shrink/grow independently as
+ * long as they stay ≤ these persist maxes (_Static_assert below). */
+#define AVB_PERSIST_MAX_NAMES 16
+#define AVB_PERSIST_MAX_INPUT_STREAMS 8
+#define AVB_PERSIST_MAX_OUTPUT_STREAMS 8
+
+/* Per-input-stream (listener) persistence. Only fields not derivable
+ * on reconnect: vlan_id, class, and presentation-time offset all come
+ * back from the talker's ACMP CONNECT_TX_RESPONSE and the AVTP stream
+ * itself, so they are not stored. Inner fields are APPEND-ONLY — to
+ * add new per-stream state later, append a parallel array at the end
+ * of avb_persistent_data_s rather than growing this struct. */
 typedef struct {
-  uint8_t version; /* struct version for forward compatibility */
+  uint8_t talker_id[8];     /* talker entity ID; all-zero = not configured */
+  uint8_t talker_uid[2];    /* talker unique_id / stream output index */
+  uint8_t controller_id[8]; /* controller that originated the CONNECT_RX */
+  uint8_t stream_format[8]; /* AVTP stream format */
+  uint8_t connected;        /* 1 = was connected at last save */
+  uint8_t streaming_wait;   /* 1 = STREAMING_WAIT mode, per Milan §5.5.3.6.17 */
+  uint8_t reserved[2];      /* pad to 4-byte boundary */
+} avb_persist_input_stream_s; /* 32 bytes */
+
+/* Per-output-stream (talker) persistence. APPEND-ONLY (see above). */
+typedef struct {
+  uint8_t stream_format[8];             /* AVTP stream format */
+  uint32_t presentation_time_offset_ns; /* user-configured presentation offset.
+                                         * Placeholder — not yet wired into TX. */
+} avb_persist_output_stream_s; /* 12 bytes */
+
+#define AVB_PERSIST_VERSION 2
+typedef struct {
+  uint8_t version;       /* struct version — bump on every append */
+  uint8_t reserved_v[3]; /* pad to 4-byte boundary */
+
+  /* ----- Fixed-size arrays — capped by AVB_PERSIST_MAX_* above ----- */
 
   /* Descriptor names — indexed by avb_name_index_t */
-  char descriptor_names[AVB_NAME_COUNT][64];
+  char descriptor_names[AVB_PERSIST_MAX_NAMES][64];
 
-  /* Codec control values */
-  float speaker_vol_db; /* speaker volume in dB */
-  float mic_gain_db;    /* mic gain in dB */
+  /* Per-stream state (format + connection for inputs, format + PTO for outputs) */
+  avb_persist_input_stream_s input_streams[AVB_PERSIST_MAX_INPUT_STREAMS];
+  avb_persist_output_stream_s output_streams[AVB_PERSIST_MAX_OUTPUT_STREAMS];
 
-  /* Stream formats (8 bytes each) */
-  uint8_t stream_input_formats[AVB_MAX_NUM_INPUT_STREAMS][8];
-  uint8_t stream_output_formats[AVB_MAX_NUM_OUTPUT_STREAMS][8];
+  /* ----- Controls (growable tail — new controls append HERE) ----- */
+  /* New scalar controls go at the very end so that appending a new
+   * one doesn't shift any existing field's offset. */
+  float speaker_vol_db;               /* speaker volume in dB */
+  float mic_gain_db;                  /* mic gain in dB */
+  uint16_t active_clock_source_index; /* CLOCK_DOMAIN 0 active source */
+  uint16_t reserved_cs;               /* pad to 4-byte boundary */
+  uint32_t audio_unit_sample_rate_hz; /* placeholder — wiring TBD */
 } avb_persistent_data_s;
+
+/* Enforce that build-time sizes fit in the frozen persist layout.
+ * If these fail: either shrink the AVB_MAX_* constant, or bump the
+ * AVB_PERSIST_MAX_* constant AND write a migration path for every
+ * device already in the field (see warning above). */
+_Static_assert(AVB_NAME_COUNT <= AVB_PERSIST_MAX_NAMES,
+               "AVB_NAME_COUNT exceeds AVB_PERSIST_MAX_NAMES — "
+               "persist layout cannot hold all descriptor names");
+_Static_assert(AVB_MAX_NUM_INPUT_STREAMS <= AVB_PERSIST_MAX_INPUT_STREAMS,
+               "AVB_MAX_NUM_INPUT_STREAMS exceeds AVB_PERSIST_MAX_INPUT_STREAMS");
+_Static_assert(AVB_MAX_NUM_OUTPUT_STREAMS <= AVB_PERSIST_MAX_OUTPUT_STREAMS,
+               "AVB_MAX_NUM_OUTPUT_STREAMS exceeds AVB_PERSIST_MAX_OUTPUT_STREAMS");
 
 /* Timespec functions */
 #define clock_timespec_subtract(ts1, ts2, ts3) timespecsub(ts1, ts2, ts3)
@@ -2309,6 +2391,10 @@ typedef struct {
   uint8_t msrp_failure_code[2];              // msrp failure code
   bool connected;                            // status as connected
   bool pending_connection;                   // status as pending connection
+  /* Timestamp of last fast-connect (CONNECT_TX) attempt. Runtime-only,
+   * not persisted. Used by avb_periodic_send to throttle retries when
+   * a saved binding is waiting for its talker to come back. */
+  struct timespec last_fast_connect_attempt;
 } avb_listener_stream_s;
 
 /* Talker stream */
@@ -2890,6 +2976,7 @@ void avb_remove_inflight_command(avb_state_s *state, uint16_t seq_id,
                                  bool inbound);
 acmp_status_t avb_connect_listener(avb_state_s *state,
                                    acmp_message_s *response);
+void avb_periodic_fast_connect(avb_state_s *state);
 acmp_status_t avb_disconnect_listener(avb_state_s *state,
                                       acmp_message_s *response);
 acmp_status_t avb_connect_talker(avb_state_s *state, acmp_message_s *response);

@@ -247,8 +247,10 @@ int avb_send_aecp_rsp_read_descr_entity(avb_state_s *state,
 
   // insert the descriptor data
   memcpy(msg->descriptor_data, &state->own_entity, sizeof(aem_entity_desc_s));
-  control_data_len +=
-      sizeof(aem_entity_desc_s) + 4; // 4 bytes for type and index
+  /* descriptor_type and descriptor_index (4 bytes) are already counted
+   * in the initial control_data_len via sizeof(aecp_read_descriptor_rsp_s);
+   * only add the descriptor body here. */
+  control_data_len += sizeof(aem_entity_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -339,10 +341,12 @@ int avb_send_aecp_rsp_read_descr_configuration(avb_state_s *state,
   uint16_t offset = 74; // As defined in section 7.2.2
   int_to_octets(&offset, config_desc.descriptor_counts_offset, 2);
   memcpy(msg->descriptor_data, &config_desc, sizeof(aem_config_desc_s));
+  /* descriptor_type and descriptor_index (4 bytes) are already counted
+   * in the initial control_data_len; only add the descriptor body, minus
+   * the unused slots in the descriptor_counts array. */
   control_data_len +=
-      sizeof(aem_config_desc_s) + 4 // 4 bytes for type and index
-      - (4 * (AEM_MAX_NUM_DESC -
-              descriptor_counts_count)); // adjust for the descriptor counts
+      sizeof(aem_config_desc_s) -
+      (4 * (AEM_MAX_NUM_DESC - descriptor_counts_count));
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -404,8 +408,13 @@ int avb_send_aecp_rsp_read_descr_audio_unit(avb_state_s *state,
 
   // insert the descriptor into the response message
   memcpy(msg->descriptor_data, &descriptor, sizeof(aem_audio_unit_desc_s));
+  /* descriptor_type and descriptor_index (4 bytes) are already counted
+   * in the initial control_data_len; only add the descriptor body, minus
+   * the unused slots in the sampling_rates array. */
   control_data_len +=
-      sizeof(aem_audio_unit_desc_s) + 4; // 4 bytes for type and index
+      sizeof(aem_audio_unit_desc_s) -
+      (sizeof(aem_sample_rate_t) *
+       (AEM_MAX_NUM_SAMPLE_RATES - sampling_rates_count));
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -504,13 +513,9 @@ int avb_send_aecp_rsp_read_descr_stream(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_stream_desc_s) +
-      4 // add the stream descriptor size including the type and index
-      - (AEM_MAX_NUM_FORMATS - number_of_formats) *
-            sizeof(avtp_stream_format_s) // resize for actual number of formats
-      + 8;                               // for funzies
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_stream_desc_s) -
+      (AEM_MAX_NUM_FORMATS - number_of_formats) *
+          sizeof(avtp_stream_format_s); // resize for actual number of formats
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -561,10 +566,7 @@ int avb_send_aecp_rsp_read_descr_avb_interface(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_avb_interface_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_avb_interface_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -619,10 +621,7 @@ int avb_send_aecp_rsp_read_descr_clock_source(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_clock_source_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_clock_source_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -667,10 +666,7 @@ int avb_send_aecp_rsp_read_descr_memory_obj(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_memory_object_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_memory_object_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -712,10 +708,7 @@ int avb_send_aecp_rsp_read_descr_locale(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_locale_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_locale_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -789,10 +782,7 @@ int avb_send_aecp_rsp_read_descr_strings(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_strings_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_strings_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -837,10 +827,7 @@ int avb_send_aecp_rsp_read_descr_stream_port(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_stream_port_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_stream_port_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -890,10 +877,7 @@ int avb_send_aecp_rsp_read_descr_audio_cluster(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_audio_cluster_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_audio_cluster_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -944,10 +928,7 @@ int avb_send_aecp_rsp_read_descr_audio_map(avb_state_s *state,
 
   // calc control data length
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_audio_map_desc_s) +
-      4; // add the stream descriptor size including the type and index
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_audio_map_desc_s);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -1069,8 +1050,7 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
   memcpy(msg->descriptor_data, &descriptor, sizeof(aem_control_desc_s));
 
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN - AVTP_CDL_PREAMBLE_LEN +
-      sizeof(aem_control_desc_s) + 4;
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_control_desc_s);
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
   msg->common.header.control_data_len = control_data_len & 0xFF;
 
@@ -1284,12 +1264,9 @@ int avb_send_aecp_rsp_read_descr_clock_domain(avb_state_s *state,
 
   // calc control data length — trim to the actual clock_sources_count
   uint16_t control_data_len =
-      AECP_DESC_PREAMBLE_LEN -
-      AVTP_CDL_PREAMBLE_LEN // the part before the descriptor
-      + sizeof(aem_clock_domain_desc_s) +
-      4 // add the stream descriptor size including the type and index
-      - (AEM_MAX_NUM_CLOCK_SOURCES - clock_sources_count) *
-            sizeof(aem_clock_source_t);
+      AECP_DESC_PREAMBLE_LEN + sizeof(aem_clock_domain_desc_s) -
+      (AEM_MAX_NUM_CLOCK_SOURCES - clock_sources_count) *
+          sizeof(aem_clock_source_t);
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -1677,10 +1654,6 @@ static int avb_send_mvu_response(avb_state_s *state, void *msg,
 int avb_process_aecp_cmd_mvu_get_milan_info(avb_state_s *state,
                                             aecp_message_u *msg,
                                             eth_addr_t *src_addr) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0)
-    return OK;
-
 #if !CONFIG_ESP_AVB_MILAN
   /* Reflect command with NOT_IMPLEMENTED — same length as incoming */
   uint16_t cdl = (msg->header.control_data_len_h << 8) |
@@ -1709,10 +1682,6 @@ int avb_process_aecp_cmd_mvu_get_milan_info(avb_state_s *state,
 int avb_process_aecp_cmd_mvu_get_system_unique_id(avb_state_s *state,
                                                   aecp_message_u *msg,
                                                   eth_addr_t *src_addr) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0)
-    return OK;
-
   aecp_mvu_system_unique_id_s rsp;
   memset(&rsp, 0, sizeof(rsp));
   memcpy(&rsp.mvu, msg, sizeof(aecp_mvu_common_s));
@@ -1731,10 +1700,6 @@ int avb_process_aecp_cmd_mvu_get_system_unique_id(avb_state_s *state,
 int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
                                          aecp_message_u *msg,
                                          eth_addr_t *src_addr, bool unbind) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0)
-    return OK;
-
   if (unbind) {
     aecp_mvu_unbind_stream_s *cmd = (aecp_mvu_unbind_stream_s *)msg;
     uint16_t desc_type = octets_to_uint(cmd->descriptor_type, 2);
@@ -1752,6 +1717,11 @@ int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
       stream->connected = false;
       memset(stream->talker_id, 0, UNIQUE_ID_LEN);
     }
+    /* Clear saved binding params too — Milan §5.5.3.6.20 step 3. */
+    memset(stream->talker_uid, 0, 2);
+    memset(stream->controller_id, 0, UNIQUE_ID_LEN);
+    stream->stream_flags.streaming_wait = 0;
+    avb_persist_save(state);
     avbinfo("MVU: unbind stream input %d", desc_index);
     return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
                                  aecp_status_success);
@@ -1770,9 +1740,15 @@ int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
   avb_listener_stream_s *stream = &state->input_streams[desc_index];
   memcpy(stream->talker_id, cmd->talker_entity_id, UNIQUE_ID_LEN);
   memcpy(stream->talker_uid, cmd->talker_stream_index, 2);
+  memcpy(stream->controller_id, msg->common.controller_entity_id,
+         UNIQUE_ID_LEN);
   uint16_t flags = octets_to_uint(cmd->flags, 2);
   /* Milan v1.3 §5.4.4.6: STREAMING_WAIT is bit 15 (MSB) of the flags field */
   stream->stream_flags.streaming_wait = (flags & 0x8000) ? 1 : 0;
+
+  /* Milan §5.5.3.6.17 step 5: save binding params to NVM BEFORE probing,
+   * so a reboot mid-probe still reconnects on next boot. */
+  avb_persist_save(state);
 
   /* Send ACMP CONNECT_TX_COMMAND to the talker to get stream info */
   acmp_message_s acmp_cmd = {0};
@@ -1802,10 +1778,6 @@ int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
 int avb_process_aecp_cmd_mvu_get_media_clock_ref_info(avb_state_s *state,
                                                       aecp_message_u *msg,
                                                       eth_addr_t *src_addr) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0)
-    return OK;
-
   aecp_mvu_media_clock_ref_info_s *cmd =
       (aecp_mvu_media_clock_ref_info_s *)msg;
 
@@ -1831,10 +1803,6 @@ int avb_process_aecp_cmd_mvu_get_media_clock_ref_info(avb_state_s *state,
 int avb_process_aecp_cmd_mvu_get_stream_input_info_ex(avb_state_s *state,
                                                       aecp_message_u *msg,
                                                       eth_addr_t *src_addr) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0)
-    return OK;
-
   aecp_mvu_get_stream_input_info_ex_cmd_s *cmd =
       (aecp_mvu_get_stream_input_info_ex_cmd_s *)msg;
   uint16_t desc_index = octets_to_uint(cmd->descriptor_index, 2);
@@ -1865,6 +1833,18 @@ int avb_process_aecp_cmd_mvu_get_stream_input_info_ex(avb_state_s *state,
 
 int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
                      eth_addr_t *src_addr) {
+
+  /* Drop commands not addressed to us. Responses must always pass through
+   * so the inflight tracker can match them. */
+  uint8_t msg_type = msg->header.msg_type;
+  bool is_command = (msg_type == aecp_msg_type_aem_command ||
+                     msg_type == aecp_msg_type_addr_access_command ||
+                     msg_type == aecp_msg_type_vendor_unique_command);
+  if (is_command &&
+      memcmp(msg->common.target_entity_id,
+             state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
+    return OK;
+  }
 
   /* Process ADDRESS_ACCESS command (separate message type from AEM) */
   if (msg->header.msg_type == aecp_msg_type_addr_access_command) {
@@ -1898,9 +1878,6 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
     default:
       /* Milan v1.3 §5.4.3: unsupported MVU commands must be reflected back
        * with NOT_IMPLEMENTED status rather than silently dropped */
-      if (memcmp(msg->common.target_entity_id,
-                 state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0)
-        return OK;
       avbinfo("MVU: unsupported command 0x%04x, returning NOT_IMPLEMENTED",
               mvu_cmd);
       uint16_t cdl = (mvu->common.header.control_data_len_h << 8) |
@@ -1978,9 +1955,6 @@ int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
     default: {
       /* IEEE 1722.1-2021 §9.2.1.3.1.4: unhandled AEM commands must be reflected
        * back with NOT_IMPLEMENTED status rather than silently dropped */
-      if (memcmp(msg->common.target_entity_id,
-                 state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0)
-        return OK;
       avbinfo("AECP: unhandled AEM command 0x%04x, returning NOT_IMPLEMENTED",
               msg->basic.aem.command_type);
       struct timespec ts;
@@ -2090,13 +2064,6 @@ int avb_process_aecp_cmd_acquire_entity(avb_state_s *state, aecp_message_u *msg,
   int ret;
   struct timespec ts;
 
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Acquire Entity for different entity");
-    return OK;
-  }
-
   // create a response, copy the cmd message data, change the msg type and set
   // owner id
   aecp_acquire_entity_s response = {0};
@@ -2133,13 +2100,6 @@ int avb_process_aecp_cmd_lock_entity(avb_state_s *state, aecp_message_u *msg,
   int ret;
   struct timespec ts;
 
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Lock Entity for different entity");
-    return OK;
-  }
-
   // create a response, copy the cmd message data, change the msg type and set
   // locked id
   aecp_lock_entity_s response = {0};
@@ -2175,13 +2135,6 @@ int avb_process_aecp_cmd_entity_available(avb_state_s *state,
   int ret;
   struct timespec ts;
 
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Entity Available for different entity");
-    return OK;
-  }
-
   // create a response, copy the cmd message data and change the msg type
   aecp_entity_available_rsp_s response;
   memset(&response, 0, sizeof(aecp_entity_available_rsp_s));
@@ -2205,14 +2158,8 @@ int avb_process_aecp_cmd_get_configuration(avb_state_s *state,
                                            aecp_message_u *msg,
                                            eth_addr_t *src_addr) {
   int ret;
-  struct timespec ts;
 
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Get Configuration for different entity");
-    return OK;
-  }
+  struct timespec ts;
 
   // create a response, copy the cmd message data and change the msg type, add
   // config index
@@ -2239,13 +2186,6 @@ int avb_process_aecp_cmd_read_descriptor(avb_state_s *state,
                                          aecp_message_u *msg,
                                          eth_addr_t *src_addr) {
   int ret = OK;
-
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Read Descriptor for different entity");
-    return OK;
-  }
 
   // create a response, copy the cmd message data and change the msg type
   aecp_read_descriptor_rsp_s *response = NULL;
@@ -2320,13 +2260,6 @@ int avb_process_aecp_cmd_read_descriptor(avb_state_s *state,
 int avb_process_aecp_cmd_set_stream_format(avb_state_s *state,
                                            aecp_message_u *msg,
                                            eth_addr_t *src_addr) {
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Set Stream Format for different entity");
-    return OK;
-  }
-
   // validate descriptor type is stream input or output
   uint16_t descriptor_type =
       octets_to_uint(msg->stream_format.descriptor_type, 2);
@@ -2390,10 +2323,6 @@ int avb_process_aecp_cmd_set_stream_format(avb_state_s *state,
 int avb_process_aecp_cmd_get_stream_format(avb_state_s *state,
                                            aecp_message_u *msg,
                                            eth_addr_t *src_addr) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    return OK;
-  }
 
   uint16_t descriptor_type =
       octets_to_uint(msg->stream_format.descriptor_type, 2);
@@ -2423,10 +2352,6 @@ int avb_process_aecp_cmd_get_stream_format(avb_state_s *state,
 int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
                                           aecp_message_u *msg,
                                           eth_addr_t *src_addr) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    return OK;
-  }
 
   struct timespec ts;
   aecp_aem_short_s *cmd = (aecp_aem_short_s *)msg;
@@ -2464,10 +2389,6 @@ int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
 int avb_process_aecp_cmd_set_clock_source(avb_state_s *state,
                                           aecp_message_u *msg,
                                           eth_addr_t *src_addr) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    return OK;
-  }
 
   struct timespec ts;
   aecp_aem_short_s *cmd = (aecp_aem_short_s *)msg;
@@ -2508,10 +2429,6 @@ int avb_process_aecp_cmd_set_clock_source(avb_state_s *state,
 int avb_process_aecp_cmd_get_max_transit_time(avb_state_s *state,
                                               aecp_message_u *msg,
                                               eth_addr_t *src_addr) {
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    return OK;
-  }
 
   struct timespec ts;
   /* Echo command back as response, preserving payload.
@@ -2545,12 +2462,6 @@ int avb_process_aecp_cmd_get_max_transit_time(avb_state_s *state,
 int avb_process_aecp_cmd_get_stream_info(avb_state_s *state,
                                          aecp_message_u *msg,
                                          eth_addr_t *src_addr) {
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Get Stream Info for different entity");
-    return OK;
-  }
 
   // validate descriptor type is stream input or output
   uint16_t descriptor_type =
@@ -2628,12 +2539,6 @@ int avb_send_aecp_rsp_get_avb_info(avb_state_s *state, aecp_get_avb_info_s *msg,
 /* Process AECP command get AVB info */
 int avb_process_aecp_cmd_get_avb_info(avb_state_s *state, aecp_message_u *msg,
                                       eth_addr_t *src_addr) {
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Get AVB Info for different entity");
-    return OK;
-  }
 
   // validate descriptor type is avb_interface
   uint16_t descriptor_type =
@@ -2711,12 +2616,6 @@ int avb_send_aecp_rsp_get_as_path(avb_state_s *state, aecp_get_as_path_s *msg,
 /* Process AECP command get AS path */
 int avb_process_aecp_cmd_get_as_path(avb_state_s *state, aecp_message_u *msg,
                                      eth_addr_t *src_addr) {
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Get AS Path for different entity");
-    return OK;
-  }
 
   // validate descriptor index (only one interface supported)
   uint16_t index = octets_to_uint(msg->get_as_path.descriptor_index, 2);
@@ -2739,12 +2638,6 @@ int avb_process_aecp_cmd_get_counters(avb_state_s *state, aecp_message_u *msg,
   uint16_t control_data_len =
       sizeof(aecp_get_counters_rsp_s) - sizeof(atdecc_header_s);
 
-  // check if the target entity id is the own entity id
-  if (memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
-             UNIQUE_ID_LEN) != 0) {
-    avbinfo("Ignoring AECP Get Counters for different entity");
-    return OK;
-  }
 
   // create a response, copy the cmd message data and change the msg type
   aecp_get_counters_rsp_s response;
@@ -3184,9 +3077,7 @@ int avb_process_acmp_connect_tx_response(avb_state_s *state,
   response->header.msg_type = rx_reponse_type;
   int index = avb_find_inflight_command_by_data(
       state, (atdecc_command_u *)response, true);
-  if (index == NOT_FOUND) {
-    avberr("Inflight command not found.");
-  } else {
+  if (index != NOT_FOUND) {
     int_to_octets(&state->inflight_commands[index].acmp_seq_id,
                   &new_response.seq_id, 2);
   }
@@ -3204,8 +3095,14 @@ int avb_process_acmp_connect_tx_response(avb_state_s *state,
         state, state->inflight_commands[index].acmp_seq_id, true);
   }
 
-  // send the response to the controller
-  ret = avb_send_acmp_response(state, rx_reponse_type, &new_response, status);
+  /* Only send a CONNECT_RX_RESPONSE back to a controller if this
+   * TX response was actually triggered by a controller's CONNECT_RX.
+   * Fast-connect probes (self-issued at boot) have no matching
+   * inflight RX — sending would emit a spurious response with a
+   * stale seq_id that no controller asked for. */
+  if (index != NOT_FOUND) {
+    ret = avb_send_acmp_response(state, rx_reponse_type, &new_response, status);
+  }
 
   if (status == acmp_status_success) {
     /* Stream-in now handled by the unified EMAC RX dispatcher via
@@ -3417,21 +3314,18 @@ const char *get_acmp_message_type_name(acmp_msg_type_t message_type) {
 /* Check if the talker or listener unique ID is valid */
 bool avb_valid_talker_listener_uid(avb_state_s *state, uint16_t uid,
                                    avb_entity_type_t entity_type) {
+  /* uid here is the local listener_uid / talker_uid from ACMP
+   * (i.e. our own STREAM_INPUT / STREAM_OUTPUT descriptor index).
+   * num_listeners / num_talkers count remotely-discovered entities,
+   * not our own streams — wrong array. Use num_input/output_streams. */
   switch (entity_type) {
   case avb_entity_type_listener:
-    if (uid < state->num_listeners) {
-      return true;
-    }
-    break;
+    return uid < state->num_input_streams;
   case avb_entity_type_talker:
-    if (uid < state->num_talkers) {
-      return true;
-    }
-    break;
+    return uid < state->num_output_streams;
   default:
     return false;
   }
-  return false;
 }
 
 /* Check if the entity is acquired or locked by another entity */
@@ -3614,18 +3508,36 @@ acmp_status_t avb_connect_listener(avb_state_s *state,
                                    acmp_message_s *response) {
   acmp_status_t status = acmp_status_success;
   uint16_t index = octets_to_uint(response->listener_uid, 2);
+  avb_listener_stream_s *stream = &state->input_streams[index];
 
-  // update the input stream
-  memcpy(&state->input_streams[index].talker_id, response->talker_entity_id,
-         UNIQUE_ID_LEN);
-  memcpy(&state->input_streams[index].talker_uid, response->talker_uid, 2);
-  memcpy(&state->input_streams[index].controller_id,
-         response->controller_entity_id, UNIQUE_ID_LEN);
-  memcpy(&state->input_streams[index].stream_id, response->stream_id,
-         UNIQUE_ID_LEN);
-  memcpy(&state->input_streams[index].stream_dest_addr,
-         response->stream_dest_addr, ETH_ADDR_LEN);
-  state->input_streams[index].connected = true;
+  // Copy identity + stream parameters from the talker's response.
+  // Works for both plain 1722.1 CONNECT_TX_RESPONSE and Milan
+  // PROBE_TX_RESPONSE (same wire format).
+  memcpy(stream->talker_id, response->talker_entity_id, UNIQUE_ID_LEN);
+  memcpy(stream->talker_uid, response->talker_uid, 2);
+  memcpy(stream->controller_id, response->controller_entity_id, UNIQUE_ID_LEN);
+  memcpy(stream->stream_id, response->stream_id, UNIQUE_ID_LEN);
+  memcpy(stream->stream_dest_addr, response->stream_dest_addr, ETH_ADDR_LEN);
+  /* Some talkers send stream_vlan_id=0 meaning "use configured default".
+   * Milan §5.5.3.6.16 requires a non-zero vlan_id whenever the listener
+   * is connected — Hive flags a zero here as a fatal enumeration error
+   * on the next GET_RX_STATE. Fall back to the configured Class A VID
+   * (Milan default = 2) in that case. */
+  if (octets_to_uint(response->stream_vlan_id, 2) == 0) {
+    uint16_t default_vid = CONFIG_ESP_AVB_STREAM_VLAN_ID;
+    int_to_octets(&default_vid, stream->vlan_id, 2);
+  } else {
+    memcpy(stream->vlan_id, response->stream_vlan_id, 2);
+  }
+
+  // Class from ACMP flags per IEEE 1722.1-2021 §8.2.1.16 Table 8-4:
+  // bit 15 = CLASS_B. Milan talkers always set this to 0 (class is
+  // derived from stream_format instead), which is correct since Milan
+  // uses Class A by default — so reading the bit works for both.
+  uint16_t flags = octets_to_uint(response->flags, 2);
+  stream->stream_info_flags.class_b = (flags & 0x8000) ? 1 : 0;
+
+  stream->connected = true;
 
   // send SRP listener ready command
   int ret = avb_send_msrp_listener(state, mrp_attr_event_new,
@@ -3634,6 +3546,10 @@ acmp_status_t avb_connect_listener(avb_state_s *state,
   if (ret < 0) {
     return acmp_status_listener_misbehaving;
   }
+
+  /* Persist the new connection state to NVS so it survives reboots
+   * (Milan §5.5.3.6.17 saved-state requirement). */
+  avb_persist_save(state);
 
   return status;
 }
@@ -3662,7 +3578,87 @@ acmp_status_t avb_disconnect_listener(avb_state_s *state,
   if (ret < 0) {
     return acmp_status_listener_misbehaving;
   }
+
+  /* Persist the cleared state so we don't auto-reconnect on next boot. */
+  avb_persist_save(state);
+
   return status;
+}
+
+/* Issue a fast-connect CONNECT_TX_COMMAND (Milan PROBE_TX_COMMAND) for
+ * one listener stream that has a saved talker binding but is not yet
+ * connected. Called periodically from the main loop — per Milan
+ * §5.5.3.6.17 / TMR_RETRY the listener retries on a 4 s cadence while
+ * waiting for the talker to reappear on the network.
+ *
+ * Returns true if a command was sent, false otherwise (no binding,
+ * already connected, talker not yet in ADP discovery table, or
+ * attempt too recent). */
+static bool avb_fast_connect_listener(avb_state_s *state, uint16_t index) {
+  avb_listener_stream_s *stream = &state->input_streams[index];
+
+  /* Gate: must have a saved binding and not already be connected/probing. */
+  unique_id_t zero_id = {0};
+  if (memcmp(stream->talker_id, zero_id, UNIQUE_ID_LEN) == 0)
+    return false;
+  if (stream->connected || stream->pending_connection)
+    return false;
+
+  /* Milan requires the talker to be ADP-discovered before probing. */
+  int talker_idx =
+      avb_find_entity_by_id(state, &stream->talker_id, avb_entity_type_talker);
+  if (talker_idx == NOT_FOUND)
+    return false;
+
+  /* Build CONNECT_TX_COMMAND — same shape as BIND_STREAM's probe. */
+  acmp_message_s cmd = {0};
+  cmd.header.subtype = avtp_subtype_acmp;
+  cmd.header.msg_type = acmp_msg_type_connect_tx_command;
+  memcpy(cmd.talker_entity_id, stream->talker_id, UNIQUE_ID_LEN);
+  memcpy(cmd.talker_uid, stream->talker_uid, 2);
+  memcpy(cmd.listener_entity_id, state->own_entity.summary.entity_id,
+         UNIQUE_ID_LEN);
+  int_to_octets(&index, cmd.listener_uid, 2);
+  memcpy(cmd.controller_entity_id, stream->controller_id, UNIQUE_ID_LEN);
+
+  if (avb_send_acmp_command(state, acmp_msg_type_connect_tx_command, &cmd,
+                            false) < 0) {
+    return false;
+  }
+
+  stream->pending_connection = true;
+  avbinfo("ACMP: fast-connect probe for stream_input %d", index);
+  return true;
+}
+
+/* Periodically attempt fast-connect for any listener stream with a
+ * saved binding that isn't currently connected. Throttled per-stream
+ * by AVB_FAST_CONNECT_RETRY_MSEC. Called from avb_periodic_send. */
+void avb_periodic_fast_connect(avb_state_s *state) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+
+  for (uint16_t i = 0; i < state->num_input_streams; i++) {
+    avb_listener_stream_s *stream = &state->input_streams[i];
+
+    /* Cheap early-out: no saved binding or already connected. */
+    if (stream->connected || stream->pending_connection)
+      continue;
+    unique_id_t zero_id = {0};
+    if (memcmp(stream->talker_id, zero_id, UNIQUE_ID_LEN) == 0)
+      continue;
+
+    /* Throttle retries. zero-initialized timestamp on boot means the
+     * first attempt fires immediately. */
+    struct timespec delta;
+    clock_timespec_subtract(&now, &stream->last_fast_connect_attempt, &delta);
+    if (stream->last_fast_connect_attempt.tv_sec != 0 &&
+        timespec_to_ms(&delta) < AVB_FAST_CONNECT_RETRY_MSEC)
+      continue;
+
+    stream->last_fast_connect_attempt = now;
+    avb_fast_connect_listener(state, i);
+  }
 }
 
 /* Start a stream */
