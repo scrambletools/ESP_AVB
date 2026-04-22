@@ -80,21 +80,17 @@ esp_err_t avb_config_i2s(avb_state_s *state) {
   // Create an I2S channel and set the handles in the state
   i2s_chan_config_t chan_cfg =
       I2S_CHANNEL_DEFAULT_CONFIG(state->config.i2s_port, I2S_ROLE_MASTER);
-  /* Pre-clear each TX DMA buffer before the on_sent callback runs. The
-   * listener drain path (see avtp.c) writes one AAF packet straight into
-   * event->dma_buf on every on_sent event; if the queue is empty or a
-   * packet is short, the pre-cleared zeros make that gap silent. */
-  chan_cfg.auto_clear_before_cb = true;
-  /* DMA descriptor size, in stereo 24-bit frames. The ESP32-P4 driver
-   * rounds this up to cache-line (64 B) alignment, which for 6 B/frame
-   * gives a minimum of 32 frames = 192 B = 667 µs per descriptor — the
-   * smallest value the hardware will accept. AAF packets (36 B each)
-   * now straddle descriptor boundaries; the listener drain in avtp.c
-   * carries a partial-packet cursor across on_sent events to handle
-   * that cleanly. 3 descriptors × 667 µs = 2 ms TX ring — within
-   * Milan Class A's max_transit_time window. */
-  chan_cfg.dma_frame_num = 32;
-  chan_cfg.dma_desc_num = 3;
+  /* Auto-clear stale DMA content so the DAC emits silence on underrun
+   * rather than a loop of old samples. */
+  chan_cfg.auto_clear = true;
+  /* Small DMA descriptors (6 frames = 1 AAF Class A packet worth,
+   * 125 µs at 48 kHz). 16 of them = 2 ms TX ring — Milan Class A's
+   * max_transit_time window. The listener drain in avtp.c runs as an
+   * esp_timer 1 ms task that calls i2s_channel_write, so the I2S
+   * driver paces playout at the DAC rate without needing on_sent
+   * callback bookkeeping. */
+  chan_cfg.dma_frame_num = 6;
+  chan_cfg.dma_desc_num = 16;
   ESP_ERROR_CHECK(
       i2s_new_channel(&chan_cfg, &state->i2s_tx_handle, &state->i2s_rx_handle));
   i2s_std_config_t std_cfg = {
@@ -125,14 +121,6 @@ esp_err_t avb_config_i2s(avb_state_s *state) {
   // Initialize the I2S TX and RX channels
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(state->i2s_tx_handle, &std_cfg));
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(state->i2s_rx_handle, &std_cfg));
-
-  /* Register the listener's on_sent drain callback on the TX channel
-   * before we enable it. i2s_channel_register_event_callback rejects
-   * registration once the channel is running, so this has to happen
-   * here, not at stream-connect time. */
-  if (avb_stream_in_register_i2s_cb(state) != OK) {
-    avbwarn("Failed to register I2S on_sent callback");
-  }
 
   // Enable the I2S TX and RX channels
   ESP_ERROR_CHECK(i2s_channel_enable(state->i2s_tx_handle));

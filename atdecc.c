@@ -1097,7 +1097,7 @@ int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
     state->ctrl_speaker_vol = vol;
     avb_codec_set_vol(state, vol);
     avbinfo("SET_CONTROL: Speaker Volume = %.1f dB", vol);
-    avb_persist_save(state);
+    avb_persist_request_save(state);
     break;
   }
   case 2: { /* Mic Gain */
@@ -1114,7 +1114,7 @@ int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
     state->ctrl_mic_gain = gain;
     avb_codec_set_mic_gain(state, gain);
     avbinfo("SET_CONTROL: Mic Gain = %.1f dB", gain);
-    avb_persist_save(state);
+    avb_persist_request_save(state);
     break;
   }
   default:
@@ -1483,7 +1483,7 @@ int avb_process_aecp_cmd_set_name(avb_state_s *state, aecp_message_u *msg,
       memcpy(state->avb_interface.object_name, target, 64);
     avbinfo("SET_NAME: type=0x%04x idx=%d name='%.64s'",
             desc_type, desc_index, (char *)target);
-    avb_persist_save(state);
+    avb_persist_request_save(state);
   } else {
     status = aecp_status_not_implemented;
   }
@@ -1721,7 +1721,7 @@ int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
     memset(stream->talker_uid, 0, 2);
     memset(stream->controller_id, 0, UNIQUE_ID_LEN);
     stream->stream_flags.streaming_wait = 0;
-    avb_persist_save(state);
+    avb_persist_request_save(state);
     avbinfo("MVU: unbind stream input %d", desc_index);
     return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
                                  aecp_status_success);
@@ -1748,7 +1748,7 @@ int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
 
   /* Milan §5.5.3.6.17 step 5: save binding params to NVM BEFORE probing,
    * so a reboot mid-probe still reconnects on next boot. */
-  avb_persist_save(state);
+  avb_persist_request_save(state);
 
   /* Send ACMP CONNECT_TX_COMMAND to the talker to get stream info */
   acmp_message_s acmp_cmd = {0};
@@ -2312,7 +2312,7 @@ int avb_process_aecp_cmd_set_stream_format(avb_state_s *state,
     memcpy(&state->input_streams[index].stream_format, requested,
            sizeof(avtp_stream_format_s));
   }
-  avb_persist_save(state);
+  avb_persist_request_save(state);
 
   // send the response
   return avb_send_aecp_rsp_set_stream_format(state, &msg->stream_format,
@@ -3549,7 +3549,7 @@ acmp_status_t avb_connect_listener(avb_state_s *state,
 
   /* Persist the new connection state to NVS so it survives reboots
    * (Milan §5.5.3.6.17 saved-state requirement). */
-  avb_persist_save(state);
+  avb_persist_request_save(state);
 
   return status;
 }
@@ -3580,7 +3580,7 @@ acmp_status_t avb_disconnect_listener(avb_state_s *state,
   }
 
   /* Persist the cleared state so we don't auto-reconnect on next boot. */
-  avb_persist_save(state);
+  avb_persist_request_save(state);
 
   return status;
 }

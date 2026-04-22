@@ -29,6 +29,9 @@
 #include <esp_log.h>
 #include <esp_vfs_l2tap.h>
 #include <fcntl.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <lwip/prot/ethernet.h> // Ethernet headers
 #include <net/if.h>
 #include <netinet/in.h>
@@ -98,6 +101,10 @@
  * its talker to be discovered / respond. */
 #define AVB_FAST_CONNECT_RETRY_MSEC 4000
 #define UNSOL_NOTIF_INTERVAL_MSEC 2000
+/* Poll interval for the dedicated NVS-save task. The task wakes every
+ * N ms, and if state->persist_dirty is set, snapshots and writes to
+ * flash. Naturally coalesces bursts of marks in one flash write. */
+#define AVB_PERSIST_POLL_MSEC 1000
 
 // Commonly used mac addresses
 #define BCAST_MAC_ADDR                                                         \
@@ -2450,9 +2457,9 @@ typedef struct {
   uint8_t data[AVB_MAX_MSG_LEN];  // payload data
 } ctrl_rx_pkt_t;
 
-/* Stream RX handler callback — called inline from EMAC RX task for
- * VLAN-tagged AVTP stream data. Must return quickly (<2ms).
- * Receives raw AVTP data (ETH+VLAN headers already stripped). */
+/* Stream RX handler callback — invoked inline from the EMAC RX task
+ * context (see avb_unified_rx_cb in avbnet.c).
+ *   avtp_data/len — raw AVTP data (ETH+VLAN headers already stripped). */
 typedef void (*avb_stream_rx_handler_t)(uint8_t *avtp_data, uint16_t len,
                                         void *ctx);
 
@@ -2640,6 +2647,19 @@ typedef struct {
   bool unsol_notif_enabled;
   struct timespec last_unsol_notif;
 
+  /* Deferred NVS persist.
+   *  persist_dirty  — set by any writer that wants the current state
+   *                   flushed to flash; cleared by the persist task
+   *                   before it performs the gather. Single-byte store,
+   *                   no lock needed to set (idempotent across writers).
+   *  persist_mutex  — guards state->persist (the gather snapshot buffer)
+   *                   against concurrent access between AVB main
+   *                   (writer, inside avb_persist_request_save) and the
+   *                   persist task (reader, copying out for flash).
+   *                   Held for a ~µs memcpy; never held during flash I/O. */
+  volatile bool persist_dirty;
+  SemaphoreHandle_t persist_mutex;
+
   /* Latest received packet and its timestamp (CLOCK_REALTIME)
    * 3 elements, 1 for each protocol (AVTP, MSRP, MVRP)
    */
@@ -2691,6 +2711,13 @@ int avb_net_send(avb_state_s *state, ethertype_t ethertype, void *msg,
 int avb_net_recv_ctrl(avb_state_s *state, int *protocol_idx, void *msg,
                       uint16_t msg_len, eth_addr_t *src_addr, int timeout_ms);
 void avb_net_set_stream_rx_handler(avb_stream_rx_handler_t handler, void *ctx);
+/* Number of incoming stream frames dropped because the AVB-IN queue
+ * was full. Diagnostic counter; persistent across the session. */
+uint32_t avb_net_stream_rx_drops(void);
+/* Total PTP (0x88f7) frames seen in the EMAC RX callback — before the
+ * L2TAP filter/forward layer. Compare against ptpd's rx_sync counter to
+ * split where drops occur. */
+uint32_t avb_net_ptp_rx_seen(void);
 
 /* AVB send functions */
 
@@ -2921,7 +2948,11 @@ int avb_process_acmp_get_tx_connection_command(avb_state_s *state,
 int avb_start_stream_in(avb_state_s *state, uint16_t index);
 void avb_stop_stream_in(avb_state_s *state, uint16_t index);
 void avb_stream_in_print_diag(void);
-int avb_stream_in_register_i2s_cb(avb_state_s *state);
+/* Deferred drift sampler — called from AVB main's periodic loop.
+ * Replaces the per-packet clock_gettime(CLOCK_PTP_SYSTEM) calls that
+ * used to live in avb_stream_rx_handler / avb_crf_rx_handler and were
+ * contending with PTPD on CPU0. Rate-limits itself to ~100 Hz. */
+void avb_stream_in_sample_drift(avb_state_s *state);
 
 /* avbpll.c — Milan media-clock PLL: measures I2S MCLK rate vs gPTP and
  * retunes the underlying hardware (APLL on ESP32-P4) to close the loop.
@@ -2949,6 +2980,23 @@ void avb_codec_set_mic_gain(avb_state_s *state, float db);
 /* NVS persistent storage */
 esp_err_t avb_persist_load(avb_state_s *state);
 esp_err_t avb_persist_save(avb_state_s *state);
+
+/* CPU/task diagnostic — prints per-task %CPU, per-core utilization,
+ * stack high-water marks every AVB_STATS_WINDOW_MS (see avbstats.c).
+ * Intended for performance investigation; remove once we're done. */
+void avb_cpu_stats_start(void);
+
+/* Cumulative productive-work microseconds spent inside avb_stream_out_task
+ * (excludes busy-wait). Delta over a window gives the "real" CPU AVB-OUT
+ * would need if the busy-wait were replaced with a yielding wait. */
+uint64_t avb_stream_out_work_us_total(void);
+/* Hot-path API: capture a snapshot of current state under the persist
+ * mutex and mark it dirty. Returns immediately — the actual flash
+ * write happens later from the persist task. Safe to call from any
+ * task that writes persist-tracked state. */
+void avb_persist_request_save(avb_state_s *state);
+/* FreeRTOS task entry point for the deferred NVS writer. */
+void avb_persist_task(void *arg);
 void i2s_task(void *arg);
 
 /* Helper functions */

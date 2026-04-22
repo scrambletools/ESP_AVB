@@ -19,6 +19,7 @@
  */
 
 #include "avb.h"
+#include "esp_timer.h"
 #include <esp_netif.h>
 #include <esp_vfs_l2tap.h>
 
@@ -32,6 +33,15 @@ static QueueHandle_t s_ctrl_rx_queue = NULL;
 static avb_stream_rx_handler_t s_stream_handler = NULL;
 static void *s_stream_ctx = NULL;
 static esp_netif_t *s_eth_netif = NULL;
+
+/* Drop counter no longer used (inline handler has no queue to overflow),
+ * but keep the function to avoid breaking callers that read it. */
+static volatile uint32_t s_stream_rx_drops = 0;
+
+/* Diagnostic: count PTP frames (0x88f7) that reach avb_unified_rx_cb so we
+ * can compare against ptpd's own rx_sync counter. */
+static volatile uint32_t s_ptp_rx_seen = 0;
+uint32_t avb_net_ptp_rx_seen(void) { return s_ptp_rx_seen; }
 
 /* Unified EMAC RX callback — dispatches ALL incoming Ethernet frames.
  * Runs in the EMAC RX FreeRTOS task context (not ISR).
@@ -53,8 +63,22 @@ static esp_err_t avb_unified_rx_cb(esp_eth_handle_t eth_handle, uint8_t *buf,
   /* Read ethertype at offset 12-13 (big-endian) */
   uint16_t ethertype = (buf[12] << 8) | buf[13];
 
+  /* Count ALL PTP frames (0x88f7) at entry — before any switch branch
+   * and before any early-return. Compared against ptpd's own rx counters
+   * to identify where in the path PTP frames are being lost. */
+  if (ethertype == 0x88f7) {
+    s_ptp_rx_seen++;
+  }
+
   switch (ethertype) {
   case 0x8100: { /* VLAN — stream data */
+    /* Inline handler call — matches the original stable architecture.
+     * The queue-based split we tried (emac_rx → queue → AVB-IN task)
+     * added ~10 µs per frame of task-wake + context-switch overhead
+     * that at 8000 pps cost ~80 ms/sec of extra CPU and drove the NIC
+     * DMA ring into overflow. Keeping the handler here means emac_rx
+     * does one self-contained pass per frame: alloc → memcpy →
+     * handler → free. */
     if (s_stream_handler && len > 18) {
       /* Strip ETH header (14) + VLAN tag (4) = 18 bytes → raw AVTP */
       s_stream_handler(buf + 18, len - 18, s_stream_ctx);
@@ -338,12 +362,14 @@ int avb_net_recv_ctrl(avb_state_s *state, int *protocol_idx, void *msg,
   return copy_len;
 }
 
-/* Register stream RX handler — called inline from EMAC task for
- * VLAN-tagged AVTP stream data. Handler must return quickly (<2ms).
- * Pass NULL to unregister. */
+/* Register stream RX handler. Invoked inline from the EMAC RX callback
+ * context (avb_unified_rx_cb VLAN branch), so the handler must be fast
+ * (~25 µs at 8000 pps). Pass NULL to unregister. */
 void avb_net_set_stream_rx_handler(avb_stream_rx_handler_t handler, void *ctx) {
   s_stream_ctx = ctx;
   /* Write handler last with memory barrier semantics —
    * the callback checks s_stream_handler != NULL as gate */
   s_stream_handler = handler;
 }
+
+uint32_t avb_net_stream_rx_drops(void) { return s_stream_rx_drops; }

@@ -600,10 +600,28 @@ static void avb_task(void *task_param) {
   // persisted volume/gain override the codec defaults
   avb_persist_load(state);
 
+  /* Temporary: start the CPU/task stats dump so we can measure core
+   * saturation and per-task load under real streaming. Remove once the
+   * scheduling plan is validated. */
+  avb_cpu_stats_start();
+
   // Apply persisted codec values to hardware
   if (state->codec_enabled) {
     avb_codec_set_vol(state, state->ctrl_speaker_vol);
     avb_codec_set_mic_gain(state, state->ctrl_mic_gain);
+  }
+
+  /* Spin up the deferred NVS writer. Create the snapshot mutex first
+   * so avb_persist_request_save() calls from protocol handlers will
+   * take the lock path. Task priority sits well below AVB main (21)
+   * and AVB-OUT (configMAX_PRIORITIES-1) so flash I/O never preempts
+   * time-critical work; pin to core 0 so CPU1 stays free for AVB-OUT. */
+  state->persist_mutex = xSemaphoreCreateMutex();
+  if (state->persist_mutex == NULL) {
+    avberr("Failed to create persist mutex; NVS saves disabled");
+  } else {
+    xTaskCreatePinnedToCore(avb_persist_task, "AVB-NVS", 4096, state, 3, NULL,
+                            0);
   }
 
   // Main AVB loop — receive control frames from EMAC RX dispatcher queue,
@@ -643,6 +661,12 @@ static void avb_task(void *task_param) {
     // one-shot first-packet info, safe to call from main loop context.
     avb_stream_in_print_diag();
 
+    // Sample AAF/CRF drift vs. CLOCK_PTP_SYSTEM at ~100 Hz (the call
+    // itself self-rate-limits). Moved here so the 800 Hz RX handlers
+    // don't contend with PTPD on the PTP clock driver — that was the
+    // suspected cause of the MSRP LeaveAll flap.
+    avb_stream_in_sample_drift(state);
+
     // Media-clock PLL: measure, log, apply MCLK correction
     avb_pll_tick(state);
 
@@ -669,7 +693,14 @@ int avb_start(avb_config_s *config) {
     return ERROR;
   }
   if (s_state == NULL) {
-    xTaskCreate(avb_task, "AVB", 16384, (void *)config, 21, NULL);
+    /* Pinned to core 0. AVB-OUT busy-waits at prio 24 on core 1 — any task
+     * at lower prio pinned to core 1 (e.g., if the scheduler happened to
+     * place AVB there on an unpinned xTaskCreate) is permanently starved,
+     * which freezes ATDECC (Hive can't enumerate), MSRP, MAAP, and ADP.
+     * Core 0 has plenty of headroom since emac_rx is driven by IRQs and
+     * AVB-IN only runs when stream packets are queued. */
+    xTaskCreatePinnedToCore(avb_task, "AVB", 16384, (void *)config, 21, NULL,
+                            0);
     return OK;
   }
   avberr("Another instance of AVB is already running");
@@ -1034,28 +1065,94 @@ esp_err_t avb_persist_load(avb_state_s *state) {
   return err;
 }
 
-/* Save persistent data to NVS */
-esp_err_t avb_persist_save(avb_state_s *state) {
-  avb_persist_gather(state);
-
+/* Write a pre-built persist blob to NVS. Pulled out of avb_persist_save
+ * so the deferred persist task can flush a local snapshot without
+ * holding the snapshot mutex during the slow flash I/O. */
+static esp_err_t avb_persist_write_blob(const avb_persistent_data_s *blob) {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(AVB_NVS_NAMESPACE, NVS_READWRITE, &handle);
   if (err != ESP_OK) {
     avberr("NVS: failed to open for writing: %d", err);
     return err;
   }
-
-  err = nvs_set_blob(handle, AVB_NVS_KEY, &state->persist,
-                     sizeof(avb_persistent_data_s));
+  err = nvs_set_blob(handle, AVB_NVS_KEY, blob, sizeof(*blob));
   if (err != ESP_OK) {
     avberr("NVS: failed to write: %d", err);
     nvs_close(handle);
     return err;
   }
-
   err = nvs_commit(handle);
   nvs_close(handle);
-  avbinfo("NVS: saved persistent data (%d bytes)",
-          (int)sizeof(avb_persistent_data_s));
+  avbinfo("NVS: saved persistent data (%d bytes)", (int)sizeof(*blob));
   return err;
+}
+
+/* Synchronous save — gather + write. Used only from the boot-time
+ * first-init path (avb_persist_load). Hot-path callers should use
+ * avb_persist_request_save instead. */
+esp_err_t avb_persist_save(avb_state_s *state) {
+  avb_persist_gather(state);
+  return avb_persist_write_blob(&state->persist);
+}
+
+/* Hot-path API. Gather under the snapshot mutex (micro-second memcpy),
+ * then set the dirty flag. The actual flash write happens later from
+ * the persist task, so the caller never blocks on nvs_commit. */
+void avb_persist_request_save(avb_state_s *state) {
+  if (state->persist_mutex) {
+    xSemaphoreTake(state->persist_mutex, portMAX_DELAY);
+    avb_persist_gather(state);
+    xSemaphoreGive(state->persist_mutex);
+  } else {
+    /* Mutex not yet created (boot-time path before the persist task
+     * has been spawned). Gather directly — single-threaded at this
+     * point in startup so no race. */
+    avb_persist_gather(state);
+  }
+  state->persist_dirty = true;
+}
+
+/* Dedicated low-priority task. Polls the dirty flag and flushes the
+ * snapshot to flash when due. Clears the flag BEFORE the flash write
+ * so any mark that lands during the write re-triggers on the next
+ * poll (no lost updates). The flash write itself runs without the
+ * snapshot mutex held — mutex only protects the brief memcpy of the
+ * snapshot into a local buffer. */
+void avb_persist_task(void *arg) {
+  avb_state_s *state = (avb_state_s *)arg;
+  avb_persistent_data_s snapshot;
+  while (!state->stop) {
+    vTaskDelay(pdMS_TO_TICKS(AVB_PERSIST_POLL_MSEC));
+    if (!state->persist_dirty)
+      continue;
+    /* Gate NVS writes during any active audio streaming (input OR
+     * output). Flash-cache-disable during an NVS write stalls ALL non-
+     * IRAM code system-wide for 20-50 ms, which:
+     *   - Listener path: starves the 1 ms drain timer calling
+     *     i2s_channel_write → DAC underrun / audible glitch.
+     *   - Talker path (AVB-OUT on core 1): busy-wait keeps cycling but
+     *     the work portion (memcpy, i2s_channel_read, esp_eth_transmit
+     *     helpers) isn't entirely IRAM — task stalls, listener sees a
+     *     20-50 ms packet gap on the wire, blows Milan Class A's 2 ms
+     *     max_transit_time.
+     * Leaving persist_dirty set means we'll retry on the next poll;
+     * the save goes through when streams stop. CRF-only streams are
+     * also gated for safety since they still drive the PLL. */
+    bool out_streaming = false;
+    for (size_t i = 0; i < state->num_output_streams; i++) {
+      if (state->output_streams[i].streaming) {
+        out_streaming = true;
+        break;
+      }
+    }
+    if (state->stream_in_active || out_streaming) {
+      continue;
+    }
+    state->persist_dirty = false;
+    xSemaphoreTake(state->persist_mutex, portMAX_DELAY);
+    memcpy(&snapshot, &state->persist, sizeof(snapshot));
+    xSemaphoreGive(state->persist_mutex);
+    avb_persist_write_blob(&snapshot);
+  }
+  vTaskDelete(NULL);
 }
