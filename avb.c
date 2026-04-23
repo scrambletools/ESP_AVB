@@ -314,7 +314,15 @@ static int avb_periodic_send(avb_state_s *state) {
   if (state->config.talker) {
     clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv,
                             &delta);
+    static const uint8_t zero_mac[ETH_ADDR_LEN] = {0};
     for (int i = 0; i < state->num_output_streams; i++) {
+      /* Skip Talker Advertise until MAAP has acquired a dest — sending
+       * with Stream DA = 0 makes the switch cache a useless registration
+       * that blocks forwarding even after MAAP later updates our state. */
+      if (memcmp(state->output_streams[i].stream_dest_addr, zero_mac,
+                 ETH_ADDR_LEN) == 0)
+        continue;
+      uint16_t mfs = avb_compute_tspec_max_frame_size(state, i);
       // if connected and time to send
       if (octets_to_uint(state->output_streams[i].connection_count, 2) > 0 &&
           timespec_to_ms(&delta) > MSRP_TALKER_CONN_INTERVAL_MSEC) {
@@ -322,14 +330,14 @@ static int avb_periodic_send(avb_state_s *state) {
         avb_send_msrp_talker(state, mrp_attr_event_join_in, false, false,
                              &state->output_streams[i].stream_id,
                              &state->output_streams[i].stream_dest_addr,
-                             state->output_streams[i].vlan_id);
+                             state->output_streams[i].vlan_id, mfs);
         // if idle and time to send
       } else if (timespec_to_ms(&delta) > MSRP_TALKER_IDLE_INTERVAL_MSEC) {
         state->last_transmitted_msrp_talker_adv = time_now;
         avb_send_msrp_talker(state, mrp_attr_event_join_mt, false, false,
                              &state->output_streams[i].stream_id,
                              &state->output_streams[i].stream_dest_addr,
-                             state->output_streams[i].vlan_id);
+                             state->output_streams[i].vlan_id, mfs);
       }
     }
     avb_maap_tick(state);
@@ -360,12 +368,17 @@ static int avb_periodic_send(avb_state_s *state) {
     // After leaveAll, immediately re-declare all active registrations so the
     // switch doesn't drop stream reservations while waiting for periodic timers
     if (state->config.talker) {
+      static const uint8_t zero_mac_la[ETH_ADDR_LEN] = {0};
       for (int i = 0; i < state->num_output_streams; i++) {
+        if (memcmp(state->output_streams[i].stream_dest_addr, zero_mac_la,
+                   ETH_ADDR_LEN) == 0)
+          continue;
         if (octets_to_uint(state->output_streams[i].connection_count, 2) > 0) {
           avb_send_msrp_talker(state, mrp_attr_event_join_in, false, false,
                                &state->output_streams[i].stream_id,
                                &state->output_streams[i].stream_dest_addr,
-                               state->output_streams[i].vlan_id);
+                               state->output_streams[i].vlan_id,
+                               avb_compute_tspec_max_frame_size(state, i));
         }
       }
       state->last_transmitted_msrp_talker_adv = time_now;

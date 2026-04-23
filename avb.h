@@ -2729,7 +2729,9 @@ int avb_send_msrp_domain(avb_state_s *state, mrp_attr_event_t attr_event,
                          bool leave_all);
 int avb_send_msrp_talker(avb_state_s *state, mrp_attr_event_t attr_event,
                          bool leave_all, bool is_failed, unique_id_t *stream_id,
-                         eth_addr_t *stream_dest_addr, uint8_t *vlan_id);
+                         eth_addr_t *stream_dest_addr, uint8_t *vlan_id,
+                         uint16_t max_frame_size);
+uint16_t avb_compute_tspec_max_frame_size(avb_state_s *state, uint16_t index);
 int avb_send_msrp_listener(avb_state_s *state, mrp_attr_event_t attr_event,
                            msrp_listener_event_t listener_event, bool leave_all,
                            unique_id_t *stream_id);

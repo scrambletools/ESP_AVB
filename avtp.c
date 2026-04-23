@@ -104,10 +104,43 @@ int avb_send_msrp_domain(avb_state_s *state, mrp_attr_event_t attr_event,
   return ret;
 }
 
+/* Forward declaration — rate-code lookup used by the TSpec helper below. */
+static uint32_t cip_sfc_to_sample_rate(uint8_t sfc);
+
+/* Compute the MSRP TSpec MaxFrameSize for an output stream based on its
+ * current stream_format. Per IEEE 802.1Qat, MaxFrameSize is the L2 frame
+ * length excluding FCS: ETH header + VLAN tag + AVTP header + payload. */
+uint16_t avb_compute_tspec_max_frame_size(avb_state_s *state, uint16_t index) {
+  avtp_stream_format_s *fmt = &state->output_streams[index].stream_format;
+  bool class_b = state->output_streams[index].stream_info_flags.class_b;
+  int interval_us = class_b ? 250 : 125;
+  int channels, bytes_per_sample, sample_rate, avtp_hdr;
+  uint8_t subtype = fmt->aaf_pcm.subtype;
+  if (subtype == avtp_subtype_61883) {
+    channels = fmt->am824.dbs;
+    bytes_per_sample = 4; /* AM824 always carries 32-bit quadlets */
+    sample_rate = cip_sfc_to_sample_rate(fmt->am824.fdf_sfc);
+    avtp_hdr = 24 + 8; /* AVTP common + CIP header */
+  } else {
+    channels =
+        (fmt->aaf_pcm.chan_per_frame_h << 2) | fmt->aaf_pcm.chan_per_frame;
+    int bit_depth = fmt->aaf_pcm.bit_depth;
+    bytes_per_sample = (bit_depth == 24) ? 4 : (bit_depth / 8);
+    sample_rate = aaf_code_to_sample_rate(fmt->aaf_pcm.sample_rate);
+    avtp_hdr = 24;
+  }
+  if (channels <= 0 || sample_rate <= 0)
+    return 0;
+  int samples_per_packet = sample_rate / (1000000 / interval_us);
+  int payload = samples_per_packet * channels * bytes_per_sample;
+  return (uint16_t)(14 /*ETH*/ + 4 /*VLAN*/ + avtp_hdr + payload);
+}
+
 /* Send MSRP talker advertise message with appropriate event */
 int avb_send_msrp_talker(avb_state_s *state, mrp_attr_event_t attr_event,
                          bool leave_all, bool is_failed, unique_id_t *stream_id,
-                         eth_addr_t *stream_dest_addr, uint8_t *vlan_id) {
+                         eth_addr_t *stream_dest_addr, uint8_t *vlan_id,
+                         uint16_t max_frame_size) {
   msrp_talker_message_u msg;
   struct timespec ts;
   int ret;
@@ -130,7 +163,7 @@ int avb_send_msrp_talker(avb_state_s *state, mrp_attr_event_t attr_event,
   memcpy(msg.talker.info.stream_id, stream_id, UNIQUE_ID_LEN);
   memcpy(msg.talker.info.stream_dest_addr, stream_dest_addr, ETH_ADDR_LEN);
   memcpy(msg.talker.info.vlan_id, vlan_id, 2);
-  int tspec_max_frame_size = 850;
+  int tspec_max_frame_size = max_frame_size;
   int_to_octets(&tspec_max_frame_size, msg.talker.info.tspec_max_frame_size, 2);
   int tspec_max_frame_interval = 1;
   int_to_octets(&tspec_max_frame_interval,
@@ -205,13 +238,18 @@ int avb_send_msrp_listener(avb_state_s *state, mrp_attr_event_t attr_event,
 /* MAAP dynamic allocation pool: 91:E0:F0:00:00:00 to 91:E0:F0:00:FD:FF */
 #define MAAP_POOL_SIZE 0xFE00
 
-/* Generate a random address within the MAAP pool using device MAC as seed */
+/* Generate a deterministic address within the MAAP pool from the device
+ * MAC. Deterministic across boots is important: switches cache per-
+ * stream_id MSRP state, and if our picked Stream DA changed each boot,
+ * the switch's stale registration would block forwarding for the new
+ * address. MAAP PROBE still resolves cross-device conflicts if two
+ * devices happen to hash to the same slot. */
 static void maap_generate_addr(avb_state_s *state, eth_addr_t *addr,
                                int stream_index) {
   uint32_t seed = state->internal_mac_addr[2] ^ state->internal_mac_addr[3];
   seed = (seed << 8) | state->internal_mac_addr[4];
   seed = (seed << 8) | state->internal_mac_addr[5];
-  seed += (uint32_t)esp_timer_get_time() + stream_index;
+  seed += stream_index;
   uint16_t offset = seed % MAAP_POOL_SIZE;
   uint8_t *a = (uint8_t *)addr;
   a[0] = 0x91;
@@ -501,11 +539,14 @@ int avb_process_msrp_listener(avb_state_s *state, msrp_msgbuf_s *msg,
         }
         avbinfo("MSRP: listener ready for stream %d (count=%d)", i,
                 octets_to_uint(stream->connection_count, 2));
-        if (!stream->streaming) {
-          avb_start_stream_out(state, i);
-        }
       }
-      /* Existing listener re-declaring — no action needed */
+      /* Start streaming if we have a listener but aren't yet streaming —
+       * also covers the case where a new-listener start was refused because
+       * MAAP hadn't acquired the dest address yet. Subsequent periodic
+       * Listener Ready re-declarations will retry until it succeeds. */
+      if (!stream->streaming) {
+        avb_start_stream_out(state, i);
+      }
       return OK;
     }
 
@@ -1088,8 +1129,9 @@ static uint8_t sample_rate_to_aaf_code(uint32_t sample_rate) {
 static void i2s24_to_am824_mono(const uint8_t *in, uint8_t *out,
                                 int num_samples, int stream_channels) {
   for (int s = 0; s < num_samples; s++) {
-    /* L channel from I2S — byte[0]=LSB, byte[1]=MID, byte[2]=MSB */
-    uint8_t lsb = in[0], mid = in[1], msb = in[2];
+    /* L channel from I2S — byte[0]=MSB, byte[1]=MID, byte[2]=LSB
+     * (big_endian=true in slot_cfg matches AVTP wire order) */
+    uint8_t msb = in[0], mid = in[1], lsb = in[2];
     in += 3; /* skip L */
     in += 3; /* skip R (mono codec, same or silence) */
     for (int ch = 0; ch < stream_channels; ch++) {
@@ -1113,7 +1155,7 @@ static void i2s24_to_am824_mono(const uint8_t *in, uint8_t *out,
 static void i2s24_to_aaf_mono(const uint8_t *in, uint8_t *out, int num_samples,
                               int stream_channels) {
   for (int s = 0; s < num_samples; s++) {
-    uint8_t lsb = in[0], mid = in[1], msb = in[2];
+    uint8_t msb = in[0], mid = in[1], lsb = in[2];
     in += 3; /* skip L */
     in += 3; /* skip R */
     for (int ch = 0; ch < stream_channels; ch++) {
@@ -1748,8 +1790,6 @@ static inline uint32_t ring_read(jitter_ring_t *r, uint8_t *dst, uint32_t len) {
 typedef struct {
   avb_state_s *state;                        /* for media_clock stats update */
   i2s_chan_handle_t i2s_tx_handle;
-  uint8_t *i2s_drain_buf;                    /* drain timer pulls into here */
-  size_t i2s_drain_buf_size;
   uint8_t *i2s_convert_buf;                  /* handler shuffles PCM here */
   size_t i2s_convert_buf_size;
   jitter_ring_t ring;                        /* SPSC byte ring, handler→drain */
@@ -1863,18 +1903,42 @@ static void stream_in_drain_cb(void *arg) {
     return;
   }
 
+  /* Cap per-tick drain so we don't push unbounded audio into I2S DMA
+   * in one call; ~3.5 ms at 48 kHz stereo 24-bit. */
+  #define DRAIN_MAX_BYTES 1024
   uint32_t to_read = avail;
-  if (to_read > ctx->i2s_drain_buf_size)
-    to_read = ctx->i2s_drain_buf_size;
+  if (to_read > DRAIN_MAX_BYTES)
+    to_read = DRAIN_MAX_BYTES;
   /* Align to frame boundary (6 bytes = stereo 24-bit sample pair) */
   to_read = (to_read / 6) * 6;
   if (to_read == 0)
     return;
 
-  uint32_t got = ring_read(&ctx->ring, ctx->i2s_drain_buf, to_read);
+  /* Zero-copy drain: i2s_channel_write straight from the ring buffer in
+   * up to two contiguous segments (split at ring wrap). Saves the
+   * intermediate ring_read copy. */
+  uint32_t t = atomic_load_explicit(&ctx->ring.tail, memory_order_relaxed);
+  uint32_t mask = ctx->ring.capacity - 1;
+  uint32_t first_chunk = ctx->ring.capacity - (t & mask);
+  if (first_chunk > to_read)
+    first_chunk = to_read;
+  uint32_t second_chunk = to_read - first_chunk;
+
   size_t bytes_written = 0;
-  i2s_channel_write(ctx->i2s_tx_handle, ctx->i2s_drain_buf, got,
-                    &bytes_written, 1);
+  size_t w1 = 0;
+  i2s_channel_write(ctx->i2s_tx_handle, ctx->ring.buf + (t & mask),
+                    first_chunk, &w1, 1);
+  bytes_written += w1;
+  /* Only attempt the wrap-around segment if the first fully drained —
+   * otherwise I2S DMA is backpressured; next tick picks it up. */
+  if (w1 == first_chunk && second_chunk > 0) {
+    size_t w2 = 0;
+    i2s_channel_write(ctx->i2s_tx_handle, ctx->ring.buf, second_chunk,
+                      &w2, 1);
+    bytes_written += w2;
+  }
+  atomic_store_explicit(&ctx->ring.tail, t + (uint32_t)bytes_written,
+                        memory_order_release);
   ctx->drain_count++;
 
   /* PLL counter: bytes delivered to the I2S DMA. The avb_pll module
@@ -2038,11 +2102,12 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
     ctx->diag_captured = 1;
   }
 
-  /* AVTP 24-bit → I2S stereo 24-bit LE (ch0→L, ch1→R). Extra AAF
-   * channels are ignored; short packets zero-pad the missing samples.
-   * Converted data goes into ctx->i2s_convert_buf (pre-allocated at
-   * stream start) — avoids a variable-length stack allocation on every
-   * frame. */
+  /* AVTP wire → I2S stereo 24-bit BE (matches wire order via
+   * big_endian=true slot_cfg). AAF fast path: if talker is stereo, the
+   * whole payload is already in the exact byte order I2S needs — strip
+   * the trailing pad byte of each 4-byte container. AM824 needs the
+   * 1-byte label stripped per quadlet. Extra channels are ignored;
+   * short packets zero-pad the missing samples. */
   uint8_t *buf = ctx->i2s_convert_buf;
   int offset = 0;
   int max_bytes = (int)ctx->i2s_convert_buf_size;
@@ -2051,18 +2116,19 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
       int src_ch = (ch < channels) ? ch : 0;
       int src_offset = (s * channels + src_ch) * 4;
       if (subtype == avtp_subtype_aaf) {
+        /* AAF: [MSB, MID, LSB, pad] → copy first 3 bytes as-is */
         if (src_offset + 2 < pcm_len) {
-          buf[offset + 0] = pcm_data[src_offset + 2]; /* LSB */
+          buf[offset + 0] = pcm_data[src_offset + 0]; /* MSB */
           buf[offset + 1] = pcm_data[src_offset + 1]; /* MID */
-          buf[offset + 2] = pcm_data[src_offset + 0]; /* MSB */
+          buf[offset + 2] = pcm_data[src_offset + 2]; /* LSB */
         } else {
           buf[offset + 0] = buf[offset + 1] = buf[offset + 2] = 0;
         }
-      } else { /* IEC 61883-6 AM824 */
+      } else { /* IEC 61883-6 AM824: [label, MSB, MID, LSB] */
         if (src_offset + 3 < pcm_len) {
-          buf[offset + 0] = pcm_data[src_offset + 3]; /* LSB */
+          buf[offset + 0] = pcm_data[src_offset + 1]; /* MSB */
           buf[offset + 1] = pcm_data[src_offset + 2]; /* MID */
-          buf[offset + 2] = pcm_data[src_offset + 1]; /* MSB */
+          buf[offset + 2] = pcm_data[src_offset + 3]; /* LSB */
         } else {
           buf[offset + 0] = buf[offset + 1] = buf[offset + 2] = 0;
         }
@@ -2390,18 +2456,12 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   atomic_store(&ctx->ring.head, 0);
   atomic_store(&ctx->ring.tail, 0);
 
-  /* Drain buffer — enough for one 1 ms tick of 48 kHz stereo 24-bit
-   * (288 B), rounded up for headroom. */
-  ctx->i2s_drain_buf_size = 1024;
-  ctx->i2s_drain_buf = malloc(ctx->i2s_drain_buf_size);
   /* Convert buffer — sized to hold one AAF packet's worth of converted
    * stereo 24-bit samples (AAF_MAX_PACKET_BYTES). */
   ctx->i2s_convert_buf_size = AAF_MAX_PACKET_BYTES;
   ctx->i2s_convert_buf = malloc(ctx->i2s_convert_buf_size);
-  if (!ctx->i2s_drain_buf || !ctx->i2s_convert_buf) {
+  if (!ctx->i2s_convert_buf) {
     avberr("Stream in: no memory for audio buffers");
-    free(ctx->i2s_drain_buf);
-    free(ctx->i2s_convert_buf);
     free(ctx->ring.buf);
     free(ctx);
     return ERROR;
@@ -2419,7 +2479,6 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   };
   if (esp_timer_create(&drain_args, &ctx->drain_timer) != ESP_OK) {
     avberr("Stream in: failed to create drain timer");
-    free(ctx->i2s_drain_buf);
     free(ctx->i2s_convert_buf);
     free(ctx->ring.buf);
     free(ctx);
@@ -2428,7 +2487,6 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   if (esp_timer_start_periodic(ctx->drain_timer, 1000) != ESP_OK) {
     avberr("Stream in: failed to start drain timer");
     esp_timer_delete(ctx->drain_timer);
-    free(ctx->i2s_drain_buf);
     free(ctx->i2s_convert_buf);
     free(ctx->ring.buf);
     free(ctx);
@@ -2500,7 +2558,6 @@ void avb_stop_stream_in(avb_state_s *state, uint16_t index) {
             (unsigned long)ctx_to_free->media_locked_count,
             (unsigned long)ctx_to_free->media_unlocked_count);
 
-    free(ctx_to_free->i2s_drain_buf);
     free(ctx_to_free->i2s_convert_buf);
     free(ctx_to_free->ring.buf);
     free(ctx_to_free);
@@ -2531,6 +2588,18 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
 
   if (state->output_streams[index].streaming) {
     avberr("Stream out %d is already active", index);
+    return ERROR;
+  }
+
+  /* Refuse to start if MAAP hasn't finished acquiring a dest address yet.
+   * The task would lock `params->dest_addr = 0` on the first copy and
+   * transmit all frames to 00:00:00:00:00:00 forever. The MSRP listener
+   * handler will retry on the next Listener Ready re-declaration (every
+   * MSRP_LISTENER_CONN_INTERVAL_MSEC); MAAP probe finishes in ~1.5s. */
+  static const uint8_t zero_mac[ETH_ADDR_LEN] = {0};
+  if (memcmp(state->output_streams[index].stream_dest_addr, zero_mac,
+             ETH_ADDR_LEN) == 0) {
+    avbinfo("Stream out %d deferred: MAAP address not yet acquired", index);
     return ERROR;
   }
 

@@ -117,6 +117,10 @@ esp_err_t avb_config_i2s(avb_state_s *state) {
    * (avb_mclk / avb_mclk_apll) can retune MCLK with sub-ppm precision
    * without having to disable/reconfigure the I2S channel. */
   std_cfg.clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+  /* Big-endian in-memory sample layout: byte[0]=MSB, byte[2]=LSB. This
+   * matches AVTP wire order so the stream-in handler can memcpy AAF
+   * payloads straight to the jitter ring with no per-sample shuffle. */
+  std_cfg.slot_cfg.big_endian = true;
 
   // Initialize the I2S TX and RX channels
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(state->i2s_tx_handle, &std_cfg));
