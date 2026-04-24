@@ -312,8 +312,15 @@ static int32_t compute_ppm_q16(avb_state_s *state, uint64_t bytes_delta,
   return (int32_t)((byte_error * 1000000LL * (1LL << 16)) / expected);
 }
 
-static void print_stats(avb_state_s *state, int32_t inst_ppm_q16,
-                        int32_t cumul_ppm_q16) {
+void avb_pll_print_stats(avb_state_s *state) {
+  if (!state)
+    return;
+  int32_t inst_ppm_q16 = state->media_clock.pll_last_ppm_error_q16;
+  int32_t cumul_ppm_q16 = state->media_clock.pll_cumulative_ppm_error_q16;
+  /* Nothing to report if we haven't measured anything this window. */
+  if (state->media_clock.crf_samples == 0 &&
+      state->media_clock.aaf_samples == 0)
+    return;
   uint32_t crf_n = state->media_clock.crf_samples;
   uint32_t aaf_n = state->media_clock.aaf_samples;
   int32_t crf_mean =
@@ -509,9 +516,6 @@ void avb_pll_tick(avb_state_s *state) {
     s_pll.next_correction_us = now_us + AVB_PLL_CORRECTION_INTERVAL_US;
   }
 
-  /* Only print if something was actually measured */
-  if (state->media_clock.crf_samples > 0 ||
-      state->media_clock.aaf_samples > 0) {
-    print_stats(state, inst_ppm_q16, cumul_ppm_q16);
-  }
+  /* Print is handled by AVB-STATS (see avb_pll_print_stats) — keep the
+   * PLL tick focused on measurement + correction only. */
 }

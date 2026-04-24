@@ -2983,15 +2983,32 @@ void avb_codec_set_mic_gain(avb_state_s *state, float db);
 esp_err_t avb_persist_load(avb_state_s *state);
 esp_err_t avb_persist_save(avb_state_s *state);
 
-/* CPU/task diagnostic — prints per-task %CPU, per-core utilization,
- * stack high-water marks every AVB_STATS_WINDOW_MS (see avbstats.c).
- * Intended for performance investigation; remove once we're done. */
+/* Centralized periodic diagnostic — prints per-task %CPU, per-core
+ * utilization, stack high-water marks, STREAM-IN, STREAM-OUT, and
+ * MCLK/PLL state every AVB_STATS_WINDOW_MS (see avbstats.c). All
+ * periodic logging runs from this low-priority sampler; measurement
+ * code (handlers, drain, PLL tick) only updates shared counters. */
 void avb_cpu_stats_start(void);
+
+/* Give AVB-STATS a pointer to the AVB state so it can sample
+ * media-clock/PLL data for the MCLK line. Must be called before
+ * the first stats tick fires (safe to call immediately after
+ * avb_create_state). */
+void avb_cpu_stats_set_state(avb_state_s *state);
+
+/* Print the MCLK/PLL status line using the latest computed values in
+ * state->media_clock. Called by AVB-STATS. Resets the per-window
+ * drift accumulators after printing. */
+void avb_pll_print_stats(avb_state_s *state);
 
 /* Cumulative productive-work microseconds spent inside avb_stream_out_task
  * (excludes busy-wait). Delta over a window gives the "real" CPU AVB-OUT
  * would need if the busy-wait were replaced with a yielding wait. */
 uint64_t avb_stream_out_work_us_total(void);
+
+/* Print the per-window STREAM-OUT diagnostic line — called by AVB-STATS.
+ * Silent when no TX session is active. Mirrors avb_stream_in_print_diag. */
+void avb_stream_out_print_diag(void);
 /* Hot-path API: capture a snapshot of current state under the persist
  * mutex and mark it dirty. Returns immediately — the actual flash
  * write happens later from the persist task. Safe to call from any

@@ -22,6 +22,11 @@
 #define AVB_STATS_MAX_TASKS 32
 #define AVB_STATS_WINDOW_MS 10000
 
+/* Pointer to avb_state so AVB-STATS can drive the MCLK print that was
+ * previously embedded in the main loop. Stream-in/out diag state is
+ * owned by their respective contexts in avtp.c. */
+static avb_state_s *s_state = NULL;
+
 typedef struct {
   UBaseType_t tn; /* xTaskNumber — stable per task, used to match snapshots */
   uint32_t rt;    /* ulRunTimeCounter at snapshot time */
@@ -177,6 +182,14 @@ static void avb_cpu_stats_tick(void) {
           (unsigned)((dma_miss >> 16) & 1),
           (unsigned)((dma_miss >> 28) & 1));
 
+  /* Stream-in (listener) + stream-out (talker) + MCLK / PLL state —
+   * centralized periodic diagnostics. Each print function is silent
+   * when its session isn't active. */
+  avb_stream_in_print_diag();
+  avb_stream_out_print_diag();
+  if (s_state)
+    avb_pll_print_stats(s_state);
+
 save_baseline:
   s_prev_n = cur_n < AVB_STATS_MAX_TASKS ? cur_n : AVB_STATS_MAX_TASKS;
   for (UBaseType_t i = 0; i < s_prev_n; i++) {
@@ -195,6 +208,10 @@ static void avb_cpu_stats_task(void *arg) {
     vTaskDelay(pdMS_TO_TICKS(AVB_STATS_WINDOW_MS));
     avb_cpu_stats_tick();
   }
+}
+
+void avb_cpu_stats_set_state(avb_state_s *state) {
+  s_state = state;
 }
 
 void avb_cpu_stats_start(void) {

@@ -28,6 +28,35 @@ uint64_t avb_stream_out_work_us_total(void) {
   return atomic_load_explicit(&s_stream_out_work_us, memory_order_relaxed);
 }
 
+/* Stream-out diagnostic context — mirrors stream_rx_ctx_t pattern.
+ * Writer is avb_stream_out_task (core 1 TX task), reader is AVB-STATS
+ * (core 0). Plain volatile uint32_t reads/writes are torn-free on
+ * RISC-V at 4-byte alignment; int64 overrun_max is only sampled when
+ * the task is paused in its busy-wait so torn reads aren't a concern
+ * for that one. The context is allocated at task start and freed on
+ * stop — same lifecycle as stream_rx_ctx_t. */
+typedef struct {
+  volatile bool active;              /* true while stream_out_task running */
+  volatile uint32_t pkt_count;       /* TX packets attempted */
+  volatile uint32_t send_fail_count; /* esp_eth_transmit failures */
+  volatile uint32_t overrun_count;   /* send loop late beyond interval */
+  volatile int64_t overrun_max_us;   /* worst overrun this session */
+  volatile uint32_t i2s_zero_reads;  /* mic ring read returned 0 bytes */
+  volatile uint32_t i2s_nonzero_reads; /* healthy mic reads */
+  /* TX PLL offset range, cumulative; AVB-STATS resets via print_diag
+   * after reading so the reported range is always per-window. */
+  volatile int32_t pll_offset_min_ns;
+  volatile int32_t pll_offset_max_ns;
+  volatile uint32_t pll_skip_count; /* PLL measurements rejected as outliers */
+  /* gPTP-paced cadence drift tracking (see avb_stream_out_task) */
+  volatile int32_t drift_ppm_q8;    /* (gptp_rate − esp_rate) / esp_rate × 1e6, Q8 */
+  volatile int32_t remaining_ns_min; /* narrowest gPTP-vs-target gap this window */
+  volatile int32_t remaining_ns_max; /* widest gPTP-vs-target gap this window */
+  volatile uint32_t gptp_resync_count; /* sanity-branch re-seeds (gPTP jumps) */
+} stream_tx_ctx_t;
+
+static stream_tx_ctx_t *s_stream_tx_ctx = NULL;
+
 /* Note: Ethernet MAC DMA transmit is accessed concurrently by the AVTP stream
  * task (core 1) and the PTP daemon (core 0). The ESP-IDF driver lacks internal
  * locking. A lock here was attempted but the PTP timestamped TX path holds the
@@ -1204,6 +1233,16 @@ static void avb_stream_out_task(void *task_param) {
   /* Reset productive-work accumulator on every stream_out_task
    * start so each streaming session stands alone in the CPU stats. */
   atomic_store_explicit(&s_stream_out_work_us, 0, memory_order_relaxed);
+
+  /* Allocate and publish the diag context — mirrors stream-in pattern.
+   * Counters zeroed via calloc; active=true once populated. Freed in
+   * the cleanup block below so the AVB-STATS reader never sees a
+   * dangling pointer. */
+  stream_tx_ctx_t *tx_ctx = calloc(1, sizeof(stream_tx_ctx_t));
+  if (tx_ctx) {
+    tx_ctx->active = true;
+    s_stream_tx_ctx = tx_ctx;
+  }
   avbinfo("Starting stream out task");
 
   uint8_t *sine_lut = NULL;
@@ -1345,7 +1384,15 @@ static void avb_stream_out_task(void *task_param) {
   uint32_t avtp_ts_increment = (uint32_t)((uint64_t)params->samples_per_packet *
                                           1000000000ULL / params->sample_rate);
 
-// Software PLL (unchanged)
+/* Software PLL on avtp_media_ts — disabled.
+ *
+ * The PLL existed to correct presentation-timestamp drift relative to
+ * gPTP when TX cadence was crystal-paced. Now that the TX scheduler is
+ * gPTP-paced (see gptp_cadence block above), avtp_media_ts already
+ * tracks gPTP rate, so the PLL is redundant and adds per-measurement
+ * clock_gettime jitter to the timestamps. Kept compiled in behind the
+ * gate so the block can be re-enabled for comparison if needed. */
+#define PLL_DISABLED 1
 #define PLL_MEASURE_FAST 500
 #define PLL_MEASURE_SLOW 4000
 #define PLL_FAST_DURATION 80000
@@ -1356,8 +1403,42 @@ static void avb_stream_out_task(void *task_param) {
   int64_t pll_correction_fp = 0;
   int64_t pll_frac_accum = 0;
   int64_t pll_integral_fp = 0;
-  int32_t pll_offset_max = 0, pll_offset_min = 0;
+  /* Per-window min/max — seeded as INT32_MAX/MIN so the first sample
+   * always captures as both ends of the range. Reset by the 1 Hz
+   * publish branch to the same sentinels. */
+  int32_t pll_offset_max = INT32_MIN, pll_offset_min = INT32_MAX;
   uint32_t pll_measure_count = 0, pll_skip_count = 0;
+
+  /* gPTP-cadence drift tracking — each publish cycle computes the
+   * gPTP-vs-esp_timer rate ratio over the elapsed window. Tells us
+   * how much the gPTP-paced scheduler is actually correcting for. */
+  int64_t drift_gptp_ref_ns = 0;
+  int64_t drift_esp_ref_us = 0;
+  bool drift_ref_valid = false;
+  int32_t remaining_ns_min = INT32_MAX, remaining_ns_max = INT32_MIN;
+  uint32_t gptp_resync_count = 0;
+  /* Sub-µs carry for the ns→µs truncation in the gPTP-paced scheduler. */
+  int32_t sched_ns_carry = 0;
+  /* Periodic gPTP-vs-esp_timer resync measurement to produce a filtered
+   * per-packet correction. Reading gPTP every packet injected ptpd's
+   * 125 ms servo ripple directly into TX cadence; instead we sample
+   * gPTP every ~128 ms (SCHED_RESYNC_PKTS packets) and smoothly adjust
+   * a correction-per-packet in nanoseconds. Between samples the cadence
+   * is pure esp_timer-paced with a filtered ppm offset applied. */
+  #define SCHED_RESYNC_PKTS 8192    /* ~1 s between gPTP baselines —
+                                       each sample covers a full ptpd
+                                       servo cycle, reducing per-sample
+                                       noise before it enters the EMA. */
+  #define SCHED_FILTER_SHIFT 3      /* EMA tau ≈ 8 samples × 1 s = ~8 s
+                                       effective smoothing on a low-noise
+                                       per-sample measurement. */
+  int64_t sched_gptp_ref_ns = 0;
+  int64_t sched_esp_ref_us = 0;
+  bool sched_ref_valid = false;
+  /* per-packet correction in nanoseconds, signed. Positive = wait a bit
+   * longer each packet (ESP crystal fast). Q16 fixed-point so we can
+   * carry sub-nanosecond resolution across packets. */
+  int64_t sched_ns_adj_q16 = 0;
 
   esp_task_wdt_add_user("AVB-OUT", &wdt_handle);
   esp_log_level_set("ptpd", ESP_LOG_NONE);
@@ -1435,17 +1516,26 @@ static void avb_stream_out_task(void *task_param) {
   uint8_t mac_hash = state->internal_mac_addr[4] ^ state->internal_mac_addr[5];
   int64_t phase_offset = (mac_hash % params->interval);
   int64_t next_send_time = esp_timer_get_time() + phase_offset;
+
+  /* gPTP-paced cadence: each packet's busy-wait target is re-projected
+   * from the current gPTP time. Locks TX rate to gPTP (8000 packets per
+   * gPTP-second) rather than to ESP's crystal, preventing cumulative
+   * sample-count drift that causes listeners to drop/dup samples. */
+  int64_t gptp_packet_target_ns = 0;
+  bool gptp_cadence_ready = false;
   for (int init_try = 0; init_try < 5; init_try++) {
     struct timespec ptp_a, ptp_b;
     if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_a) == 0 &&
         clock_gettime(CLOCK_PTP_SYSTEM, &ptp_b) == 0) {
-      uint32_t ts_a = (uint32_t)((uint64_t)ptp_a.tv_sec * 1000000000ULL +
-                                 (uint64_t)ptp_a.tv_nsec);
-      uint32_t ts_b = (uint32_t)((uint64_t)ptp_b.tv_sec * 1000000000ULL +
-                                 (uint64_t)ptp_b.tv_nsec);
-      int32_t diff = (int32_t)(ts_b - ts_a);
+      uint64_t ts_a = (uint64_t)ptp_a.tv_sec * 1000000000ULL +
+                      (uint64_t)ptp_a.tv_nsec;
+      uint64_t ts_b = (uint64_t)ptp_b.tv_sec * 1000000000ULL +
+                      (uint64_t)ptp_b.tv_nsec;
+      int64_t diff = (int64_t)(ts_b - ts_a);
       if (diff >= 0 && diff < 500000) {
-        avtp_media_ts = ts_a;
+        avtp_media_ts = (uint32_t)ts_a;
+        gptp_packet_target_ns = (int64_t)ts_a + phase_offset * 1000;
+        gptp_cadence_ready = true;
         break;
       }
     }
@@ -1475,17 +1565,81 @@ static void avb_stream_out_task(void *task_param) {
       if (overrun > overrun_max)
         overrun_max = overrun;
     }
-    if (overrun > params->interval * 10) {
+    /* Filtered gPTP cadence: most packets advance by (interval_ns +
+     * sched_ns_adj) with Q16-fixed-point carry to preserve sub-ns
+     * precision. Every SCHED_RESYNC_PKTS packets we read gPTP, measure
+     * how far off our free-running esp_timer schedule has slipped, and
+     * update sched_ns_adj via an EMA. Result: esp_timer-precision
+     * cadence with a heavily-filtered rate lock to gPTP. */
+    if (gptp_cadence_ready && (loop_count & (SCHED_RESYNC_PKTS - 1)) == 0) {
+      struct timespec ts_now;
+      if (clock_gettime(CLOCK_PTP_SYSTEM, &ts_now) == 0) {
+        int64_t now_gptp_ns = (int64_t)ts_now.tv_sec * 1000000000LL +
+                              (int64_t)ts_now.tv_nsec;
+        if (!sched_ref_valid) {
+          sched_gptp_ref_ns = now_gptp_ns;
+          sched_esp_ref_us = now;
+          sched_ref_valid = true;
+          drift_gptp_ref_ns = now_gptp_ns;
+          drift_esp_ref_us = now;
+          drift_ref_valid = true;
+        } else {
+          int64_t gptp_delta = now_gptp_ns - sched_gptp_ref_ns;
+          int64_t esp_delta_us = now - sched_esp_ref_us;
+          int64_t esp_delta_ns = esp_delta_us * 1000LL;
+          /* Guard against bogus intervals (first tick / gPTP jump). */
+          if (esp_delta_us > 10000 && esp_delta_us < 10000000) {
+            int64_t diff_ns = gptp_delta - esp_delta_ns;
+            /* Per-packet correction = accumulated diff over SCHED_RESYNC_PKTS.
+             * Q16 so sub-ns survives. */
+            int64_t sample_q16 = (diff_ns << 16) / SCHED_RESYNC_PKTS;
+            /* Large jump: re-baseline without polluting the filter. */
+            int64_t thresh_ns_per_pkt_q16 = (int64_t)1000 << 16; /* 1 µs */
+            if (sample_q16 > thresh_ns_per_pkt_q16 ||
+                sample_q16 < -thresh_ns_per_pkt_q16) {
+              gptp_resync_count++;
+              sched_ns_adj_q16 = 0;
+            } else {
+              /* EMA: new = (old*(2^K-1) + sample) >> K */
+              sched_ns_adj_q16 =
+                  ((sched_ns_adj_q16 *
+                    ((1 << SCHED_FILTER_SHIFT) - 1)) +
+                   sample_q16) >>
+                  SCHED_FILTER_SHIFT;
+            }
+            /* Track remaining_ns-like stat for diagnostics: the
+             * accumulated diff is the slip over the sample window. */
+            if (diff_ns >= (int64_t)INT32_MIN && diff_ns <= (int64_t)INT32_MAX) {
+              int32_t diff32 = (int32_t)diff_ns;
+              if (diff32 < remaining_ns_min) remaining_ns_min = diff32;
+              if (diff32 > remaining_ns_max) remaining_ns_max = diff32;
+            }
+          }
+          sched_gptp_ref_ns = now_gptp_ns;
+          sched_esp_ref_us = now;
+        }
+      }
+    }
+    /* Per-packet advance: nominal interval plus filtered adjustment,
+     * with sub-µs carry. adj_q16 is ns per packet × 65536. */
+    int64_t base_ns = (int64_t)params->interval * 1000LL;
+    int64_t adj_ns = sched_ns_adj_q16 >> 16;
+    int64_t total_ns = base_ns + adj_ns + sched_ns_carry;
+    int32_t us_to_wait = (int32_t)(total_ns / 1000);
+    sched_ns_carry = (int32_t)(total_ns - (int64_t)us_to_wait * 1000);
+    if (gptp_cadence_ready) {
+      next_send_time += us_to_wait;
+    } else if (overrun > params->interval * 10) {
       next_send_time = now + params->interval;
     } else {
       next_send_time += params->interval;
     }
 
-    /* Advance AVTP media clock with PLL correction */
-    pll_frac_accum += pll_correction_fp;
-    int32_t correction_ns = (int32_t)(pll_frac_accum >> PLL_FP_SHIFT);
-    pll_frac_accum -= (int64_t)correction_ns << PLL_FP_SHIFT;
-    avtp_media_ts += (uint32_t)((int32_t)avtp_ts_increment + correction_ns);
+    /* Advance AVTP media clock by exact nominal increment. TX cadence
+     * is gPTP-paced by the filtered scheduler above, so our counter
+     * tracks gPTP rate correctly without per-packet clock_gettime
+     * jitter leaking into presentation timestamps. */
+    avtp_media_ts += avtp_ts_increment;
 
     /* Check for gPTP grandmaster change every ~1 second (8000 packets at 125us) */
     if ((loop_count & 0x1FFF) == 0 && loop_count > 0) {
@@ -1496,6 +1650,54 @@ static void avb_stream_out_task(void *task_param) {
         tu_active = true;
         tu_hold_remaining = MCR_HOLD_PACKETS;
       }
+      /* Compute gPTP-vs-esp_timer drift (ppm × 256) over the window,
+       * using the baseline captured in the cadence block above. Only
+       * valid if we've actually taken a gPTP reference; skipped on the
+       * very first publish. */
+      int32_t drift_ppm_q8 = 0;
+      if (drift_ref_valid) {
+        struct timespec ts_now;
+        if (clock_gettime(CLOCK_PTP_SYSTEM, &ts_now) == 0) {
+          int64_t now_gptp_ns = (int64_t)ts_now.tv_sec * 1000000000LL +
+                                (int64_t)ts_now.tv_nsec;
+          int64_t now_esp_us = esp_timer_get_time();
+          int64_t gptp_elapsed_ns = now_gptp_ns - drift_gptp_ref_ns;
+          int64_t esp_elapsed_ns = (now_esp_us - drift_esp_ref_us) * 1000LL;
+          if (esp_elapsed_ns > 100000000LL /* > 100 ms of baseline */) {
+            int64_t diff_ns = gptp_elapsed_ns - esp_elapsed_ns;
+            /* ppm × 256 = diff/esp_elapsed × 1e6 × 256 */
+            drift_ppm_q8 = (int32_t)((diff_ns * 1000000LL * 256LL) / esp_elapsed_ns);
+          }
+          /* Re-baseline so next window's measurement is independent. */
+          drift_gptp_ref_ns = now_gptp_ns;
+          drift_esp_ref_us = now_esp_us;
+        }
+      }
+
+      /* Publish diagnostic counters for AVB-STATS (~1 Hz). Piggybacks
+       * on the existing sparse branch so the hot path pays nothing. */
+      stream_tx_ctx_t *tx_ctx = s_stream_tx_ctx;
+      if (tx_ctx) {
+        tx_ctx->pkt_count = loop_count;
+        tx_ctx->send_fail_count = send_fail_count;
+        tx_ctx->overrun_count = overrun_count;
+        tx_ctx->overrun_max_us = overrun_max;
+        tx_ctx->i2s_zero_reads = i2s_zero_reads;
+        tx_ctx->i2s_nonzero_reads = i2s_nonzero_audio;
+        tx_ctx->pll_offset_min_ns = pll_offset_min;
+        tx_ctx->pll_offset_max_ns = pll_offset_max;
+        tx_ctx->pll_skip_count = pll_skip_count;
+        tx_ctx->drift_ppm_q8 = drift_ppm_q8;
+        tx_ctx->remaining_ns_min = remaining_ns_min;
+        tx_ctx->remaining_ns_max = remaining_ns_max;
+        tx_ctx->gptp_resync_count = gptp_resync_count;
+      }
+      /* Reset PLL offset range and cadence-drift range so the published
+       * values stay per-window instead of latching worst-ever. */
+      pll_offset_min = INT32_MAX;
+      pll_offset_max = INT32_MIN;
+      remaining_ns_min = INT32_MAX;
+      remaining_ns_max = INT32_MIN;
     }
 
     /* Update per-packet fields in tx_frame.
@@ -1624,15 +1826,18 @@ static void avb_stream_out_task(void *task_param) {
           if (read_diff >= 0 && read_diff < 500000) {
             int32_t offset = (int32_t)(ptp_now_ts - avtp_media_ts);
             pll_measure_count++;
-            if (offset > pll_offset_max)
-              pll_offset_max = offset;
-            if (offset < pll_offset_min)
-              pll_offset_min = offset;
 #define PLL_OUTLIER_NS 50000000
             if (offset > PLL_OUTLIER_NS || offset < -PLL_OUTLIER_NS) {
               pll_skip_count++;
               goto pll_skip;
             }
+            /* Record min/max only after the outlier filter so the
+             * STREAM-OUT pll_offset range isn't pinned by a single
+             * bad gPTP read. */
+            if (offset > pll_offset_max)
+              pll_offset_max = offset;
+            if (offset < pll_offset_min)
+              pll_offset_min = offset;
             int64_t prop_corr_fp =
                 ((int64_t)offset << PLL_FP_SHIFT) / PLL_SPREAD;
             pll_integral_fp += ((int64_t)offset << PLL_FP_SHIFT) /
@@ -1661,6 +1866,13 @@ static void avb_stream_out_task(void *task_param) {
                               memory_order_relaxed);
   }
 
+  /* Publish NULL first so AVB-STATS stops reading, then free. */
+  if (s_stream_tx_ctx) {
+    stream_tx_ctx_t *tx_to_free = s_stream_tx_ctx;
+    tx_to_free->active = false;
+    s_stream_tx_ctx = NULL;
+    free(tx_to_free);
+  }
   esp_log_level_set("*", ESP_LOG_INFO);
   avbinfo("Stream out stopped: %lu pkts, %lu fails, %lu overruns (max %lldus), "
           "i2s: %lu zero_reads, %lu nonzero_audio",
@@ -1790,8 +2002,6 @@ static inline uint32_t ring_read(jitter_ring_t *r, uint8_t *dst, uint32_t len) {
 typedef struct {
   avb_state_s *state;                        /* for media_clock stats update */
   i2s_chan_handle_t i2s_tx_handle;
-  uint8_t *i2s_convert_buf;                  /* handler shuffles PCM here */
-  size_t i2s_convert_buf_size;
   jitter_ring_t ring;                        /* SPSC byte ring, handler→drain */
   esp_timer_handle_t drain_timer;            /* periodic 1 ms drain */
   uint8_t expected_stream_id[UNIQUE_ID_LEN]; /* filter: only accept this stream */
@@ -2102,52 +2312,54 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
     ctx->diag_captured = 1;
   }
 
-  /* AVTP wire → I2S stereo 24-bit BE (matches wire order via
-   * big_endian=true slot_cfg). AAF fast path: if talker is stereo, the
-   * whole payload is already in the exact byte order I2S needs — strip
-   * the trailing pad byte of each 4-byte container. AM824 needs the
-   * 1-byte label stripped per quadlet. Extra channels are ignored;
-   * short packets zero-pad the missing samples. */
-  uint8_t *buf = ctx->i2s_convert_buf;
-  int offset = 0;
-  int max_bytes = (int)ctx->i2s_convert_buf_size;
-  for (int s = 0; s < samples && offset + 6 <= max_bytes; s++) {
-    for (int ch = 0; ch < 2; ch++) {
-      int src_ch = (ch < channels) ? ch : 0;
-      int src_offset = (s * channels + src_ch) * 4;
-      if (subtype == avtp_subtype_aaf) {
-        /* AAF: [MSB, MID, LSB, pad] → copy first 3 bytes as-is */
-        if (src_offset + 2 < pcm_len) {
-          buf[offset + 0] = pcm_data[src_offset + 0]; /* MSB */
-          buf[offset + 1] = pcm_data[src_offset + 1]; /* MID */
-          buf[offset + 2] = pcm_data[src_offset + 2]; /* LSB */
-        } else {
-          buf[offset + 0] = buf[offset + 1] = buf[offset + 2] = 0;
+  /* AVTP wire → I2S stereo 24-bit BE, written directly into the jitter
+   * ring with a single atomic head-publish at the end. The in-memory
+   * layout matches the wire (big_endian=true slot_cfg), so AAF is just
+   * a copy of the first 3 bytes of each 4-byte container; AM824 strips
+   * the 1-byte label per quadlet. Extra channels are ignored. */
+  uint32_t total = (uint32_t)samples * 6; /* stereo 24-bit */
+  if (total > 0 && ring_writable(&ctx->ring) >= total) {
+    uint32_t h = atomic_load_explicit(&ctx->ring.head, memory_order_relaxed);
+    uint32_t mask = ctx->ring.capacity - 1;
+    uint8_t *rbuf = ctx->ring.buf;
+    uint32_t offset = 0;
+    for (int s = 0; s < samples; s++) {
+      for (int ch = 0; ch < 2; ch++) {
+        int src_ch = (ch < channels) ? ch : 0;
+        int src_offset = (s * channels + src_ch) * 4;
+        uint32_t p0 = (h + offset + 0) & mask;
+        uint32_t p1 = (h + offset + 1) & mask;
+        uint32_t p2 = (h + offset + 2) & mask;
+        if (subtype == avtp_subtype_aaf) {
+          /* AAF: [MSB, MID, LSB, pad] — copy first 3 bytes */
+          if (src_offset + 2 < pcm_len) {
+            rbuf[p0] = pcm_data[src_offset + 0];
+            rbuf[p1] = pcm_data[src_offset + 1];
+            rbuf[p2] = pcm_data[src_offset + 2];
+          } else {
+            rbuf[p0] = rbuf[p1] = rbuf[p2] = 0;
+          }
+        } else { /* AM824: [label, MSB, MID, LSB] — skip label */
+          if (src_offset + 3 < pcm_len) {
+            rbuf[p0] = pcm_data[src_offset + 1];
+            rbuf[p1] = pcm_data[src_offset + 2];
+            rbuf[p2] = pcm_data[src_offset + 3];
+          } else {
+            rbuf[p0] = rbuf[p1] = rbuf[p2] = 0;
+          }
         }
-      } else { /* IEC 61883-6 AM824: [label, MSB, MID, LSB] */
-        if (src_offset + 3 < pcm_len) {
-          buf[offset + 0] = pcm_data[src_offset + 1]; /* MSB */
-          buf[offset + 1] = pcm_data[src_offset + 2]; /* MID */
-          buf[offset + 2] = pcm_data[src_offset + 3]; /* LSB */
-        } else {
-          buf[offset + 0] = buf[offset + 1] = buf[offset + 2] = 0;
-        }
+        offset += 3;
       }
-      offset += 3;
     }
-  }
-
-  if (offset > 0) {
-    /* All-or-nothing ring write: only commit if the whole packet fits,
-     * so ring drains don't fracture stereo samples across boundaries. */
-    if (ring_writable(&ctx->ring) >= (uint32_t)offset) {
-      ring_write(&ctx->ring, buf, (uint32_t)offset);
-      ctx->ring_write_ok++;
-    } else {
-      ctx->ring_write_fail++;
-    }
+    /* Publish — drain can't see any of the bytes we just wrote until
+     * this store lands (release ordering pairs with ring_readable's
+     * acquire load of head). */
+    atomic_store_explicit(&ctx->ring.head, h + total, memory_order_release);
+    ctx->ring_write_ok++;
     if (!ctx->diag_i2s_bytes)
-      ctx->diag_i2s_bytes = offset;
+      ctx->diag_i2s_bytes = (int)total;
+  } else if (total > 0) {
+    ctx->ring_write_fail++;
   }
 
   /* Sparse drift-sampler stash: every 8 packets (~1 ms at 8000 pps),
@@ -2188,16 +2400,12 @@ void avb_stream_in_print_diag(void) {
             ctx->diag_first_audio[7]);
   }
 
-  /* Periodic (~every 5 s) drain-health + counters snapshot. Deltas
-   * per-window. Read the volatile counters directly — no atomics
-   * because SPSC with aligned 32-bit fields is torn-free on RISC-V. */
-  static int64_t next_print_us = 0;
+  /* Per-window drain-health + counters snapshot. Deltas per-window.
+   * Read the volatile counters directly — no atomics because SPSC with
+   * aligned 32-bit fields is torn-free on RISC-V. Cadence is set by the
+   * caller (AVB-STATS). */
   static uint32_t last_pkt = 0, last_ok = 0, last_fail = 0;
   static uint32_t last_drain = 0, last_under = 0;
-  int64_t now_us = esp_timer_get_time();
-  if (now_us < next_print_us)
-    return;
-  next_print_us = now_us + 5 * 1000 * 1000;
 
   uint32_t packets = ctx->pkt_count;
   uint32_t ok = ctx->ring_write_ok;
@@ -2225,6 +2433,81 @@ void avb_stream_in_print_diag(void) {
   last_fail = fail;
   last_drain = drain;
   last_under = under;
+}
+
+/* Print stream-out diagnostics — called from AVB-STATS at the window
+ * cadence. Mirrors avb_stream_in_print_diag: reads the volatile ctx
+ * (written ~1 Hz by the TX task) and prints a delta-per-window summary.
+ * Silent when no TX session is active. */
+void avb_stream_out_print_diag(void) {
+  stream_tx_ctx_t *ctx = s_stream_tx_ctx;
+  if (!ctx || !ctx->active)
+    return;
+
+  static uint32_t last_pkts = 0, last_fail = 0, last_over = 0;
+  static uint32_t last_z = 0, last_nz = 0, last_skip = 0;
+  static uint32_t last_resync = 0;
+  static bool prev_active = false;
+  if (!prev_active) {
+    last_pkts = last_fail = last_over = 0;
+    last_z = last_nz = last_skip = last_resync = 0;
+  }
+  prev_active = true;
+
+  uint32_t pkts = ctx->pkt_count;
+  uint32_t fail = ctx->send_fail_count;
+  uint32_t over = ctx->overrun_count;
+  uint32_t z = ctx->i2s_zero_reads;
+  uint32_t nz = ctx->i2s_nonzero_reads;
+  uint32_t skip = ctx->pll_skip_count;
+  uint32_t resync = ctx->gptp_resync_count;
+  int64_t over_max = ctx->overrun_max_us;
+  int32_t pll_min = ctx->pll_offset_min_ns;
+  int32_t pll_max = ctx->pll_offset_max_ns;
+  int32_t drift_ppm_q8 = ctx->drift_ppm_q8;
+  int32_t rem_min = ctx->remaining_ns_min;
+  int32_t rem_max = ctx->remaining_ns_max;
+
+  bool pll_has_sample = pll_min <= pll_max;
+  bool rem_has_sample = rem_min <= rem_max;
+
+  /* ppm with 2-decimal precision: drift_ppm_q8 / 256 = ppm, ×100 → centippm */
+  int32_t drift_centippm = (int32_t)((int64_t)drift_ppm_q8 * 100 / 256);
+  int abs_cppm = drift_centippm < 0 ? -drift_centippm : drift_centippm;
+
+  avbinfo("STREAM-OUT: pkts=%lu fail=%lu over=%lu(max=%lldus) "
+          "i2s_zero=%lu i2s_nz=%lu pll=[%s] pll_skip=%lu "
+          "drift=%s%ld.%02d ppm rem=[%s] resync=%lu",
+          (unsigned long)(pkts - last_pkts),
+          (unsigned long)(fail - last_fail),
+          (unsigned long)(over - last_over), (long long)over_max,
+          (unsigned long)(z - last_z),
+          (unsigned long)(nz - last_nz),
+          pll_has_sample ? "" : "no-sample",
+          (unsigned long)(skip - last_skip),
+          drift_centippm < 0 ? "-" : "",
+          (long)(abs_cppm / 100), (int)(abs_cppm % 100),
+          rem_has_sample ? "" : "no-sample",
+          (unsigned long)(resync - last_resync));
+
+  /* Secondary detail lines only emitted when samples were actually
+   * collected, to keep noise-free output when the stream is idle. */
+  if (pll_has_sample) {
+    avbinfo("  STREAM-OUT-pll: min=%ldns max=%ldns",
+            (long)pll_min, (long)pll_max);
+  }
+  if (rem_has_sample) {
+    avbinfo("  STREAM-OUT-rem: min=%ldns max=%ldns",
+            (long)rem_min, (long)rem_max);
+  }
+
+  last_pkts = pkts;
+  last_fail = fail;
+  last_over = over;
+  last_z = z;
+  last_nz = nz;
+  last_skip = skip;
+  last_resync = resync;
 }
 
 /* Deferred drift sampler. Called from AVB main's periodic loop at
@@ -2456,17 +2739,6 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   atomic_store(&ctx->ring.head, 0);
   atomic_store(&ctx->ring.tail, 0);
 
-  /* Convert buffer — sized to hold one AAF packet's worth of converted
-   * stereo 24-bit samples (AAF_MAX_PACKET_BYTES). */
-  ctx->i2s_convert_buf_size = AAF_MAX_PACKET_BYTES;
-  ctx->i2s_convert_buf = malloc(ctx->i2s_convert_buf_size);
-  if (!ctx->i2s_convert_buf) {
-    avberr("Stream in: no memory for audio buffers");
-    free(ctx->ring.buf);
-    free(ctx);
-    return ERROR;
-  }
-
   /* Create the drain timer — fires every 1 ms, reads from ring, writes
    * to I2S TX. Runs in the esp_timer task (prio 22, core 0). Fast
    * callback (~2-10 µs typical) so it doesn't perturb anything. */
@@ -2479,7 +2751,6 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   };
   if (esp_timer_create(&drain_args, &ctx->drain_timer) != ESP_OK) {
     avberr("Stream in: failed to create drain timer");
-    free(ctx->i2s_convert_buf);
     free(ctx->ring.buf);
     free(ctx);
     return ERROR;
@@ -2487,7 +2758,6 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   if (esp_timer_start_periodic(ctx->drain_timer, 1000) != ESP_OK) {
     avberr("Stream in: failed to start drain timer");
     esp_timer_delete(ctx->drain_timer);
-    free(ctx->i2s_convert_buf);
     free(ctx->ring.buf);
     free(ctx);
     return ERROR;
@@ -2558,7 +2828,6 @@ void avb_stop_stream_in(avb_state_s *state, uint16_t index) {
             (unsigned long)ctx_to_free->media_locked_count,
             (unsigned long)ctx_to_free->media_unlocked_count);
 
-    free(ctx_to_free->i2s_convert_buf);
     free(ctx_to_free->ring.buf);
     free(ctx_to_free);
   }

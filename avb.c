@@ -613,9 +613,10 @@ static void avb_task(void *task_param) {
   // persisted volume/gain override the codec defaults
   avb_persist_load(state);
 
-  /* Temporary: start the CPU/task stats dump so we can measure core
-   * saturation and per-task load under real streaming. Remove once the
-   * scheduling plan is validated. */
+  /* Centralized periodic diagnostic (CPU, stream-in, stream-out, MCLK).
+   * Must set the state pointer before starting so the first tick has
+   * access to media_clock data. */
+  avb_cpu_stats_set_state(state);
   avb_cpu_stats_start();
 
   // Apply persisted codec values to hardware
@@ -670,17 +671,14 @@ static void avb_task(void *task_param) {
     // Send periodic messages such as announcing entity available, etc
     avb_periodic_send(state);
 
-    // Stream-in diagnostics — avb_stream_in_print_diag (avtp.c) prints
-    // one-shot first-packet info, safe to call from main loop context.
-    avb_stream_in_print_diag();
-
     // Sample AAF/CRF drift vs. CLOCK_PTP_SYSTEM at ~100 Hz (the call
     // itself self-rate-limits). Moved here so the 800 Hz RX handlers
     // don't contend with PTPD on the PTP clock driver — that was the
     // suspected cause of the MSRP LeaveAll flap.
     avb_stream_in_sample_drift(state);
 
-    // Media-clock PLL: measure, log, apply MCLK correction
+    // Media-clock PLL: measure, apply MCLK correction (no print — all
+    // periodic diagnostic logging is centralized in AVB-STATS).
     avb_pll_tick(state);
 
     // Process status requests
