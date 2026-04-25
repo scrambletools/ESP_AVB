@@ -1711,17 +1711,41 @@ int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
                                    aecp_status_no_such_descriptor);
     }
 
+    /* Per Milan §5.5.3.6.45, UNBIND_STREAM is equivalent to
+     * DISCONNECT_RX. Route through the exact same sequence AAF takes
+     * so both streams end up with the same cleared state (which is
+     * the behavior that's been working for AAF): synthesize an
+     * acmp_message_s with the current binding and invoke
+     * avb_disconnect_listener + DISCONNECT_TX_COMMAND. */
     avb_listener_stream_s *stream = &state->input_streams[desc_index];
     if (stream->connected) {
-      avb_stop_stream_in(state, desc_index);
-      stream->connected = false;
-      memset(stream->talker_id, 0, UNIQUE_ID_LEN);
+      acmp_message_s synth = {0};
+      memcpy(synth.talker_entity_id, stream->talker_id, UNIQUE_ID_LEN);
+      memcpy(synth.talker_uid, stream->talker_uid, 2);
+      memcpy(synth.listener_entity_id,
+             state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
+      int_to_octets(&desc_index, synth.listener_uid, 2);
+      memcpy(synth.controller_entity_id, stream->controller_id,
+             UNIQUE_ID_LEN);
+      /* Stops stream_in, sends MSRP Leave, memsets struct (preserving
+       * format + vlan), requests NVS save. */
+      avb_disconnect_listener(state, &synth);
+      /* Tell the talker to drop its ACMP connection_count (mirrors
+       * what avb_process_acmp_connect_rx_command does after its own
+       * avb_disconnect_listener call). */
+      avb_send_acmp_command(state, acmp_msg_type_disconnect_tx_command,
+                            &synth, false);
+    } else {
+      /* Not currently connected but may have a saved binding — clear
+       * it and persist so fast-connect doesn't fire on next boot. */
+      avtp_stream_format_s saved_format = stream->stream_format;
+      uint8_t saved_vlan[2];
+      memcpy(saved_vlan, stream->vlan_id, 2);
+      memset(stream, 0, sizeof(*stream));
+      stream->stream_format = saved_format;
+      memcpy(stream->vlan_id, saved_vlan, 2);
+      avb_persist_request_save(state);
     }
-    /* Clear saved binding params too — Milan §5.5.3.6.20 step 3. */
-    memset(stream->talker_uid, 0, 2);
-    memset(stream->controller_id, 0, UNIQUE_ID_LEN);
-    stream->stream_flags.streaming_wait = 0;
-    avb_persist_request_save(state);
     avbinfo("MVU: unbind stream input %d", desc_index);
     return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
                                  aecp_status_success);
@@ -2855,8 +2879,18 @@ int avb_send_acmp_command(avb_state_s *state, acmp_msg_type_t msg_type,
   struct timespec ts;
   int control_data_len = 84; // IEEE 1722.1-2021 sets it at 84 bytes
 
-  // Set the message type
+  // Set ACMP common-header fields so callers that build commands from
+  // scratch (e.g., MVU UNBIND_STREAM → DISCONNECT_TX) don't have to.
+  // Incomplete header bytes cause listeners to silently drop the frame
+  // as malformed (observed with Mac's CoreAudio refusing DISCONNECT_TX
+  // unless control_data_length is populated).
+  command->header.subtype = avtp_subtype_acmp;
   command->header.msg_type = msg_type;
+  command->header.sv = 0;
+  command->header.version = 0;
+  command->header.status_valtime = 0;
+  command->header.control_data_len_h = (control_data_len >> 8) & 0x07;
+  command->header.control_data_len = control_data_len & 0xFF;
 
   // increment the sequence ID
   state->acmp_seq_id++;
@@ -2981,7 +3015,13 @@ int avb_process_acmp_connect_rx_command(avb_state_s *state, acmp_message_s *msg,
 
   // send connect/disconnect tx command to talker
   ret = avb_send_acmp_command(state, tx_command_type, &new_command, false);
-  if (ret) {
+  /* For CONNECT only: stash the talker binding and mark pending so the
+   * subsequent CONNECT_TX_RESPONSE can resolve. On DISCONNECT this path
+   * must NOT run — avb_disconnect_listener has already cleared the
+   * binding and queued a NVS save; re-populating here would restore the
+   * talker_id and the saved blob would still carry the old binding,
+   * causing auto-reconnect on reboot. */
+  if (ret && !disconnect) {
     memcpy(&state->input_streams[index].talker_id, &msg->talker_entity_id,
            UNIQUE_ID_LEN);
     memcpy(&state->input_streams[index].talker_uid, &msg->talker_uid, 2);
@@ -3145,7 +3185,13 @@ int avb_process_acmp_get_rx_state_command(avb_state_s *state,
                                 &response, acmp_status_success);
 }
 
-/* Process ACMP get tx state command */
+/* Process ACMP get tx state command. Response fields per Milan v1.3
+ * Table 5.52 (on success): listener_entity_id, listener_unique_id,
+ * connection_count, FAST_CONNECT, STREAMING_WAIT all set to 0.
+ * stream_id / stream_dest_mac / stream_vlan_id reflect our Talker
+ * attribute state. REGISTERING_FAILED is per Milan Table 5.23 based
+ * on the MSRP state machine — we don't track that per-declaration
+ * yet, so leave it cleared until wired up. */
 int avb_process_acmp_get_tx_state_command(avb_state_s *state,
                                           acmp_message_s *msg, bool tx) {
   uint16_t talker_uid = octets_to_uint(msg->talker_uid, 2);
@@ -3158,17 +3204,53 @@ int avb_process_acmp_get_tx_state_command(avb_state_s *state,
     return ERROR;
   }
 
-  // build response from current talker stream state
+  // build response — start from the command so shared fields (controller
+  // entity id, talker entity id, talker_uid, seq_id) are preserved, then
+  // override everything Milan requires to be zero.
   acmp_message_s response = {0};
   memcpy(&response, msg, sizeof(acmp_message_s));
   avb_talker_stream_s *stream = &state->output_streams[talker_uid];
 
-  // populate stream fields from the talker's stored state
+  // Milan Table 5.52: listener_entity_id, listener_unique_id = 0.
+  memset(&response.listener_entity_id, 0, UNIQUE_ID_LEN);
+  memset(&response.listener_uid, 0, 2);
+
+  // Milan Table 5.52: connection_count = 0 (unlike 1722.1 default of
+  // "number of listeners connected"; Hive flags non-zero as a Milan
+  // compliance error).
+  memset(&response.connection_count, 0, 2);
+
+  // Milan Table 5.52: FAST_CONNECT = 0, STREAMING_WAIT = 0.
+  // Clear the entire flags field first (zeroes the other two bits plus
+  // any stale flags inherited from the command).
+  memset(&response.flags, 0, 2);
+
+  // Milan Table 5.23 REGISTERING_FAILED (ACMP flags bit 6, 0x0040):
+  // set iff we are declaring a Talker Advertise/Failed AND at least
+  // one connected listener has registered an Asking Failed
+  // declaration against this stream. Aggregate over
+  // connected_listeners[] — any entry with asking_failed=true lights
+  // the flag. */
+  uint16_t n_listeners = octets_to_uint(stream->connection_count, 2);
+  bool any_asking_failed = false;
+  for (uint16_t i = 0; i < n_listeners; i++) {
+    if (stream->connected_listeners[i].asking_failed) {
+      any_asking_failed = true;
+      break;
+    }
+  }
+  if (any_asking_failed) {
+    uint16_t flags_u16 = 0x0040; /* REGISTERING_FAILED */
+    int_to_octets(&flags_u16, response.flags, 2);
+  }
+
+  // Stream identification fields from current talker state (valid only
+  // when we're declaring a Talker attribute, which we always do when
+  // MAAP has assigned a dest address).
   memcpy(&response.stream_id, &stream->stream_id, UNIQUE_ID_LEN);
   memcpy(&response.stream_dest_addr, &stream->stream_dest_addr,
          sizeof(eth_addr_t));
   memcpy(&response.stream_vlan_id, &stream->vlan_id, 2);
-  memcpy(&response.connection_count, &stream->connection_count, 2);
 
   return avb_send_acmp_response(state, acmp_msg_type_get_tx_state_response,
                                 &response, acmp_status_success);
@@ -3548,7 +3630,13 @@ acmp_status_t avb_connect_listener(avb_state_s *state,
   }
 
   /* Persist the new connection state to NVS so it survives reboots
-   * (Milan §5.5.3.6.17 saved-state requirement). */
+   * (Milan §5.5.3.6.17 saved-state requirement). Async path: the
+   * persist task gates writes against active streaming so we don't
+   * glitch audio with a flash-cache-disable, and force-flushes after
+   * AVB_PERSIST_FORCED_FLUSH_MSEC if the gate stays closed too long.
+   * Caller (avb_process_acmp_connect_tx_response) immediately calls
+   * avb_start_stream_in for audio listeners, so a synchronous save
+   * here would race with the next-millisecond drain timer. */
   avb_persist_request_save(state);
 
   return status;

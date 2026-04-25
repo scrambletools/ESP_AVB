@@ -569,6 +569,9 @@ int avb_process_msrp_listener(avb_state_s *state, msrp_msgbuf_s *msg,
         avbinfo("MSRP: listener ready for stream %d (count=%d)", i,
                 octets_to_uint(stream->connection_count, 2));
       }
+      /* Clear any stale asking_failed state — the listener moved out of
+       * that declaration and into Ready. */
+      stream->connected_listeners[idx].asking_failed = false;
       /* Start streaming if we have a listener but aren't yet streaming —
        * also covers the case where a new-listener start was refused because
        * MAAP hadn't acquired the dest address yet. Subsequent periodic
@@ -579,11 +582,31 @@ int avb_process_msrp_listener(avb_state_s *state, msrp_msgbuf_s *msg,
       return OK;
     }
 
-    /* Listener asking_failed or ready_failed — log only */
-    if (listener_decl == msrp_listener_event_asking_failed) {
-      avbinfo("MSRP: listener asking_failed for stream %d", i);
-    } else if (listener_decl == msrp_listener_event_ready_failed) {
-      avbinfo("MSRP: listener ready_failed for stream %d", i);
+    /* Listener asking_failed — track per-listener so ACMP
+     * GET_TX_STATE_RESPONSE can set REGISTERING_FAILED per Milan
+     * v1.3 Table 5.23. ready_failed is a transient MRP event with
+     * the same meaning at the talker side; treat identically. */
+    if (listener_decl == msrp_listener_event_asking_failed ||
+        listener_decl == msrp_listener_event_ready_failed) {
+      int idx = find_connected_listener(stream, src_addr);
+      if (idx < 0) {
+        /* New listener arriving directly in a failed state. Add it so
+         * we can track asking_failed; there's no Ready yet so don't
+         * start streaming. */
+        idx = add_connected_listener(stream, src_addr);
+        if (idx < 0) {
+          avberr("MSRP: connected_listeners full for stream %d", i);
+          return OK;
+        }
+        stream->connected_listeners[idx].msrp_ready = false;
+      }
+      stream->connected_listeners[idx].asking_failed = true;
+      avbinfo("MSRP: listener %s for stream %d",
+              listener_decl == msrp_listener_event_asking_failed
+                  ? "asking_failed"
+                  : "ready_failed",
+              i);
+      return OK;
     }
     return OK;
   }

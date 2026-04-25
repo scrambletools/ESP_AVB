@@ -105,6 +105,14 @@
  * N ms, and if state->persist_dirty is set, snapshots and writes to
  * flash. Naturally coalesces bursts of marks in one flash write. */
 #define AVB_PERSIST_POLL_MSEC 1000
+/* Maximum age a dirty persist snapshot is allowed to wait while audio
+ * streams are active before we force-flush it anyway, accepting a one-
+ * shot Class A glitch in exchange for meeting the Milan §5.5.3.6.17
+ * "save within 1 second" durability guarantee. Coalescing during the
+ * window already happens for free — avb_persist_request_save gathers
+ * synchronously on every call, so only one flash write fires per
+ * dirty epoch regardless of how many marks land. */
+#define AVB_PERSIST_FORCED_FLUSH_MSEC 1000
 
 // Commonly used mac addresses
 #define BCAST_MAC_ADDR                                                         \
@@ -2421,6 +2429,11 @@ typedef struct {
     identity_pair_t identity; // from ACMP connect_tx
     bool msrp_ready;         // MSRP listener declared ready
     bool acmp_connected;     // ACMP connect_tx received
+    /* True when this listener currently has an MSRP Listener Asking
+     * Failed declaration registered against this talker stream. Used
+     * by ACMP GET_TX_STATE_RESPONSE to set REGISTERING_FAILED per
+     * Milan v1.3 Table 5.23 — any non-zero entry flips the flag. */
+    bool asking_failed;
   } connected_listeners[AVB_MAX_NUM_CONNECTED_LISTENERS];
 } avb_talker_stream_s;
 
@@ -2658,6 +2671,12 @@ typedef struct {
    *                   persist task (reader, copying out for flash).
    *                   Held for a ~µs memcpy; never held during flash I/O. */
   volatile bool persist_dirty;
+  /* Tick count (xTaskGetTickCount) of the moment persist_dirty most
+   * recently transitioned 0→1. Used by the persist task to force a
+   * flush past the streaming gate once the snapshot has waited longer
+   * than AVB_PERSIST_FORCED_FLUSH_MSEC. Cleared together with
+   * persist_dirty when the task completes a write. */
+  volatile TickType_t persist_dirty_since_tick;
   SemaphoreHandle_t persist_mutex;
 
   /* Latest received packet and its timestamp (CLOCK_REALTIME)

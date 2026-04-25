@@ -1120,6 +1120,12 @@ void avb_persist_request_save(avb_state_s *state) {
      * point in startup so no race. */
     avb_persist_gather(state);
   }
+  /* Stamp the 0→1 edge so the persist task can force a flush past the
+   * streaming gate after AVB_PERSIST_FORCED_FLUSH_MSEC. Subsequent
+   * marks before the task clears the flag don't reset the timer. */
+  if (!state->persist_dirty) {
+    state->persist_dirty_since_tick = xTaskGetTickCount();
+  }
   state->persist_dirty = true;
 }
 
@@ -1148,7 +1154,13 @@ void avb_persist_task(void *arg) {
      *     max_transit_time.
      * Leaving persist_dirty set means we'll retry on the next poll;
      * the save goes through when streams stop. CRF-only streams are
-     * also gated for safety since they still drive the PLL. */
+     * also gated for safety since they still drive the PLL.
+     *
+     * Override: if the snapshot has already waited longer than
+     * AVB_PERSIST_FORCED_FLUSH_MSEC, flush anyway. A binding that
+     * never lands in flash is a worse failure than a one-shot audio
+     * glitch — Milan §5.5.3.6.17 expects the binding to survive a
+     * power cycle "shortly" after the controller acks it. */
     bool out_streaming = false;
     for (size_t i = 0; i < state->num_output_streams; i++) {
       if (state->output_streams[i].streaming) {
@@ -1156,8 +1168,15 @@ void avb_persist_task(void *arg) {
         break;
       }
     }
-    if (state->stream_in_active || out_streaming) {
-      continue;
+    bool streaming = state->stream_in_active || out_streaming;
+    if (streaming) {
+      TickType_t age = xTaskGetTickCount() - state->persist_dirty_since_tick;
+      if (age < pdMS_TO_TICKS(AVB_PERSIST_FORCED_FLUSH_MSEC)) {
+        continue;
+      }
+      avbwarn("NVS: forcing flush past streaming gate (dirty for %u ms) — "
+              "expect a brief audio/CRF glitch",
+              (unsigned)(age * portTICK_PERIOD_MS));
     }
     state->persist_dirty = false;
     xSemaphoreTake(state->persist_mutex, portMAX_DELAY);
