@@ -26,10 +26,203 @@ extern const char logo_png_end[] asm("_binary_logo_png_end");
  * Private Functions
  ****************************************************************************/
 
+/* Return the local STREAM_INPUT index used for the CRF media-clock input.
+ * Talker-only endpoints expose only the CRF input at index 0. Endpoints with
+ * audio listener support keep audio at index 0 and CRF at index 1. */
+uint16_t avb_get_crf_input_index(avb_state_s *state) {
+  return state->config.listener ? AVB_DEFAULT_CRF_INPUT_INDEX : 0;
+}
+
+/* Return the local STREAM_OUTPUT index used for the CRF media-clock output.
+ * Talker endpoints expose audio at index 0 and CRF at index 1. */
+uint16_t avb_get_crf_output_index(avb_state_s *state) {
+  (void)state;
+  return AVB_DEFAULT_CRF_OUTPUT_INDEX;
+}
+
+static cip_sfc_sample_rate_t avb_cip_sfc_from_hz(uint32_t hz) {
+  switch (hz) {
+  case 32000:
+    return cip_sfc_sample_rate_32k;
+  case 44100:
+    return cip_sfc_sample_rate_44_1k;
+  case 48000:
+    return cip_sfc_sample_rate_48k;
+  case 88200:
+    return cip_sfc_sample_rate_88_2k;
+  case 96000:
+    return cip_sfc_sample_rate_96k;
+  case 176400:
+    return cip_sfc_sample_rate_176_4k;
+  case 192000:
+    return cip_sfc_sample_rate_192k;
+  default:
+    return cip_sfc_sample_rate_48k;
+  }
+}
+
+static aaf_pcm_sample_rate_t avb_aaf_rate_from_hz(uint32_t hz) {
+  switch (hz) {
+  case 8000:
+    return aaf_pcm_sample_rate_8k;
+  case 16000:
+    return aaf_pcm_sample_rate_16k;
+  case 24000:
+    return aaf_pcm_sample_rate_24k;
+  case 32000:
+    return aaf_pcm_sample_rate_32k;
+  case 44100:
+    return aaf_pcm_sample_rate_44_1k;
+  case 48000:
+    return aaf_pcm_sample_rate_48k;
+  case 88200:
+    return aaf_pcm_sample_rate_88_2k;
+  case 96000:
+    return aaf_pcm_sample_rate_96k;
+  case 176400:
+    return aaf_pcm_sample_rate_176_4k;
+  case 192000:
+    return aaf_pcm_sample_rate_192k;
+  default:
+    return aaf_pcm_sample_rate_48k;
+  }
+}
+
+static uint16_t avb_samples_per_frame_from_hz(uint32_t hz) {
+  switch (hz) {
+  case 88200:
+  case 96000:
+    return 12;
+  case 176400:
+  case 192000:
+    return 24;
+  default:
+    return 6;
+  }
+}
+
+static bool avb_sample_rate_supported(const avb_sample_rates_s *rates,
+                                      uint32_t hz) {
+  for (uint8_t i = 0; i < rates->num_rates && i < ARRAY_SIZE(rates->sample_rates);
+       i++) {
+    if (rates->sample_rates[i] == hz)
+      return true;
+  }
+  return false;
+}
+
+static bool avb_bit_rate_supported(const avb_bit_rates_s *rates, uint8_t bits) {
+  for (uint8_t i = 0; i < rates->num_rates && i < ARRAY_SIZE(rates->bit_rates);
+       i++) {
+    if (rates->bit_rates[i] == bits)
+      return true;
+  }
+  return false;
+}
+
+static void avb_intersect_sample_rates(avb_sample_rates_s *out,
+                                       const avb_sample_rates_s *a,
+                                       const avb_sample_rates_s *b) {
+  memset(out, 0, sizeof(*out));
+  for (uint8_t i = 0; i < a->num_rates && i < ARRAY_SIZE(a->sample_rates); i++) {
+    uint32_t hz = a->sample_rates[i];
+    if (avb_sample_rate_supported(b, hz) &&
+        out->num_rates < ARRAY_SIZE(out->sample_rates)) {
+      out->sample_rates[out->num_rates++] = hz;
+    }
+  }
+}
+
+static void avb_intersect_bit_rates(avb_bit_rates_s *out,
+                                    const avb_bit_rates_s *a,
+                                    const avb_bit_rates_s *b) {
+  memset(out, 0, sizeof(*out));
+  for (uint8_t i = 0; i < a->num_rates && i < ARRAY_SIZE(a->bit_rates); i++) {
+    uint8_t bits = a->bit_rates[i];
+    if (avb_bit_rate_supported(b, bits) &&
+        out->num_rates < ARRAY_SIZE(out->bit_rates)) {
+      out->bit_rates[out->num_rates++] = bits;
+    }
+  }
+}
+
+static size_t avb_build_audio_formats(avtp_stream_format_s *formats,
+                                      size_t max_formats,
+                                      const uint32_t *sample_rates,
+                                      size_t sample_rate_count,
+                                      uint8_t channels_per_stream) {
+  size_t n = 0;
+  for (size_t i = 0; i < sample_rate_count && n + 1 < max_formats; i++) {
+    uint32_t hz = sample_rates[i];
+    avtp_stream_format_am824_s am824 =
+        AVB_DEFAULT_FORMAT_AM824(avb_cip_sfc_from_hz(hz),
+                                 channels_per_stream);
+    avtp_stream_format_aaf_pcm_s aaf =
+        AVB_DEFAULT_FORMAT_AAF(32, avb_aaf_rate_from_hz(hz),
+                               channels_per_stream, false);
+    uint16_t spf = avb_samples_per_frame_from_hz(hz);
+    aaf.samples_per_frame_h = (spf >> 8) & 0x03;
+    aaf.samples_per_frame = spf & 0xFF;
+    formats[n++].am824 = am824;
+    formats[n++].aaf_pcm = aaf;
+  }
+  return n;
+}
+
 /* Initialize AVB state and create L2TAP FDs */
 static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   // Copy config to state
   memcpy(&state->config, config, sizeof(avb_config_s));
+
+  const avb_codec_caps_s *codec_caps = avb_codec_get_caps(state->config.codec_type);
+  if (!codec_caps) {
+    avberr("Unsupported codec type: %d", state->config.codec_type);
+    return ERROR;
+  }
+  avb_sample_rates_s allowed_sample_rates = {0};
+  allowed_sample_rates.num_rates = state->config.num_allowed_sample_rates;
+  memcpy(allowed_sample_rates.sample_rates, state->config.allowed_sample_rates,
+         sizeof(allowed_sample_rates.sample_rates));
+  avb_bit_rates_s allowed_bits_per_sample = {0};
+  allowed_bits_per_sample.num_rates =
+      state->config.num_allowed_bits_per_sample;
+  memcpy(allowed_bits_per_sample.bit_rates,
+         state->config.allowed_bits_per_sample,
+         sizeof(allowed_bits_per_sample.bit_rates));
+  avb_intersect_sample_rates(&state->supported_sample_rates,
+                             &allowed_sample_rates,
+                             &codec_caps->sample_rates);
+  avb_intersect_bit_rates(&state->supported_bits_per_sample,
+                          &allowed_bits_per_sample,
+                          &codec_caps->bit_rates);
+  if (state->supported_sample_rates.num_rates == 0 ||
+      state->supported_bits_per_sample.num_rates == 0) {
+    avberr("Codec capabilities and AVB config filters have empty intersection");
+    return ERROR;
+  }
+  if (!avb_sample_rate_supported(&state->supported_sample_rates,
+                                 state->config.default_sample_rate)) {
+    avbwarn("Default sample rate %lu not supported by effective caps; using %lu",
+            state->config.default_sample_rate,
+            state->supported_sample_rates.sample_rates[0]);
+    state->config.default_sample_rate = state->supported_sample_rates.sample_rates[0];
+  }
+  if (!avb_bit_rate_supported(&state->supported_bits_per_sample,
+                              state->config.default_bits_per_sample)) {
+    avbwarn("Default bits/sample %u not supported by effective caps; using %u",
+            state->config.default_bits_per_sample,
+            state->supported_bits_per_sample.bit_rates[0]);
+    state->config.default_bits_per_sample =
+        state->supported_bits_per_sample.bit_rates[0];
+  }
+  if (state->config.input_channels_usable > codec_caps->max_input_channels ||
+      state->config.output_channels_usable > codec_caps->max_output_channels) {
+    avberr("Codec channel capability exceeded: config %u in/%u out, caps %u in/%u out",
+           state->config.input_channels_usable,
+           state->config.output_channels_usable, codec_caps->max_input_channels,
+           codec_caps->max_output_channels);
+    return ERROR;
+  }
 
   // Initialize the low level ethernet interface
   int ret = avb_net_init(state);
@@ -41,7 +234,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   // Set entity id based on MAC address and model id
   memcpy(state->own_entity.summary.entity_id, state->internal_mac_addr,
          ETH_ADDR_LEN);
-  uint64_t model_id = CONFIG_EXAMPLE_AVB_MODEL_ID;
+  uint64_t model_id = state->config.model_id;
   int_to_octets(&model_id, state->own_entity.summary.model_id, 8);
 
   // Set entity capabilities
@@ -53,23 +246,20 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   entity_caps.aem_supported = true;
   entity_caps.aem_config_index_valid = true;
   entity_caps.aem_identify_control_index_valid = true;
+  entity_caps.aem_interface_index_valid = true;
   /* vendor_unique_supported signals the Milan MVU protocol. Only advertise
-   * it when CONFIG_ESP_AVB_MILAN is enabled so non-Milan controllers (e.g.
+   * it when Milan-compliant mode is enabled so non-Milan controllers (e.g.
    * macOS native AVDECC) don't run Milan-specific validation against us. */
-#if CONFIG_ESP_AVB_MILAN
-  entity_caps.vendor_unique_supported = true;
-#else
-  entity_caps.vendor_unique_supported = false;
-#endif
+  entity_caps.vendor_unique_supported = state->config.milan_compliant;
   entity_caps.address_access_supported = true;
   memcpy(&state->own_entity.summary.entity_capabilities, &entity_caps,
          sizeof(avb_entity_cap_s));
 
   // Set AVB interface defaults
   memset(&state->avb_interface, 0, sizeof(aem_avb_interface_desc_s));
-  strncpy((char *)state->avb_interface.object_name,
-          CONFIG_ESP_AVB_INTERFACE_NAME,
-          sizeof(state->avb_interface.object_name) - 1);
+  /* object_name fields are intentionally left empty unless restored from NVS
+   * or set via AECP SET_NAME. Localized fallback strings are provided by the
+   * STRINGS descriptors. */
   memcpy(state->avb_interface.mac_address, state->internal_mac_addr,
          ETH_ADDR_LEN);
   state->avb_interface.flags.gptp_gm_supported = true;
@@ -79,7 +269,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   state->avb_interface.log_sync_interval = (int8_t)-3;
   state->avb_interface.log_announce_interval = 0;
   state->avb_interface.log_pdelay_interval = 0;
-  uint16_t port_number = CONFIG_ESP_AVB_PORT_ID;
+  uint16_t port_number = state->config.port_id;
   int_to_octets(&port_number, state->avb_interface.port_number, 2);
 
   // Set default MSRP mappings (class A and class B)
@@ -94,7 +284,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
 
   // Set talker sources and capabilities
   if (config->talker) {
-    uint16_t talker_sources = 1;
+    uint16_t talker_sources = AVB_MAX_NUM_OUTPUT_STREAMS;
     int_to_octets(&talker_sources,
                   state->own_entity.summary.talker_stream_sources, 2);
     avb_talker_cap_s talker_caps;
@@ -107,16 +297,19 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   }
 
   // Set listener sinks and capabilities. When talker is enabled we still
-  // advertise the CRF media clock input (stream index 1), so listener_sinks
-  // = AVB_MAX_NUM_INPUT_STREAMS any time either role is active.
+  // expose the CRF media clock input, but talker-only mode exposes only that
+  // media-clock input rather than an extra audio sink. Only advertise
+  // audio_sink when the application is actually configured as an audio
+  // listener; a talker-only endpoint may still be a media_clock_sink for CRF.
   if (config->listener || config->talker) {
-    uint16_t listener_sinks = AVB_MAX_NUM_INPUT_STREAMS;
+    uint16_t listener_sinks = config->listener ? AVB_MAX_NUM_INPUT_STREAMS : 1;
     int_to_octets(&listener_sinks,
                   state->own_entity.summary.listener_stream_sinks, 2);
     avb_listener_cap_s listener_caps;
     memset(&listener_caps, 0, sizeof(avb_listener_cap_s));
     listener_caps.implemented = true;
-    listener_caps.audio_sink = 1;
+    listener_caps.audio_sink = config->listener ? 1 : 0;
+    listener_caps.media_clock_sink = 1;
     memcpy(&state->own_entity.summary.listener_capabilities, &listener_caps,
            sizeof(avb_listener_cap_s));
     if (config->listener)
@@ -124,48 +317,46 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   }
 
   // Set entity detail info
-  int64_t association_id = CONFIG_ESP_AVB_ASSOCIATION_ID;
+  uint64_t association_id = state->config.association_id;
   int_to_octets(&association_id, state->own_entity.detail.association_id,
                 UNIQUE_ID_LEN);
-  uint8_t entity_name[64] = CONFIG_ESP_AVB_ENTITY_NAME;
-  memcpy(state->own_entity.detail.entity_name, entity_name,
-         sizeof(entity_name));
-  uint8_t firmware_version[64] = CONFIG_ESP_AVB_FIRMWARE_VERSION;
-  memcpy(state->own_entity.detail.firmware_version, firmware_version,
-         sizeof(firmware_version));
-  char group_name[64] = CONFIG_ESP_AVB_GROUP_NAME;
-  memcpy(state->own_entity.detail.group_name, group_name, sizeof(group_name));
-  char serial_number[64] = CONFIG_ESP_AVB_SERIAL_NUMBER;
-  memcpy(state->own_entity.detail.serial_number, serial_number,
-         sizeof(serial_number));
+  if (state->config.entity_name)
+    snprintf((char *)state->own_entity.detail.entity_name,
+             sizeof(state->own_entity.detail.entity_name), "%s",
+             state->config.entity_name);
+  if (state->config.firmware_version)
+    snprintf((char *)state->own_entity.detail.firmware_version,
+             sizeof(state->own_entity.detail.firmware_version), "%s",
+             state->config.firmware_version);
+  if (state->config.group_name)
+    snprintf((char *)state->own_entity.detail.group_name,
+             sizeof(state->own_entity.detail.group_name), "%s",
+             state->config.group_name);
+  if (state->config.serial_number)
+    snprintf((char *)state->own_entity.detail.serial_number,
+             sizeof(state->own_entity.detail.serial_number), "%s",
+             state->config.serial_number);
   size_t config_num = AEM_MAX_NUM_CONFIGS;
   int_to_octets(&config_num, state->own_entity.detail.configurations_count, 2);
   size_t config_index = DEFAULT_CONFIG_INDEX;
   int_to_octets(&config_index, state->own_entity.detail.current_configuration,
                 2);
 
-  // Build supported stream formats
-  // avtp_stream_format_am824_s sf0 =
-  //     AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_44_1k);
-  avtp_stream_format_am824_s sf0 =
-      AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_48k);
-  // avtp_stream_format_am824_s sf2 =
-  //     AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate_96k);
-  uint8_t aaf_ch = 8; // 8 channels to match MOTU/Apple AVB expectations
-  avtp_stream_format_aaf_pcm_s sf1 =
-      AVB_DEFAULT_FORMAT_AAF(24, aaf_pcm_sample_rate_48k, aaf_ch, false);
-  avtp_stream_format_aaf_pcm_s sf2 =
-      AVB_DEFAULT_FORMAT_AAF(32, aaf_pcm_sample_rate_48k, aaf_ch, false);
-  state->supported_formats[0].am824 = sf0;
-  state->supported_formats[1].aaf_pcm = sf1;
-  state->supported_formats[2].aaf_pcm = sf2;
-  // state->supported_formats[2].am824 = sf2;
-  // state->supported_formats[3].aaf_pcm = sf3;
-  // state->supported_formats[4].aaf_pcm = sf4;
-  // state->supported_formats[5].aaf_pcm = sf5;
-  // state->supported_formats[6].aaf_pcm = sf6;
-  state->num_supported_formats = 3;
-  avtp_stream_format_aaf_pcm_s format = sf1;
+  // Build supported stream formats for each direction from the effective
+  // sample-rate capabilities (codec caps ∩ config policy).
+  state->num_supported_formats_in = avb_build_audio_formats(
+      state->supported_formats_in, AEM_MAX_NUM_FORMATS,
+      state->supported_sample_rates.sample_rates,
+      state->supported_sample_rates.num_rates,
+      state->config.channels_per_stream);
+  state->num_supported_formats_out = avb_build_audio_formats(
+      state->supported_formats_out, AEM_MAX_NUM_FORMATS,
+      state->supported_sample_rates.sample_rates,
+      state->supported_sample_rates.num_rates,
+      state->config.channels_per_stream);
+  avtp_stream_format_aaf_pcm_s format = AVB_DEFAULT_FORMAT_AAF(
+      32, avb_aaf_rate_from_hz(state->config.default_sample_rate),
+      state->config.channels_per_stream, false);
 
   // setup listener stream flags, and stream info flags, default vlan id and
   // stream format
@@ -178,12 +369,12 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
                                         .msrp_failure_valid = 1,
                                         .msrp_acc_lat_valid = 1};
 
-  // Build input streams — stream 0 is AAF audio, stream 1 is the Milan v1.3
-  // §7.2.2 CRF media clock input. The CRF input is required whenever we
-  // advertise an AAF talker, so set up both input streams whenever either
-  // talker or listener is enabled.
+  // Build input streams. With audio listener support enabled, stream 0 is
+  // AAF/61883 audio and stream 1 is CRF media clock. In talker-only mode, the
+  // sole input stream is CRF media clock at index 0.
   if (state->config.listener || state->config.talker) {
-    state->num_input_streams = AVB_MAX_NUM_INPUT_STREAMS;
+    state->num_input_streams =
+        state->config.listener ? AVB_MAX_NUM_INPUT_STREAMS : 1;
     avb_listener_stream_s input_stream = {0};
     memcpy(&input_stream.stream_flags, &flags,
            sizeof(avb_listener_stream_flags_s));
@@ -197,9 +388,12 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
       memcpy(&state->input_streams[i], &input_stream,
              sizeof(avb_listener_stream_s));
     }
-    /* Stream 1 carries the Milan AVnu CRF format */
-    uint8_t crf_bytes[8] = MILAN_AVNU_CRF_FORMAT_BYTES;
-    memcpy(&state->input_streams[AVB_CRF_INPUT_INDEX].stream_format, crf_bytes,
+    /* CRF input carries the IEEE 1722 CRF media-clock format */
+    uint16_t crf_index = avb_get_crf_input_index(state);
+    uint8_t crf_bytes[8] = AVB_CRF_AUDIO_SAMPLE_48K_FORMAT_BYTES;
+    memset(&state->input_streams[crf_index].stream_format, 0,
+           sizeof(avtp_stream_format_s));
+    memcpy(&state->input_streams[crf_index].stream_format, crf_bytes,
            sizeof(crf_bytes));
   }
 
@@ -214,6 +408,8 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
     memcpy(output_stream.vlan_id, state->msrp_mappings[mapping_index].vlan_id,
            2);
     memcpy(&output_stream.stream_format, &format, sizeof(avtp_stream_format_s));
+    output_stream.presentation_time_offset_ns =
+        state->config.default_presentation_time_offset_ns;
     for (int i = 0; i < state->num_output_streams; i++) {
       memcpy(&state->output_streams[i], &output_stream,
              sizeof(avb_talker_stream_s));
@@ -221,6 +417,15 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
                          state->output_streams[i].stream_id, i);
       /* Stream dest addr will be set by MAAP after address acquisition */
       memset(&state->output_streams[i].stream_dest_addr, 0, ETH_ADDR_LEN);
+    }
+    /* CRF output carries the IEEE 1722 CRF media-clock format */
+    uint16_t crf_out_index = avb_get_crf_output_index(state);
+    if (crf_out_index < state->num_output_streams) {
+      uint8_t crf_bytes[8] = AVB_CRF_AUDIO_SAMPLE_48K_FORMAT_BYTES;
+      memset(&state->output_streams[crf_out_index].stream_format, 0,
+             sizeof(avtp_stream_format_s));
+      memcpy(&state->output_streams[crf_out_index].stream_format, crf_bytes,
+             sizeof(crf_bytes));
     }
   }
 
@@ -284,18 +489,20 @@ static int avb_periodic_send(avb_state_s *state) {
   // stream out task now reads the PTP clock directly on Core 1 with a
   // double-read consistency check instead of projecting a stale snapshot.
 
-  // Send ADP entity available message
-  clock_timespec_subtract(&time_now, &state->last_transmitted_adp_entity_avail,
-                          &delta);
-  if (timespec_to_ms(&delta) > ADP_ENTITY_AVAIL_INTERVAL_MSEC) {
-    state->last_transmitted_adp_entity_avail = time_now;
-    avb_send_adp_entity_available(state);
+  // Send ADP entity available message when ATDECC control or Milan mode is enabled.
+  if (state->config.atdecc_control || state->config.milan_compliant) {
+    timespecsub(&time_now, &state->last_transmitted_adp_entity_avail,
+                            &delta);
+    if (timespec_to_ms(&delta) > ADP_ENTITY_AVAIL_INTERVAL_MSEC) {
+      state->last_transmitted_adp_entity_avail = time_now;
+      avb_send_adp_entity_available(state);
+    }
   }
 
   // Send MVRP VLAN ID message — always JoinIn so the switch registers
   // VLAN membership on this port from boot. Required for MSRP Listener
   // registrations to be accepted by the switch.
-  clock_timespec_subtract(&time_now, &state->last_transmitted_mvrp_vlan_id,
+  timespecsub(&time_now, &state->last_transmitted_mvrp_vlan_id,
                           &delta);
   if (timespec_to_ms(&delta) > MVRP_VLAN_ID_INTERVAL_MSEC) {
     state->last_transmitted_mvrp_vlan_id = time_now;
@@ -303,7 +510,7 @@ static int avb_periodic_send(avb_state_s *state) {
   }
 
   // Send MSRP domain message — use JoinIn when connected
-  clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_domain,
+  timespecsub(&time_now, &state->last_transmitted_msrp_domain,
                           &delta);
   if (timespec_to_ms(&delta) > MSRP_DOMAIN_INTERVAL_MSEC) {
     state->last_transmitted_msrp_domain = time_now;
@@ -312,7 +519,7 @@ static int avb_periodic_send(avb_state_s *state) {
 
   // Send MSRP talker and AVTP MAAP announce messages
   if (state->config.talker) {
-    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_talker_adv,
+    timespecsub(&time_now, &state->last_transmitted_msrp_talker_adv,
                             &delta);
     static const uint8_t zero_mac[ETH_ADDR_LEN] = {0};
     for (int i = 0; i < state->num_output_streams; i++) {
@@ -345,7 +552,7 @@ static int avb_periodic_send(avb_state_s *state) {
 
   // Send MSRP listener message
   if (state->config.listener) {
-    clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_listener,
+    timespecsub(&time_now, &state->last_transmitted_msrp_listener,
                             &delta);
     for (int i = 0; i < state->num_input_streams; i++) {
       if (state->input_streams[i].connected &&
@@ -359,7 +566,7 @@ static int avb_periodic_send(avb_state_s *state) {
   }
 
   // if time to send leaveAll
-  clock_timespec_subtract(&time_now, &state->last_transmitted_msrp_leaveall,
+  timespecsub(&time_now, &state->last_transmitted_msrp_leaveall,
                           &delta);
   if (timespec_to_ms(&delta) > MSRP_LEAVEALL_INTERVAL_MSEC) {
     state->last_transmitted_msrp_leaveall = time_now;
@@ -407,7 +614,7 @@ static int avb_periodic_send(avb_state_s *state) {
       for (int i = 0; i < state->num_output_streams; i++) {
         // if the output stream is active
         if (octets_to_uint(state->output_streams[i].connection_count, 2) > 0) {
-          clock_timespec_subtract(&time_now,
+          timespecsub(&time_now,
                                   &state->last_transmitted_unsol_notif, &delta);
           if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
             state->last_transmitted_unsol_notif = time_now;
@@ -422,7 +629,7 @@ static int avb_periodic_send(avb_state_s *state) {
       for (int i = 0; i < state->num_input_streams; i++) {
         // if the input stream is active
         if (state->input_streams[i].connected) {
-          clock_timespec_subtract(&time_now,
+          timespecsub(&time_now,
                                   &state->last_transmitted_unsol_notif, &delta);
           if (timespec_to_ms(&delta) > UNSOL_NOTIF_INTERVAL_MSEC) {
             state->last_transmitted_unsol_notif = time_now;
@@ -548,8 +755,22 @@ static void avb_process_statusreq(avb_state_s *state) {
   // Get the status structure
   status = state->status_req.dest;
 
-  /* TODO: Copy required info to the state structure */
-  // do this using status->... = ...
+  status->clock_source_valid = state->ptp_status.clock_source_valid;
+  memcpy(status->entity.id, state->own_entity.summary.entity_id,
+         sizeof(status->entity.id));
+
+  for (int i = 0; i < state->num_input_streams; i++) {
+    if (state->input_streams[i].connected) {
+      status->streaming_in = true;
+      break;
+    }
+  }
+  for (int i = 0; i < state->num_output_streams; i++) {
+    if (state->output_streams[i].streaming) {
+      status->streaming_out = true;
+      break;
+    }
+  }
 
   /* Post semaphore to inform that we are done */
   if (state->status_req.done) {
@@ -662,7 +883,7 @@ static void avb_task(void *task_param) {
     struct timespec time_now;
     struct timespec delta;
     clock_gettime(CLOCK_MONOTONIC, &time_now);
-    clock_timespec_subtract(&time_now, &state->last_ptp_status_update, &delta);
+    timespecsub(&time_now, &state->last_ptp_status_update, &delta);
     if (timespec_to_ms(&delta) > PTP_STATUS_UPDATE_INTERVAL_MSEC) {
       state->last_ptp_status_update = time_now;
       avb_update_ptp_status(state);
@@ -751,83 +972,6 @@ int avb_stop() {
   return OK;
 }
 
-/* Get the codec handle */
-void *avb_get_codec_handle() {
-  if (!s_state->codec_enabled) {
-    return NULL;
-  }
-  return s_state->config.codec_handle;
-}
-
-/* Test codec playback task — runs at high priority with pre-computed LUT */
-static void test_playback_task(void *param) {
-  uint32_t duration_ms = (uint32_t)(uintptr_t)param;
-
-  esp_codec_dev_handle_t codec = s_state->config.codec_handle;
-
-  // Open codec for 16-bit stereo output
-  esp_codec_dev_sample_info_t fs = {
-      .bits_per_sample = 16,
-      .channel = 2,
-      .sample_rate = 48000,
-      .mclk_multiple = 384,
-  };
-  int ret = esp_codec_dev_open(codec, &fs);
-  if (ret != ESP_CODEC_DEV_OK) {
-    avberr("Test playback: codec_dev_open failed: %d", ret);
-    vTaskDelete(NULL);
-    return;
-  }
-  esp_codec_dev_set_out_vol(codec, 50.0);
-
-// Pre-compute one full cycle of the sine wave (48 samples for 1kHz @ 48kHz)
-#define TEST_LUT_LEN 48
-#define TEST_AMP 16000
-  int16_t lut[TEST_LUT_LEN];
-  for (int i = 0; i < TEST_LUT_LEN; i++) {
-    lut[i] = (int16_t)(sinf(2.0f * 3.14159265f * i / TEST_LUT_LEN) * TEST_AMP);
-  }
-
-// Write buffer: 10ms = 480 stereo samples
-#define TEST_BUF_LEN 480
-  int16_t buf[TEST_BUF_LEN * 2];
-  int lut_pos = 0;
-
-  avbinfo("Test playback: 1kHz sine, 16-bit stereo 48kHz, %lums", duration_ms);
-
-  int64_t end_time = esp_timer_get_time() + (int64_t)duration_ms * 1000;
-
-  while (esp_timer_get_time() < end_time) {
-    for (int i = 0; i < TEST_BUF_LEN; i++) {
-      int16_t s = lut[lut_pos];
-      buf[i * 2 + 0] = s; // L
-      buf[i * 2 + 1] = s; // R
-      lut_pos = (lut_pos + 1) % TEST_LUT_LEN;
-    }
-    size_t written = 0;
-    i2s_channel_write(s_state->i2s_tx_handle, buf, sizeof(buf), &written, 1000);
-  }
-
-  avbinfo("Test playback: done");
-  esp_codec_dev_close(codec);
-  vTaskDelete(NULL);
-}
-
-/* Test codec playback — generates a sine wave and writes to I2S */
-esp_err_t avb_test_codec_playback(uint32_t duration_ms) {
-  if (!s_state || !s_state->codec_enabled || !s_state->config.codec_handle) {
-    avberr("Codec not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-  if (duration_ms == 0)
-    duration_ms = 3000;
-
-  xTaskCreatePinnedToCore(test_playback_task, "CODEC-TEST", 8192,
-                          (void *)(uintptr_t)duration_ms,
-                          configMAX_PRIORITIES - 2, NULL, 0);
-  return ESP_OK;
-}
-
 /* Identify tone task — plays a 24-bit 1kHz sine wave through I2S TX
  * without reconfiguring the codec. Self-deleting. */
 static void identify_tone_task(void *param) {
@@ -839,13 +983,13 @@ static void identify_tone_task(void *param) {
 
   /* 1kHz sine LUT, 48 samples/cycle at 48kHz, ~50% amplitude */
   static const int32_t sine48[48] = {
-      0,    544665,  1079631, 1595279, 2082235, 2532439, 2938203, 3293268,
-      3592842, 3833605, 4013711, 4132776, 4191840, 4193292, 4140750, 4039013,
-      3893852, 3711777, 3499778, 3265042, 3014650, 2755321, 2493117, 2233135,
-      1979243, 1734805, 1502529, 1284363, 1081490, 894262, 722287, 564457,
-      419026, 283660, 155571, 31687, -91418, -217017, -348206, -488058,
-      -639633, -805996, -990239, -1195498, -1425006, -1682125, -1970389, -2293550
-  };
+      0,       544665,   1079631,  1595279,  2082235,  2532439, 2938203,
+      3293268, 3592842,  3833605,  4013711,  4132776,  4191840, 4193292,
+      4140750, 4039013,  3893852,  3711777,  3499778,  3265042, 3014650,
+      2755321, 2493117,  2233135,  1979243,  1734805,  1502529, 1284363,
+      1081490, 894262,   722287,   564457,   419026,   283660,  155571,
+      31687,   -91418,   -217017,  -348206,  -488058,  -639633, -805996,
+      -990239, -1195498, -1425006, -1682125, -1970389, -2293550};
 
   int frames_per_ms = 48;
   uint8_t buf[48 * 6]; /* 1ms worth of 24-bit stereo */
@@ -863,7 +1007,9 @@ static void identify_tone_task(void *param) {
       p[0] = val & 0xFF;
       p[1] = (val >> 8) & 0xFF;
       p[2] = (val >> 16) & 0xFF;
-      p[3] = p[0]; p[4] = p[1]; p[5] = p[2];
+      p[3] = p[0];
+      p[4] = p[1];
+      p[5] = p[2];
       p += 6;
       phase++;
     }
@@ -895,6 +1041,42 @@ static inline bool any_nonzero8(const uint8_t *b) {
   return (b[0] | b[1] | b[2] | b[3] | b[4] | b[5] | b[6] | b[7]) != 0;
 }
 
+/* Validate that a persisted 8-byte stream_format is still supported by the
+ * current descriptor at the same stream index. This prevents stale NVS data
+ * from applying a CRF binding/format to an audio stream, or vice versa, after
+ * a manufacturing/configuration change alters which descriptors are present. */
+static bool avb_persist_stream_format_supported(avb_state_s *state,
+                                                bool is_output, uint16_t index,
+                                                const uint8_t *format) {
+  if (!format || !any_nonzero8(format))
+    return false;
+
+  if ((is_output && index >= state->num_output_streams) ||
+      (!is_output && index >= state->num_input_streams)) {
+    return false;
+  }
+
+  bool is_crf_stream =
+      (!is_output && index == avb_get_crf_input_index(state)) ||
+      (is_output && index == avb_get_crf_output_index(state));
+
+  if (is_crf_stream) {
+    uint8_t crf_bytes[8] = AVB_CRF_AUDIO_SAMPLE_48K_FORMAT_BYTES;
+    return memcmp(format, crf_bytes, sizeof(crf_bytes)) == 0;
+  }
+
+  const avtp_stream_format_s *supported = is_output
+                                             ? state->supported_formats_out
+                                             : state->supported_formats_in;
+  size_t num_supported = is_output ? state->num_supported_formats_out
+                                   : state->num_supported_formats_in;
+  for (size_t i = 0; i < num_supported; i++) {
+    if (memcmp(format, &supported[i], 8) == 0)
+      return true;
+  }
+  return false;
+}
+
 /* Populate the persist struct from current state */
 static void avb_persist_gather(avb_state_s *state) {
   avb_persistent_data_s *p = &state->persist;
@@ -921,7 +1103,7 @@ static void avb_persist_gather(avb_state_s *state) {
     dst->streaming_wait = src->stream_flags.streaming_wait ? 1 : 0;
   }
 
-  /* Per-output-stream state (format; presentation offset is placeholder) */
+  /* Per-output-stream state (format + presentation offset) */
   int n_out = state->num_output_streams < AVB_PERSIST_MAX_OUTPUT_STREAMS
                   ? state->num_output_streams
                   : AVB_PERSIST_MAX_OUTPUT_STREAMS;
@@ -929,14 +1111,15 @@ static void avb_persist_gather(avb_state_s *state) {
     avb_persist_output_stream_s *dst = &p->output_streams[i];
     const avb_talker_stream_s *src = &state->output_streams[i];
     memcpy(dst->stream_format, &src->stream_format, 8);
-    dst->presentation_time_offset_ns = 0; /* TODO: wire once talker exposes it */
+    dst->presentation_time_offset_ns = src->presentation_time_offset_ns;
   }
 
   /* Controls */
   p->speaker_vol_db = state->ctrl_speaker_vol;
   p->mic_gain_db = state->ctrl_mic_gain;
   p->active_clock_source_index = state->media_clock.active_clock_source_index;
-  p->audio_unit_sample_rate_hz = 0; /* TODO: wire when sample-rate policy lands */
+  p->audio_unit_sample_rate_hz =
+      0; /* TODO: wire when sample-rate policy lands */
 }
 
 /* Apply loaded persist data to current state */
@@ -961,14 +1144,23 @@ static void avb_persist_apply(avb_state_s *state) {
            state->descriptor_names[AVB_NAME_AVB_INTERFACE], 64);
 
   /* Per-input-stream state */
-  int n_in = AVB_MAX_NUM_INPUT_STREAMS < AVB_PERSIST_MAX_INPUT_STREAMS
-                 ? AVB_MAX_NUM_INPUT_STREAMS
+  int n_in = state->num_input_streams < AVB_PERSIST_MAX_INPUT_STREAMS
+                 ? state->num_input_streams
                  : AVB_PERSIST_MAX_INPUT_STREAMS;
   for (int i = 0; i < n_in; i++) {
     const avb_persist_input_stream_s *src = &p->input_streams[i];
     avb_listener_stream_s *dst = &state->input_streams[i];
-    if (any_nonzero8(src->stream_format))
+    bool format_ok = avb_persist_stream_format_supported(state, false, i,
+                                                         src->stream_format);
+    if (format_ok) {
       memcpy(&dst->stream_format, src->stream_format, 8);
+    } else if (any_nonzero8(src->stream_format) ||
+               any_nonzero8(src->talker_id)) {
+      avbwarn("NVS: ignoring stream_input %d persist data; saved format is not "
+              "supported by current descriptor",
+              i);
+      continue;
+    }
     /* Restore the binding identity only. Do NOT restore `connected` —
      * stream_id, stream_dest_addr, and vlan_id are derived on reconnect
      * (not persisted), so setting connected=true here would make
@@ -983,27 +1175,46 @@ static void avb_persist_apply(avb_state_s *state) {
       memcpy(dst->talker_uid, src->talker_uid, 2);
       memcpy(dst->controller_id, src->controller_id, 8);
       dst->stream_flags.streaming_wait = src->streaming_wait ? 1 : 0;
-      avbinfo("NVS: restored binding for stream_input %d (pending fast-connect)",
-              i);
+      avbinfo(
+          "NVS: restored binding for stream_input %d (pending fast-connect)",
+          i);
     }
   }
 
   /* Per-output-stream state */
-  int n_out = AVB_MAX_NUM_OUTPUT_STREAMS < AVB_PERSIST_MAX_OUTPUT_STREAMS
-                  ? AVB_MAX_NUM_OUTPUT_STREAMS
+  int n_out = state->num_output_streams < AVB_PERSIST_MAX_OUTPUT_STREAMS
+                  ? state->num_output_streams
                   : AVB_PERSIST_MAX_OUTPUT_STREAMS;
   for (int i = 0; i < n_out; i++) {
     const avb_persist_output_stream_s *src = &p->output_streams[i];
     avb_talker_stream_s *dst = &state->output_streams[i];
-    if (any_nonzero8(src->stream_format))
+    if (avb_persist_stream_format_supported(state, true, i,
+                                            src->stream_format)) {
       memcpy(&dst->stream_format, src->stream_format, 8);
-    /* src->presentation_time_offset_ns ignored for now — placeholder */
+    } else if (any_nonzero8(src->stream_format)) {
+      avbwarn("NVS: ignoring stream_output %d persist data; saved format is "
+              "not supported by current descriptor",
+              i);
+    }
+    if (p->version < 3 && src->presentation_time_offset_ns == 0) {
+      /* v2 had this field but always saved zero as a placeholder. Keep the
+       * config default for upgraded blobs. v3+ treats zero as a valid Milan
+       * SET_MAX_TRANSIT_TIME value. */
+    } else if (src->presentation_time_offset_ns <= 0x7FFFFFFFUL) {
+      dst->presentation_time_offset_ns = src->presentation_time_offset_ns;
+    }
   }
 
   /* Controls — apply if non-zero (default struct is zeroed) */
   if (p->speaker_vol_db != 0.0f || p->mic_gain_db != 0.0f) {
-    state->ctrl_speaker_vol = p->speaker_vol_db;
-    state->ctrl_mic_gain = p->mic_gain_db;
+    int16_t vol_tenth = (int16_t)(p->speaker_vol_db * 10.0f);
+    int16_t gain_tenth = (int16_t)(p->mic_gain_db * 10.0f);
+    vol_tenth = avb_codec_quantize_tenth_db(&state->codec_ranges, false,
+                                            vol_tenth);
+    gain_tenth = avb_codec_quantize_tenth_db(&state->codec_ranges, true,
+                                             gain_tenth);
+    state->ctrl_speaker_vol = vol_tenth / 10.0f;
+    state->ctrl_mic_gain = gain_tenth / 10.0f;
   }
   /* active_clock_source_index: 0 is a valid value (INTERNAL/gPTP), so we
    * always restore it — but only if the blob looks non-trivial. A freshly
@@ -1027,7 +1238,7 @@ esp_err_t avb_persist_load(avb_state_s *state) {
     return err;
   }
 
-  bool need_reinit = false; /* true -> overwrite flash with a fresh v2 blob */
+  bool need_reinit = false; /* true -> overwrite flash with a fresh current blob */
 
   nvs_handle_t handle;
   err = nvs_open(AVB_NVS_NAMESPACE, NVS_READONLY, &handle);
@@ -1054,7 +1265,8 @@ esp_err_t avb_persist_load(avb_state_s *state) {
        *  - stored_size > sizeof(current): struct shrank/reshaped.
        * Forward-compat for stored_size < sizeof(current) is handled by
        * the append-only rule + memset above. */
-      avbwarn("NVS: incompatible blob (size=%d ver=%d) — discarding and reinitializing",
+      avbwarn("NVS: incompatible blob (size=%d ver=%d) — discarding and "
+              "reinitializing",
               (int)stored_size, state->persist.version);
       memset(&state->persist, 0, sizeof(avb_persistent_data_s));
       need_reinit = true;
@@ -1065,7 +1277,7 @@ esp_err_t avb_persist_load(avb_state_s *state) {
     }
   }
 
-  /* Replace missing/stale blobs with a fresh v2 snapshot of current
+  /* Replace missing/stale blobs with a fresh current snapshot of current
    * state so the warning doesn't re-fire on every subsequent boot.
    * apply() guards against clobbering runtime defaults with zeros,
    * so it's safe to save here even if state is mostly default. */

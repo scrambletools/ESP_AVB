@@ -236,6 +236,14 @@ void avb_create_eth_frame(uint8_t *eth_frame, eth_addr_t *dest_addr,
   struct eth_hdr eth_hdr = {.type = htons(ethertype)};
   uint16_t vid = vlan_id ? octets_to_uint(vlan_id, 2) : 0;
   uint16_t prio = state->msrp_mappings[0].priority;
+  if (vlan_id) {
+    for (uint16_t i = 0; i < state->msrp_mappings_count; i++) {
+      if (memcmp(vlan_id, state->msrp_mappings[i].vlan_id, 2) == 0) {
+        prio = state->msrp_mappings[i].priority;
+        break;
+      }
+    }
+  }
   struct eth_vlan_hdr eth_vlan_hdr = {.prio_vid =
                                           htons((prio << 13) | (vid & 0x0FFF)),
                                       .tpid = htons(ethertype_avtp)};

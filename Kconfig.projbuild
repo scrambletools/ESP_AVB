@@ -69,17 +69,21 @@ menu "AVB Configuration"
         default y
         depends on ESP_AVB
         help
-            Advertise AVnu Milan v1.3 compliance: adds the mandatory CRF
-            media clock STREAM_INPUT, the corresponding CLOCK_SOURCE of
-            type INPUT_STREAM, MVU (Milan Vendor Unique) protocol support,
-            and related descriptor fields.
+            Advertise AVnu Milan v1.3 compliance by enabling Milan-specific
+            discovery/control behavior, including MVU (Milan Vendor Unique)
+            protocol support.
+
+            The IEEE 1722 CRF media clock STREAM_INPUT and corresponding
+            IEEE 1722.1 CLOCK_SOURCE of type INPUT_STREAM are supported as
+            general AVB/AVDECC features regardless of this option. Disabling
+            Milan does not remove CRF descriptors or clock-source descriptors;
+            it only suppresses the device's Milan/MVU compliance advertisement.
 
             Enable this when interoperating with Milan-certified equipment
             or when using Milan-aware controllers (Hive).
 
-            Disable this for interop with pure IEEE 1722.1-2021 stacks
-            (e.g. macOS's native AVDECC) that may refuse to connect to a
-            Milan talker — the entity will then advertise only the AAF
-            audio stream input/output without the CRF clock infrastructure.
+            Disable this when you want the device to present itself as a
+            pure IEEE 1722.1-2021 AVB/AVDECC endpoint rather than a
+            Milan endpoint.
 
 endmenu # ESP_AVB Configuration

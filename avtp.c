@@ -28,6 +28,25 @@ uint64_t avb_stream_out_work_us_total(void) {
   return atomic_load_explicit(&s_stream_out_work_us, memory_order_relaxed);
 }
 
+static uint16_t avb_msrp_mapping_index_for_class(bool class_b) {
+  return class_b ? 1 : 0;
+}
+
+static uint8_t avb_msrp_class_id_for_index(uint16_t mapping_index) {
+  return mapping_index == 1 ? 5 : 6; /* SR Class B : SR Class A */
+}
+
+static uint16_t avb_msrp_mapping_index_for_class_id(uint8_t class_id) {
+  return class_id == 5 ? 1 : 0;
+}
+
+static uint8_t avb_msrp_priority_for_stream(avb_state_s *state,
+                                            uint16_t stream_index) {
+  uint16_t mapping_index = avb_msrp_mapping_index_for_class(
+      state->output_streams[stream_index].stream_info_flags.class_b);
+  return state->msrp_mappings[mapping_index].priority;
+}
+
 /* Stream-out diagnostic context — mirrors stream_rx_ctx_t pattern.
  * Writer is avb_stream_out_task (core 1 TX task), reader is AVB-STATS
  * (core 0). Plain volatile uint32_t reads/writes are torn-free on
@@ -70,7 +89,7 @@ int avb_send_mvrp_vlan_id(avb_state_s *state, mrp_attr_event_t attr_event,
   mvrp_vlan_id_message_s msg;
   struct timespec ts;
   int ret;
-  int vlan_id = CONFIG_ESP_AVB_STREAM_VLAN_ID;
+  uint16_t mapping_index = avb_msrp_mapping_index_for_class(false);
   memset(&msg, 0, sizeof(msg));
 
   // Populate the message
@@ -80,7 +99,7 @@ int avb_send_mvrp_vlan_id(avb_state_s *state, mrp_attr_event_t attr_event,
   msg.header.vechead_leaveall = leave_all;
   msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1;
-  int_to_octets(&vlan_id, msg.vlan_id, 2);
+  memcpy(msg.vlan_id, state->msrp_mappings[mapping_index].vlan_id, 2);
   msg.attr_event[0] = int_to_3pe(attr_event, 0, 0);
   uint16_t msg_len =
       8 + 2 + 2; // all of the above + end mark list and end mark msg
@@ -101,7 +120,7 @@ int avb_send_msrp_domain(avb_state_s *state, mrp_attr_event_t attr_event,
   msrp_domain_message_s msg;
   struct timespec ts;
   int ret;
-  int vlan_id = CONFIG_ESP_AVB_STREAM_VLAN_ID;
+  uint16_t mapping_index = avb_msrp_mapping_index_for_class(false);
   memset(&msg, 0, sizeof(msg));
 
   // Populate the message
@@ -112,9 +131,10 @@ int avb_send_msrp_domain(avb_state_s *state, mrp_attr_event_t attr_event,
   msg.header.vechead_leaveall = leave_all;
   msg.header.vechead_padding = 0;
   msg.header.vechead_num_vals = 1;
-  msg.sr_class_id = 6;       // class A
-  msg.sr_class_priority = 3; // priority 3 for class A
-  int_to_octets(&vlan_id, msg.sr_class_vid, sizeof(msg.sr_class_vid));
+  msg.sr_class_id = avb_msrp_class_id_for_index(mapping_index);
+  msg.sr_class_priority = state->msrp_mappings[mapping_index].priority;
+  memcpy(msg.sr_class_vid, state->msrp_mappings[mapping_index].vlan_id,
+         sizeof(msg.sr_class_vid));
   msg.attr_event[0] = int_to_3pe(attr_event, 0, 0);
 
   // Create an MSRP message buffer
@@ -145,6 +165,10 @@ uint16_t avb_compute_tspec_max_frame_size(avb_state_s *state, uint16_t index) {
   int interval_us = class_b ? 250 : 125;
   int channels, bytes_per_sample, sample_rate, avtp_hdr;
   uint8_t subtype = fmt->aaf_pcm.subtype;
+  if (subtype == avtp_subtype_crf) {
+    /* CRF: ETH + VLAN + AVTP CRF header + one 64-bit timestamp. */
+    return (uint16_t)(14 /*ETH*/ + 4 /*VLAN*/ + 28 /*CRF AVTPDU*/);
+  }
   if (subtype == avtp_subtype_61883) {
     channels = fmt->am824.dbs;
     bytes_per_sample = 4; /* AM824 always carries 32-bit quadlets */
@@ -197,8 +221,15 @@ int avb_send_msrp_talker(avb_state_s *state, mrp_attr_event_t attr_event,
   int tspec_max_frame_interval = 1;
   int_to_octets(&tspec_max_frame_interval,
                 msg.talker.info.tspec_max_frame_interval, 2);
-  msg.talker.info.priority = 3;    // class A
-  msg.talker.info.rank = 1;        // rank 1 for class A
+  uint16_t mapping_index = 0;
+  for (uint16_t i = 0; i < state->msrp_mappings_count; i++) {
+    if (memcmp(vlan_id, state->msrp_mappings[i].vlan_id, 2) == 0) {
+      mapping_index = i;
+      break;
+    }
+  }
+  msg.talker.info.priority = state->msrp_mappings[mapping_index].priority;
+  msg.talker.info.rank = 1;        // rank 1: emergency-capable stream
   int accumulated_latency = 15000; // ~15μs worst-case talker latency
   int_to_octets(&accumulated_latency, msg.talker.info.accumulated_latency, 4);
   if (is_failed) {
@@ -408,11 +439,14 @@ int avb_process_msrp_domain(avb_state_s *state, msrp_msgbuf_s *msg, int offset,
   memcpy(&domain, &msg->messages_raw[offset], sizeof(msrp_domain_message_s));
 
   uint16_t vid = octets_to_uint(domain.sr_class_vid, 2);
-  uint16_t our_vid = octets_to_uint(state->msrp_mappings[0].vlan_id, 2);
+  uint16_t mapping_index =
+      avb_msrp_mapping_index_for_class_id(domain.sr_class_id);
+  uint16_t our_vid = octets_to_uint(state->msrp_mappings[mapping_index].vlan_id, 2);
 
   /* Log and validate — the network's SR class must match ours */
-  if (domain.sr_class_id == 6 && vid != our_vid) {
-    avberr("MSRP domain: network VLAN %d != our VLAN %d", vid, our_vid);
+  if ((domain.sr_class_id == 6 || domain.sr_class_id == 5) && vid != our_vid) {
+    avberr("MSRP domain: class %d network VLAN %d != our VLAN %d",
+           domain.sr_class_id, vid, our_vid);
   }
   return OK;
 }
@@ -455,24 +489,6 @@ int avb_process_msrp_talker(avb_state_s *state, msrp_msgbuf_s *msg_data,
       }
     }
   }
-  // If the talker is not known then remember it
-  // else {
-  //   // create a new talker entity
-  //   avb_talker_s new_talker;
-  //   memset(&new_talker, 0, sizeof(avb_talker_s));
-  //   memcpy(&new_talker.info, &msg.talker.info, sizeof(talker_adv_info_s));
-  //   // if talker list is not full, add the talker to the list
-  //   if (state->num_talkers < AVB_MAX_NUM_TALKERS) {
-  //     memcpy(&state->talkers[state->num_talkers], &new_talker,
-  //     sizeof(avb_talker_s)); state->num_talkers++;
-  //   }
-  //   // if talker list is full, replace the oldest talker
-  //   else {
-  //     memmove(&state->talkers[0], &state->talkers[1], (state->num_talkers -
-  //     1) * sizeof(avb_talker_s)); memcpy(&state->talkers[state->num_talkers -
-  //     1], &new_talker, sizeof(avb_talker_s));
-  //   }
-  // }
   return OK;
 }
 
@@ -490,6 +506,21 @@ static int find_connected_listener(avb_talker_stream_s *stream,
   return -1;
 }
 
+static int find_connected_listener_by_entity(avb_talker_stream_s *stream,
+                                             const unique_id_t entity_id) {
+  static const unique_id_t zero_id = {0};
+  if (memcmp(entity_id, zero_id, UNIQUE_ID_LEN) == 0)
+    return -1;
+  uint16_t count = octets_to_uint(stream->connection_count, 2);
+  for (int i = 0; i < count && i < AVB_MAX_NUM_CONNECTED_LISTENERS; i++) {
+    if (memcmp(stream->connected_listeners[i].identity.id, entity_id,
+               UNIQUE_ID_LEN) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 /* Add a listener to a stream's connected_listeners list.
  * Returns index of added entry, or -1 if full. */
 static int add_connected_listener(avb_talker_stream_s *stream,
@@ -498,26 +529,62 @@ static int add_connected_listener(avb_talker_stream_s *stream,
   if (count >= AVB_MAX_NUM_CONNECTED_LISTENERS)
     return -1;
   memcpy(stream->connected_listeners[count].mac_addr, mac_addr, ETH_ADDR_LEN);
-  stream->connected_listeners[count].msrp_ready = true;
   count++;
   int_to_octets(&count, stream->connection_count, 2);
   return count - 1;
 }
 
-/* Remove a listener from a stream's connected_listeners list by index. */
-static void remove_connected_listener(avb_talker_stream_s *stream, int index) {
-  uint16_t count = octets_to_uint(stream->connection_count, 2);
-  if (index < 0 || index >= count)
-    return;
-  /* Shift remaining entries down */
-  for (int i = index; i < count - 1; i++) {
-    stream->connected_listeners[i] = stream->connected_listeners[i + 1];
+/* Resolve/merge an MSRP listener declaration (known by source MAC) with any
+ * existing ACMP CONNECT_TX state (known by listener entity_id/uid).  Streaming
+ * is allowed only when both halves are present: MSRP Ready + ACMP connected. */
+static int find_or_add_msrp_listener(avb_state_s *state,
+                                     avb_talker_stream_s *stream,
+                                     eth_addr_t *mac_addr) {
+  int idx = find_connected_listener(stream, mac_addr);
+  if (idx >= 0)
+    return idx;
+
+  int listener_idx = avb_find_entity_by_addr(state, mac_addr,
+                                             avb_entity_type_listener);
+  if (listener_idx != NOT_FOUND) {
+    idx = find_connected_listener_by_entity(
+        stream, state->listeners[listener_idx].entity_id);
+    if (idx >= 0) {
+      memcpy(stream->connected_listeners[idx].mac_addr, mac_addr,
+             ETH_ADDR_LEN);
+      return idx;
+    }
   }
-  count--;
-  int_to_octets(&count, stream->connection_count, 2);
-  memset(&stream->connected_listeners[count], 0,
-         sizeof(stream->connected_listeners[0]));
+
+  idx = add_connected_listener(stream, mac_addr);
+  if (idx >= 0 && listener_idx != NOT_FOUND) {
+    memcpy(stream->connected_listeners[idx].identity.id,
+           state->listeners[listener_idx].entity_id, UNIQUE_ID_LEN);
+    memset(stream->connected_listeners[idx].identity.uid, 0, 2);
+  }
+  return idx;
 }
+
+static bool any_listener_ready(avb_talker_stream_s *stream) {
+  uint16_t count = octets_to_uint(stream->connection_count, 2);
+  for (int i = 0; i < count && i < AVB_MAX_NUM_CONNECTED_LISTENERS; i++) {
+    if (stream->connected_listeners[i].msrp_ready) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool any_listener_acmp_connected(avb_talker_stream_s *stream) {
+  uint16_t count = octets_to_uint(stream->connection_count, 2);
+  for (int i = 0; i < count && i < AVB_MAX_NUM_CONNECTED_LISTENERS; i++) {
+    if (stream->connected_listeners[i].acmp_connected) {
+      return true;
+    }
+  }
+  return false;
+}
+
 
 /* Process received MSRP listener message.
  * As a talker, this tells us a listener has declared ready/asking_failed
@@ -542,41 +609,50 @@ int avb_process_msrp_listener(avb_state_s *state, msrp_msgbuf_s *msg,
     if (memcmp(listener_msg.stream_id, stream->stream_id, UNIQUE_ID_LEN) != 0)
       continue;
 
-    /* Listener leaving — remove and possibly stop streaming */
+    /* Listener leaving — clear MSRP readiness, but keep ACMP identity/state.
+     * ACMP DISCONNECT_TX is authoritative for removing the listener entry. */
     if (attr_event == mrp_attr_event_lv) {
       int idx = find_connected_listener(stream, src_addr);
       if (idx >= 0) {
         avbinfo("MSRP: listener leaving stream %d", i);
-        remove_connected_listener(stream, idx);
-        uint16_t count = octets_to_uint(stream->connection_count, 2);
-        if (count == 0 && stream->streaming) {
+        stream->connected_listeners[idx].msrp_ready = false;
+        stream->connected_listeners[idx].asking_failed = false;
+        bool should_stop = !any_listener_ready(stream) ||
+                           (!state->config.milan_compliant &&
+                            !any_listener_acmp_connected(stream));
+        if (should_stop && stream->streaming) {
           avb_stop_stream_out(state, i);
         }
       }
       return OK;
     }
 
-    /* Listener ready — add if new and start streaming */
+    /* Listener ready — add/merge MSRP state. Only start once ACMP has also
+     * connected this listener. This prevents stale periodic MSRP Ready
+     * re-declarations from restarting a stream after ACMP disconnect/stop. */
     if (listener_decl == msrp_listener_event_ready) {
-      int idx = find_connected_listener(stream, src_addr);
+      int idx = find_or_add_msrp_listener(state, stream, src_addr);
       if (idx < 0) {
-        /* New listener */
-        idx = add_connected_listener(stream, src_addr);
-        if (idx < 0) {
-          avberr("MSRP: connected_listeners full for stream %d", i);
-          return OK;
-        }
-        avbinfo("MSRP: listener ready for stream %d (count=%d)", i,
-                octets_to_uint(stream->connection_count, 2));
+        avberr("MSRP: connected_listeners full for stream %d", i);
+        return OK;
+      }
+      bool was_ready = stream->connected_listeners[idx].msrp_ready;
+      stream->connected_listeners[idx].msrp_ready = true;
+      if (!was_ready) {
+        avbinfo("MSRP: listener ready for stream %d (count=%d, acmp=%d)", i,
+                octets_to_uint(stream->connection_count, 2),
+                stream->connected_listeners[idx].acmp_connected);
       }
       /* Clear any stale asking_failed state — the listener moved out of
        * that declaration and into Ready. */
       stream->connected_listeners[idx].asking_failed = false;
-      /* Start streaming if we have a listener but aren't yet streaming —
-       * also covers the case where a new-listener start was refused because
-       * MAAP hadn't acquired the dest address yet. Subsequent periodic
-       * Listener Ready re-declarations will retry until it succeeds. */
-      if (!stream->streaming) {
+      /* Plain AVB starts only when both ACMP and MSRP agree that the listener is
+       * connected/ready. Milan Talkers do not maintain ACMP listener state;
+       * MSRP Listener Ready alone drives streaming. */
+      bool should_start = state->config.milan_compliant
+                              ? stream->connected_listeners[idx].msrp_ready
+                              : stream->connected_listeners[idx].acmp_connected;
+      if (should_start && !stream->streaming) {
         avb_start_stream_out(state, i);
       }
       return OK;
@@ -588,16 +664,14 @@ int avb_process_msrp_listener(avb_state_s *state, msrp_msgbuf_s *msg,
      * the same meaning at the talker side; treat identically. */
     if (listener_decl == msrp_listener_event_asking_failed ||
         listener_decl == msrp_listener_event_ready_failed) {
-      int idx = find_connected_listener(stream, src_addr);
+      int idx = find_or_add_msrp_listener(state, stream, src_addr);
       if (idx < 0) {
-        /* New listener arriving directly in a failed state. Add it so
-         * we can track asking_failed; there's no Ready yet so don't
-         * start streaming. */
-        idx = add_connected_listener(stream, src_addr);
-        if (idx < 0) {
-          avberr("MSRP: connected_listeners full for stream %d", i);
-          return OK;
-        }
+        avberr("MSRP: connected_listeners full for stream %d", i);
+        return OK;
+      }
+      if (!stream->connected_listeners[idx].msrp_ready) {
+        /* New listener arriving directly in a failed state. Track it, but
+         * don't start streaming. */
         stream->connected_listeners[idx].msrp_ready = false;
       }
       stream->connected_listeners[idx].asking_failed = true;
@@ -616,84 +690,11 @@ int avb_process_msrp_listener(avb_state_s *state, msrp_msgbuf_s *msg,
 
 /* Process received AVTP IEC 61883 message */
 int avb_process_iec_61883(avb_state_s *state, iec_61883_6_message_s *msg) {
-  // avbinfo("Got an AVTP IEC 61883 message");
-
-  // check if the stream id is in the connection list and the stream is not yet
-  // active
-  //   int index = avb_find_connection_by_id(state, &msg->stream_id,
-  //   avb_entity_type_listener); if (index >= 0 &&
-  //   !state->connections[index].active) {
-  //     avbinfo("Stream id found in connection list");
-  //     // set the stream as active to avoid duplicate processing
-  //     state->connections[index].active = true;
-  //     // check if the connection has stream format info
-  //     if (state->connections[index].stream.stream_format.am824.fdf_evt == 0)
-  //     {
-  // set the stream format in the connection
-  //   state->connections[index].stream.stream_format.format = msg->format;
-  //   state->connections[index].stream.stream_format.sample_rate =
-  //   msg->sample_rate;
-  //   state->connections[index].stream.stream_format.chan_per_frame =
-  //   msg->chan_per_frame;
-  //   state->connections[index].stream.stream_format.bit_depth =
-  //   msg->bit_depth;
-  //}
-  // if the stream format, sample rate or bit depth is not supported, then
-  // ignore the message if
-  // (!in_array_of_int(state->connections[index].stream.stream_format.format,
-  // (int *)supported_aaf_formats, ARRAY_SIZE(supported_aaf_formats)) ||
-  //     !in_array_of_int(state->connections[index].stream.stream_format.sample_rate,
-  //     (int *)supported_sample_rates, ARRAY_SIZE(supported_sample_rates)) ||
-  //     !in_array_of_int(state->connections[index].stream.stream_format.bit_depth,
-  //     (int *)supported_bit_depths, ARRAY_SIZE(supported_bit_depths))) {
-  //   avberr("Unsupported stream format, sample rate or bit depth");
-  //   return ERROR;
-  // }
-  // start the stream input task
-  // avb_start_stream_in(state, &msg->stream_id);
-  //}
-  // not implemented
   return OK;
 }
 
 /* Process received AVTP AAF PCM message */
 int avb_process_aaf(avb_state_s *state, aaf_pcm_message_s *msg) {
-  // avbinfo("Got an AVTP AAF PCM message");
-
-  // check if the stream id is in the connection list and the stream is not yet
-  // active
-  //   int index = avb_find_connection_by_id(state, &msg->stream_id,
-  //   avb_entity_type_listener); if (index >= 0 &&
-  //   !state->connections[index].active) {
-  //     avbinfo("Stream id found in connection list");
-  //     // set the stream as active to avoid duplicate processing
-  //     state->connections[index].active = true;
-  // check if the connection has stream format info
-  // if (state->connections[index].stream.stream_format.bit_depth == 0) {
-  //   // set the stream format in the connection
-  //   state->connections[index].stream.stream_format.format = msg->format;
-  //   state->connections[index].stream.stream_format.sample_rate =
-  //   msg->sample_rate;
-  //   state->connections[index].stream.stream_format.chan_per_frame =
-  //   msg->chan_per_frame;
-  //   state->connections[index].stream.stream_format.bit_depth =
-  //   msg->bit_depth;
-  // }
-  // if the stream format, sample rate or bit depth is not supported, then
-  // ignore the message if
-  // (!in_array_of_int(state->connections[index].stream.stream_format.format,
-  // (int *)supported_aaf_formats, ARRAY_SIZE(supported_aaf_formats)) ||
-  //     !in_array_of_int(state->connections[index].stream.stream_format.sample_rate,
-  //     (int *)supported_sample_rates, ARRAY_SIZE(supported_sample_rates)) ||
-  //     !in_array_of_int(state->connections[index].stream.stream_format.bit_depth,
-  //     (int *)supported_bit_depths, ARRAY_SIZE(supported_bit_depths))) {
-  //   avberr("Unsupported stream format, sample rate or bit depth");
-  //   return ERROR;
-  // }
-  // start the stream input task
-  // avb_start_stream_in(state, &msg->stream_id);
-  //}
-  // not implemented
   return OK;
 }
 
@@ -911,7 +912,8 @@ static int avb_send_aaf_pcm_packet(avb_state_s *state, unique_id_t *stream_id,
                                    uint8_t seq_num, uint8_t sample_rate_code,
                                    uint8_t channels, uint8_t bit_depth,
                                    eth_addr_t *dest_addr, uint8_t *vlan_id,
-                                   uint32_t avtp_ts) {
+                                   uint32_t avtp_ts,
+                                   uint32_t presentation_time_offset_ns) {
   aaf_pcm_message_s msg;
   memset(&msg, 0, sizeof(msg));
 
@@ -931,9 +933,9 @@ static int avb_send_aaf_pcm_packet(avb_state_s *state, unique_id_t *stream_id,
   memcpy(msg.stream_id, stream_id, UNIQUE_ID_LEN);
 
   // Set AVTP presentation timestamp (lower 32 bits of PTP nanosecond count).
-  // Add Class A max transit time (2ms) so the listener can buffer until the
-  // presentation time to compensate for network jitter.
-  uint32_t presentation_ts = avtp_ts + 4000000; // +4ms presentation offset
+  // Add the stream's presentation-time offset so the listener can buffer until
+  // the presentation time to compensate for network jitter.
+  uint32_t presentation_ts = avtp_ts + presentation_time_offset_ns;
   msg.avtp_ts[0] = (presentation_ts >> 24) & 0xFF;
   msg.avtp_ts[1] = (presentation_ts >> 16) & 0xFF;
   msg.avtp_ts[2] = (presentation_ts >> 8) & 0xFF;
@@ -986,7 +988,8 @@ static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
                                      uint8_t seq_num, uint8_t dbs, uint8_t sfc,
                                      uint8_t channels, eth_addr_t *dest_addr,
                                      uint8_t *vlan_id, uint32_t avtp_ts,
-                                     uint16_t dbc) {
+                                     uint16_t dbc,
+                                     uint32_t presentation_time_offset_ns) {
   iec_61883_6_message_s msg;
   memset(&msg, 0, sizeof(msg));
 
@@ -1003,10 +1006,8 @@ static int avb_send_iec_61883_packet(avb_state_s *state, unique_id_t *stream_id,
   msg.timestamp_uncertain = 0;
   memcpy(msg.stream_id, stream_id, UNIQUE_ID_LEN);
 
-  // AVTP presentation timestamp with presentation offset.
-  // Class A max transit time is 2ms, but Apple CoreAudio needs extra headroom
-  // for its jitter buffer. Use same offset as AAF path.
-  uint32_t presentation_ts = avtp_ts + 2000000;
+  // AVTP presentation timestamp with the stream's presentation-time offset.
+  uint32_t presentation_ts = avtp_ts + presentation_time_offset_ns;
   msg.avtp_ts[0] = (presentation_ts >> 24) & 0xFF;
   msg.avtp_ts[1] = (presentation_ts >> 16) & 0xFF;
   msg.avtp_ts[2] = (presentation_ts >> 8) & 0xFF;
@@ -1335,7 +1336,7 @@ static void avb_stream_out_task(void *task_param) {
 
   /* VLAN tag: PCP + VID, inner ethertype 0x22F0 */
   uint16_t vid = (params->vlan_id[0] << 8) | params->vlan_id[1];
-  uint16_t pcp = state->msrp_mappings[0].priority;
+  uint16_t pcp = avb_msrp_priority_for_stream(state, params->stream_index);
   uint16_t tci = (pcp << 13) | (vid & 0x0FFF);
   tx_frame[14] = (tci >> 8) & 0xFF;
   tx_frame[15] = tci & 0xFF;
@@ -1407,25 +1408,6 @@ static void avb_stream_out_task(void *task_param) {
   uint32_t avtp_ts_increment = (uint32_t)((uint64_t)params->samples_per_packet *
                                           1000000000ULL / params->sample_rate);
 
-/* Software PLL on avtp_media_ts — disabled.
- *
- * The PLL existed to correct presentation-timestamp drift relative to
- * gPTP when TX cadence was crystal-paced. Now that the TX scheduler is
- * gPTP-paced (see gptp_cadence block above), avtp_media_ts already
- * tracks gPTP rate, so the PLL is redundant and adds per-measurement
- * clock_gettime jitter to the timestamps. Kept compiled in behind the
- * gate so the block can be re-enabled for comparison if needed. */
-#define PLL_DISABLED 1
-#define PLL_MEASURE_FAST 500
-#define PLL_MEASURE_SLOW 4000
-#define PLL_FAST_DURATION 80000
-#define PLL_SPREAD 16000
-#define PLL_FILTER_SHIFT 4
-#define PLL_FP_SHIFT 16
-#define PLL_KI_SHIFT 8
-  int64_t pll_correction_fp = 0;
-  int64_t pll_frac_accum = 0;
-  int64_t pll_integral_fp = 0;
   /* Per-window min/max — seeded as INT32_MAX/MIN so the first sample
    * always captures as both ends of the range. Reset by the 1 Hz
    * publish branch to the same sentinels. */
@@ -1544,7 +1526,6 @@ static void avb_stream_out_task(void *task_param) {
    * from the current gPTP time. Locks TX rate to gPTP (8000 packets per
    * gPTP-second) rather than to ESP's crystal, preventing cumulative
    * sample-count drift that causes listeners to drop/dup samples. */
-  int64_t gptp_packet_target_ns = 0;
   bool gptp_cadence_ready = false;
   for (int init_try = 0; init_try < 5; init_try++) {
     struct timespec ptp_a, ptp_b;
@@ -1557,7 +1538,6 @@ static void avb_stream_out_task(void *task_param) {
       int64_t diff = (int64_t)(ts_b - ts_a);
       if (diff >= 0 && diff < 500000) {
         avtp_media_ts = (uint32_t)ts_a;
-        gptp_packet_target_ns = (int64_t)ts_a + phase_offset * 1000;
         gptp_cadence_ready = true;
         break;
       }
@@ -1739,7 +1719,8 @@ static void avb_stream_out_task(void *task_param) {
         tu_active = false;
     }
     avtp[2] = seq_num++;
-    uint32_t presentation_ts = avtp_media_ts + (is_am824 ? 2000000 : 4000000);
+    uint32_t presentation_ts =
+        avtp_media_ts + params->presentation_time_offset_ns;
     avtp[12] = (presentation_ts >> 24) & 0xFF;
     avtp[13] = (presentation_ts >> 16) & 0xFF;
     avtp[14] = (presentation_ts >> 8) & 0xFF;
@@ -1830,57 +1811,6 @@ static void avb_stream_out_task(void *task_param) {
       esp_task_wdt_reset_user(wdt_handle);
     }
 
-    /* Software PLL (unchanged) */
-#if !PLL_DISABLED
-    uint32_t pll_interval =
-        (loop_count < PLL_FAST_DURATION) ? PLL_MEASURE_FAST : PLL_MEASURE_SLOW;
-    if (loop_count % pll_interval == 0) {
-      struct timespec ptp_now;
-      if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_now) == 0) {
-        uint32_t ptp_now_ts =
-            (uint32_t)((uint64_t)ptp_now.tv_sec * 1000000000ULL +
-                       (uint64_t)ptp_now.tv_nsec);
-        struct timespec ptp_check;
-        if (clock_gettime(CLOCK_PTP_SYSTEM, &ptp_check) == 0) {
-          uint32_t check_ts =
-              (uint32_t)((uint64_t)ptp_check.tv_sec * 1000000000ULL +
-                         (uint64_t)ptp_check.tv_nsec);
-          int32_t read_diff = (int32_t)(check_ts - ptp_now_ts);
-          if (read_diff >= 0 && read_diff < 500000) {
-            int32_t offset = (int32_t)(ptp_now_ts - avtp_media_ts);
-            pll_measure_count++;
-#define PLL_OUTLIER_NS 50000000
-            if (offset > PLL_OUTLIER_NS || offset < -PLL_OUTLIER_NS) {
-              pll_skip_count++;
-              goto pll_skip;
-            }
-            /* Record min/max only after the outlier filter so the
-             * STREAM-OUT pll_offset range isn't pinned by a single
-             * bad gPTP read. */
-            if (offset > pll_offset_max)
-              pll_offset_max = offset;
-            if (offset < pll_offset_min)
-              pll_offset_min = offset;
-            int64_t prop_corr_fp =
-                ((int64_t)offset << PLL_FP_SHIFT) / PLL_SPREAD;
-            pll_integral_fp += ((int64_t)offset << PLL_FP_SHIFT) /
-                               (PLL_SPREAD << PLL_KI_SHIFT);
-            int64_t integral_max = (int64_t)125 << PLL_FP_SHIFT;
-            if (pll_integral_fp > integral_max)
-              pll_integral_fp = integral_max;
-            if (pll_integral_fp < -integral_max)
-              pll_integral_fp = -integral_max;
-            int64_t new_corr_fp = prop_corr_fp + pll_integral_fp;
-            int64_t filter_n = (1 << PLL_FILTER_SHIFT);
-            pll_correction_fp =
-                (pll_correction_fp * (filter_n - 1) + new_corr_fp) / filter_n;
-          pll_skip:
-            (void)0;
-          }
-        }
-      }
-    }
-#endif
 
     /* Accumulate productive time for this iteration. Last statement in
      * the loop so it captures everything from work_start_us onward. */
@@ -2067,8 +1997,8 @@ typedef struct {
 
 static stream_rx_ctx_t *s_stream_rx_ctx = NULL;
 
-/* CRF stream RX context — Milan v1.3 CRF media clock input. Allocated by
- * avb_start_stream_in when index == AVB_CRF_INPUT_INDEX. Unlike the AAF
+/* CRF stream RX context. Allocated by avb_start_stream_in when index is the
+ * endpoint's CRF media-clock STREAM_INPUT. Unlike the AAF
  * context this has no I2S/jitter-buffer machinery, just packet reception
  * state for Phase 2 media-clock recovery. */
 typedef struct {
@@ -2091,6 +2021,14 @@ typedef struct {
 } crf_rx_ctx_t;
 
 static crf_rx_ctx_t *s_crf_rx_ctx = NULL;
+
+/* True once the CRF media-clock input is active and at least one valid CRF
+ * timestamp has been received. Used by AECP SET_CLOCK_SOURCE so controllers
+ * cannot select an input-stream clock source that is not yet usable. */
+bool avb_crf_stream_valid(void) {
+  return s_crf_rx_ctx != NULL && s_crf_rx_ctx->timestamp_count > 0 &&
+         s_crf_rx_ctx->drift_latest_valid;
+}
 
 /* Listener drain — runs in the esp_timer task (prio 22, core 0) every
  * 1 ms. Pulls whatever bytes are available from the jitter ring and
@@ -2729,7 +2667,7 @@ static int avb_start_stream_in_crf(avb_state_s *state, uint16_t index) {
  * starts drain timer, registers stream RX handler. */
 int avb_start_stream_in(avb_state_s *state, uint16_t index) {
 
-  if (index == AVB_CRF_INPUT_INDEX) {
+  if (index == avb_get_crf_input_index(state)) {
     return avb_start_stream_in_crf(state, index);
   }
 
@@ -2819,7 +2757,7 @@ static void avb_stop_stream_in_crf(avb_state_s *state, uint16_t index) {
 /* Stop AVB stream input — unregisters handler, stops timer, frees resources */
 void avb_stop_stream_in(avb_state_s *state, uint16_t index) {
 
-  if (index == AVB_CRF_INPUT_INDEX) {
+  if (index == avb_get_crf_input_index(state)) {
     avb_stop_stream_in_crf(state, index);
     return;
   }
@@ -2867,6 +2805,75 @@ void avb_stop_stream_in(avb_state_s *state, uint16_t index) {
  * Stream Output (Talker)
  ****************************************************************************/
 
+/* CRF media-clock output task (talker). Sends one AudioSample CRF timestamp
+ * per PDU using the Milan-compatible 48 kHz profile advertised in AEM. */
+static void avb_crf_stream_out_task(void *task_param) {
+  struct stream_out_params_s *params = (struct stream_out_params_s *)task_param;
+  if (!params) {
+    vTaskDelete(NULL);
+    return;
+  }
+  avb_state_s *state = (avb_state_s *)params->state;
+  uint8_t frame[TX_ETH_HDR_LEN + TX_VLAN_TAG_LEN + 28] = {0};
+  uint8_t *avtp = frame + TX_ETH_HDR_LEN + TX_VLAN_TAG_LEN;
+  uint8_t seq_num = 0;
+
+  memcpy(frame, &params->dest_addr, ETH_ADDR_LEN);
+  memcpy(frame + ETH_ADDR_LEN, state->internal_mac_addr, ETH_ADDR_LEN);
+  frame[12] = 0x81;
+  frame[13] = 0x00;
+  uint16_t vid = (params->vlan_id[0] << 8) | params->vlan_id[1];
+  uint16_t pcp = avb_msrp_priority_for_stream(state, params->stream_index);
+  uint16_t tci = (pcp << 13) | (vid & 0x0FFF);
+  frame[14] = (tci >> 8) & 0xFF;
+  frame[15] = tci & 0xFF;
+  frame[16] = 0x22;
+  frame[17] = 0xF0;
+
+  avtp[0] = avtp_subtype_crf;
+  avtp[1] = 0x80; /* sv=1, version=0 */
+  avtp[3] = 0x00;
+  memcpy(avtp + 4, &params->stream_id, UNIQUE_ID_LEN);
+  /* pull=0 (1.0x), base_frequency=48000 */
+  avtp[12] = 0x00;
+  avtp[13] = 0x00;
+  avtp[14] = 0xBB;
+  avtp[15] = 0x80;
+  avtp[16] = 0x00;
+  avtp[17] = 0x08; /* one 64-bit timestamp */
+  avtp[18] = 0x00;
+  avtp[19] = 0x60; /* timestamp_interval = 96 samples */
+
+  int64_t next_send_time = esp_timer_get_time();
+  avbinfo("CRF stream out %d started", params->stream_index);
+  while (!state->output_streams[params->stream_index].stop_streaming) {
+    while (esp_timer_get_time() < next_send_time) {
+    }
+    int64_t now = esp_timer_get_time();
+    if (now - next_send_time > 20000) {
+      next_send_time = now + 2000;
+    } else {
+      next_send_time += 2000; /* 96 samples @ 48 kHz */
+    }
+
+    struct timespec ts;
+    uint64_t crf_ts_ns = 0;
+    if (clock_gettime(CLOCK_PTP_SYSTEM, &ts) == 0) {
+      crf_ts_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
+    avtp[2] = seq_num++;
+    for (int i = 0; i < 8; i++) {
+      avtp[27 - i] = (uint8_t)(crf_ts_ns & 0xFF);
+      crf_ts_ns >>= 8;
+    }
+    esp_eth_transmit(params->eth_handle, frame, sizeof(frame));
+  }
+
+  avbinfo("CRF stream out %d stopped", params->stream_index);
+  free(params);
+  vTaskDelete(NULL);
+}
+
 /* Start the AVB stream output task (talker)
  *
  * Generates a sine wave, outputs it through the ES8311 codec via I2S,
@@ -2911,10 +2918,20 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index) {
   memcpy(&params->dest_addr, &state->output_streams[index].stream_dest_addr,
          ETH_ADDR_LEN);
   memcpy(params->vlan_id, state->output_streams[index].vlan_id, 2);
+  params->presentation_time_offset_ns =
+      state->output_streams[index].presentation_time_offset_ns;
 
   // Get format parameters from the stream format in state
   avtp_stream_format_s *fmt = &state->output_streams[index].stream_format;
-  params->format_subtype = fmt->aaf_pcm.subtype; // 0=61883, 2=AAF
+  params->format_subtype = fmt->aaf_pcm.subtype; // 0=61883, 2=AAF, 4=CRF
+
+  if (params->format_subtype == avtp_subtype_crf) {
+    state->output_streams[index].stop_streaming = false;
+    state->output_streams[index].streaming = true;
+    xTaskCreatePinnedToCore(avb_crf_stream_out_task, "AVB-CRF-OUT", 4096,
+                            (void *)params, configMAX_PRIORITIES - 2, NULL, 1);
+    return OK;
+  }
 
   if (params->format_subtype == avtp_subtype_61883) {
     // IEC 61883-6 AM824 format

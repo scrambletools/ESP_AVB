@@ -16,7 +16,7 @@
  * Included Files
  ****************************************************************************/
 #include "avbutils.h"
-#include "config.h"
+#include "avbconfig.h"
 #include "esp_avb.h"
 #include "esp_eth_clock.h"
 #include <arpa/inet.h>
@@ -75,13 +75,16 @@
 #define AVB_MAX_NUM_INFLIGHT_COMMANDS 20
 
 /* Maximum number of streams.
- * Input stream 0: AAF/61883 audio. Input stream 1: CRF media clock
- * (Milan v1.3 §7.2.2 — mandatory for AAF talkers). The CRF input is
- * present regardless of CONFIG_ESP_AVB_MILAN; the Kconfig option only
- * toggles whether we *advertise* Milan compliance in discovery. */
+ * When audio listener support is enabled: input stream 0 is AAF/61883 audio
+ * and input stream 1 is CRF media clock. In talker-only mode: the only input
+ * stream is CRF media clock at index 0. Talker endpoints expose output stream
+ * 0 as audio and output stream 1 as CRF media clock. The CRF streams are
+ * present regardless of CONFIG_ESP_AVB_MILAN; the Kconfig option only toggles
+ * whether we advertise Milan compliance in discovery. */
 #define AVB_MAX_NUM_INPUT_STREAMS 2
-#define AVB_MAX_NUM_OUTPUT_STREAMS 1
-#define AVB_CRF_INPUT_INDEX 1
+#define AVB_MAX_NUM_OUTPUT_STREAMS 2
+#define AVB_DEFAULT_CRF_INPUT_INDEX 1
+#define AVB_DEFAULT_CRF_OUTPUT_INDEX 1
 
 /* Periodic message intervals */
 #define MSRP_DOMAIN_INTERVAL_MSEC 500
@@ -89,12 +92,10 @@
 #define MSRP_TALKER_IDLE_INTERVAL_MSEC 1000 // when idle
 #define MSRP_TALKER_CONN_INTERVAL_MSEC                                         \
   500 // when connected (must be < MRP Leave timer ~1s)
-#define MSRP_LISTENER_IDLE_INTERVAL_MSEC 1000 // when idle
 #define MSRP_LISTENER_CONN_INTERVAL_MSEC                                       \
   500 // when connected (must be < MRP Leave timer ~1s)
 #define MSRP_LEAVEALL_INTERVAL_MSEC 10000
 #define ADP_ENTITY_AVAIL_INTERVAL_MSEC 5000
-#define MAAP_ANNOUNCE_INTERVAL_MSEC 10000
 #define PTP_STATUS_UPDATE_INTERVAL_MSEC 3000
 /* Milan §5.5.3.6.x TMR_RETRY is 4s on probe failure. Use the same
  * cadence for fast-connect retries while a saved binding waits for
@@ -119,8 +120,6 @@
   (uint8_t[6]){0x91, 0xe0, 0xf0, 0x01, 0x00, 0x00} // adp,acmp
 #define MAAP_MCAST_MAC_ADDR                                                    \
   (uint8_t[6]){0x91, 0xe0, 0xf0, 0x00, 0xff, 0x00} // maap
-#define MAAP_START_MAC_ADDR                                                    \
-  (uint8_t[6]){0x91, 0xe0, 0xf0, 0x00, 0xf2, 0x00} // maap, can change
 #define SPANTREE_MAC_ADDR                                                      \
   (uint8_t[6]){0x01, 0x80, 0xc2, 0x00, 0x00, 0x21} // mvrp
 #define LLDP_MCAST_MAC_ADDR                                                    \
@@ -133,12 +132,12 @@
 #define MVU_PROTOCOL_ID                                                        \
   { 0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00 }
 
-/* Milan v1.3 §7.3 — the only CRF format an AVnu Milan CRF Media Clock Input
- * may advertise. 64-bit value; encoded as 8 big-endian bytes in the
- * stream_format field:
+/* IEEE 1722 CRF AudioSample stream format used for the media-clock input.
+ * This is also the Milan-compatible 48 kHz CRF profile. 64-bit value;
+ * encoded as 8 big-endian bytes in the stream_format field:
  *   subtype=0x04 (CRF), crf_type=1 (AudioSample), timestamp_interval=96,
  *   timestamps_per_pdu=1, pull=0 (1.0x), base_frequency=48000 Hz. */
-#define MILAN_AVNU_CRF_FORMAT_BYTES                                            \
+#define AVB_CRF_AUDIO_SAMPLE_48K_FORMAT_BYTES                                  \
   { 0x04, 0x10, 0x60, 0x01, 0x00, 0x00, 0xBB, 0x80 }
 
 /* Poll interval for checking for incoming frames on L2TAP FDs */
@@ -191,8 +190,9 @@ typedef enum {
   AVB_NAME_CONTROL_1, // Speaker Volume
   AVB_NAME_CONTROL_2, // Mic Gain
   AVB_NAME_STREAM_INPUT_0,
-  AVB_NAME_STREAM_INPUT_1, // CRF media clock input (Milan v1.3 §7.2.2)
+  AVB_NAME_STREAM_INPUT_1, // CRF media clock input when audio input is present
   AVB_NAME_STREAM_OUTPUT_0,
+  AVB_NAME_STREAM_OUTPUT_1, // CRF media clock output
   AVB_NAME_COUNT // total number of settable names
 } avb_name_index_t;
 
@@ -253,11 +253,10 @@ typedef struct {
 /* Per-output-stream (talker) persistence. APPEND-ONLY (see above). */
 typedef struct {
   uint8_t stream_format[8];             /* AVTP stream format */
-  uint32_t presentation_time_offset_ns; /* user-configured presentation offset.
-                                         * Placeholder — not yet wired into TX. */
+  uint32_t presentation_time_offset_ns; /* user-configured presentation offset. */
 } avb_persist_output_stream_s; /* 12 bytes */
 
-#define AVB_PERSIST_VERSION 2
+#define AVB_PERSIST_VERSION 3
 typedef struct {
   uint8_t version;       /* struct version — bump on every append */
   uint8_t reserved_v[3]; /* pad to 4-byte boundary */
@@ -293,25 +292,32 @@ _Static_assert(AVB_MAX_NUM_INPUT_STREAMS <= AVB_PERSIST_MAX_INPUT_STREAMS,
 _Static_assert(AVB_MAX_NUM_OUTPUT_STREAMS <= AVB_PERSIST_MAX_OUTPUT_STREAMS,
                "AVB_MAX_NUM_OUTPUT_STREAMS exceeds AVB_PERSIST_MAX_OUTPUT_STREAMS");
 
-/* Timespec functions */
-#define clock_timespec_subtract(ts1, ts2, ts3) timespecsub(ts1, ts2, ts3)
-#define clock_timespec_add(ts1, ts2, ts3) timespecadd(ts1, ts2, ts3)
+/* Codec hardware capability. Codec-specific truth lives in avbcodec.c;
+ * avbconfig.h policy filters are intersected with these capabilities during
+ * AVB state initialization to produce the effective advertised capabilities. */
+typedef struct {
+  avb_sample_rates_s sample_rates;
+  avb_bit_rates_s bit_rates;
+  uint8_t max_input_channels;
+  uint8_t max_output_channels;
+  codec_control_range_s control_ranges;
+} avb_codec_caps_s;
 
 /* Default format */
-#define AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate)                          \
+#define AVB_DEFAULT_FORMAT_AM824(cip_sfc_sample_rate, channels)                \
   {.subtype = 0,                                                               \
    .vendor_defined = 0,                                                        \
    .format = 0x10,                                                             \
    .sf = 1,                                                                    \
    .fdf_sfc = cip_sfc_sample_rate,                                             \
    .fdf_evt = 0,                                                               \
-   .dbs = 8,                                                                   \
+   .dbs = (channels),                                                          \
    .sc = 0,                                                                    \
    .ut = 0,                                                                    \
    .nb = 1,                                                                    \
    .b = 0,                                                                     \
    .label_iec_60958_cnt = 0,                                                   \
-   .label_mbla_cnt = 8,                                                        \
+   .label_mbla_cnt = (channels),                                               \
    .label_smptecnt = 0,                                                        \
    .label_midi_cnt = 0}
 
@@ -1443,6 +1449,10 @@ typedef struct {
  * used in get stream info response
  */
 typedef struct {
+  /* 1722.1 Table 7-145 lists flag field values in AVDECC bit order:
+   * STREAM_FORMAT_VALID is 0x80000000 and CLASS_B is 0x00000001. ESP-IDF/GCC
+   * allocates uint8_t bitfields LSB-to-MSB within each byte, so fields below
+   * are declared in that byte-local order for direct wire serialization. */
   uint8_t not_registering_srp : 1;  // For a STREAM_INPUT, indicates that the
                                     // Listener is not registering an SRP
                                     // TalkerAdvertise or TalkerFailed attribute
@@ -1459,13 +1469,12 @@ typedef struct {
                                      // msrp_failure_bridge_id fields are valid.
   uint8_t stream_dest_mac_valid : 1; // The value in the stream_dest_mac field
                                      // is valid.
-  uint8_t msrp_acc_lat_valid : 1; // The value in the msrp_accumulated_latency
-                                  // field is valid.
-  uint8_t stream_id_valid : 1;    // The value in the stream_id field is valid.
+  uint8_t msrp_acc_lat_valid
+      : 1; // The value in the msrp_accumulated_latency field is valid.
+  uint8_t stream_id_valid : 1; // The value in the stream_id field is valid.
   uint8_t stream_format_valid
-      : 1;                    // The value in the stream_format field is valid
-                              // and is to be used to change the StreamFormat
-                              // if it is a SET_STREAM_INFO command.
+      : 1; // The value in the stream_format field is valid and is to be used
+           // to change the StreamFormat if it is a SET_STREAM_INFO command.
   uint8_t reserved1 : 3;      // Reserved bits
   uint8_t ip_flags_valid : 1; // The value in the ip_flags field is valid.
   uint8_t ip_src_port_valid : 1; // The value in the source_port field is valid.
@@ -1475,7 +1484,10 @@ typedef struct {
                                  // valid.
   uint8_t ip_dst_addr_valid : 1; // The value in the destination_ip_address
                                  // field is valid.
-  uint8_t reserved2 : 3;         // Reserved bits
+  uint8_t no_srp : 1; // Indicates that SRP is not being used for the stream.
+                      // The Talker will not register a TalkerAdvertise or wait
+                      // for a Listener registration before streaming.
+  uint8_t reserved2 : 7; // Reserved bits
   uint8_t class_b : 1; // Indicates that the Stream is Class B instead of Class
                        // A (default 0 is classA)
   uint8_t fast_connect : 1; // Reserved for backward compatibility. This flag
@@ -1491,12 +1503,11 @@ typedef struct {
            // was stopped with STOP_STREAMING command.
   uint8_t supports_encrypted : 1; // Indicates that the Stream supports
                                   // streaming with encrypted PDUs.
+  uint8_t encrypted_pdu : 1; // Indicates that the Stream is using encrypted
+                             // PDUs.
   uint8_t talker_failed : 1; // Indicates that the Listener has registered an
                              // SRP TalkerFailed attribute for the Stream.
-  uint8_t reserved3 : 3;     // Reserved bits
-  uint8_t no_srp : 1; // Indicates that SRP is not being used for the stream.
-                      // The Talker will not register a TalkerAdvertise or wait
-                      // for a Listener registration before streaming.
+  uint8_t reserved3 : 1;     // Reserved bit
 } aem_stream_info_flags_s; // 4 bytes
 
 /* IEC 61883-6 AM824 stream format
@@ -1552,7 +1563,7 @@ typedef struct {
   uint8_t reserved3;
 } avtp_stream_format_aaf_pcm_s; // 8 bytes
 
-/* CRF stream format (IEEE 1722-2016 §10, Milan v1.3 §7.3).
+/* CRF stream format (IEEE 1722-2016 §10).
  * Bit layout matches the 8-byte wire encoding above. */
 typedef struct {
   uint8_t subtype : 7;             // 0x04 for CRF
@@ -2424,6 +2435,7 @@ typedef struct {
   uint8_t connection_count[2];               // number of connected listeners
   volatile bool stop_streaming;              // cross-core stop signal
   bool streaming;                            // true when stream_out_task running
+  uint32_t presentation_time_offset_ns;      // AVTP presentation offset / max_transit_time
   struct {
     eth_addr_t mac_addr;     // from MSRP source
     identity_pair_t identity; // from ACMP connect_tx
@@ -2491,6 +2503,7 @@ struct stream_out_params_s {
   uint8_t bit_depth;               // bit depth
   uint8_t channels;                // channels per frame
   uint32_t sample_rate;            // sample rate
+  uint32_t presentation_time_offset_ns; // AVTP presentation offset / max_transit_time
   bool use_sine_wave;              // generate sine wave instead of reading mic
   float sine_freq;                 // sine wave frequency in Hz
   uint8_t format_subtype;          // 0 = IEC 61883 (AM824), 2 = AAF
@@ -2509,6 +2522,8 @@ typedef struct {
 
   /* AVB configuration */
   avb_config_s config;
+  avb_sample_rates_s supported_sample_rates; // codec caps ∩ config policy
+  avb_bit_rates_s supported_bits_per_sample; // codec caps ∩ config policy
 
   /* Request for AVB task to stop or report status */
   bool stop;
@@ -2544,7 +2559,7 @@ typedef struct {
    * Phase 2b MCLK PLL. Values are plain (not atomic) — occasional torn reads
    * in log output are acceptable. */
   struct {
-    /* CRF Media Clock input (STREAM_INPUT[AVB_CRF_INPUT_INDEX]).
+    /* CRF Media Clock input (STREAM_INPUT[avb_get_crf_input_index(state)]).
      * drift_ns = crf_timestamp - local_gptp_ns at moment of reception. */
     int64_t crf_last_drift_ns;
     int32_t crf_drift_min_ns;
@@ -2636,8 +2651,10 @@ typedef struct {
   size_t num_output_streams;
 
   /* Supported stream formats */
-  avtp_stream_format_s supported_formats[AEM_MAX_NUM_FORMATS];
-  size_t num_supported_formats;
+  avtp_stream_format_s supported_formats_in[AEM_MAX_NUM_FORMATS];
+  size_t num_supported_formats_in;
+  avtp_stream_format_s supported_formats_out[AEM_MAX_NUM_FORMATS];
+  size_t num_supported_formats_out;
   avtp_stream_format_s default_format;
 
   /* Endpoints that we are aware of */
@@ -2968,6 +2985,9 @@ int avb_process_acmp_get_tx_connection_command(avb_state_s *state,
 /* Stream functions */
 int avb_start_stream_in(avb_state_s *state, uint16_t index);
 void avb_stop_stream_in(avb_state_s *state, uint16_t index);
+uint16_t avb_get_crf_input_index(avb_state_s *state);
+uint16_t avb_get_crf_output_index(avb_state_s *state);
+bool avb_crf_stream_valid(void);
 void avb_stream_in_print_diag(void);
 /* Deferred drift sampler — called from AVB main's periodic loop.
  * Replaces the per-packet clock_gettime(CLOCK_PTP_SYSTEM) calls that
@@ -2993,8 +3013,11 @@ int avb_start_stream_out(avb_state_s *state, uint16_t index);
 int avb_stop_stream_out(avb_state_s *state, uint16_t index);
 
 /* Codec functions */
+const avb_codec_caps_s *avb_codec_get_caps(avb_codec_type_t codec_type);
 esp_err_t avb_config_i2s(avb_state_s *state);
 esp_err_t avb_config_codec(avb_state_s *state);
+int16_t avb_codec_quantize_tenth_db(const codec_control_range_s *ranges,
+                                     bool gain, int16_t value_tenth_db);
 void avb_codec_set_vol(avb_state_s *state, float db);
 void avb_codec_set_mic_gain(avb_state_s *state, float db);
 
@@ -3065,7 +3088,6 @@ acmp_status_t avb_connect_listener(avb_state_s *state,
 void avb_periodic_fast_connect(avb_state_s *state);
 acmp_status_t avb_disconnect_listener(avb_state_s *state,
                                       acmp_message_s *response);
-acmp_status_t avb_connect_talker(avb_state_s *state, acmp_message_s *response);
 int avb_get_acmp_timeout_ms(acmp_msg_type_t msg_type);
 
 #endif /* _ESP_AVB_AVB_H_ */
