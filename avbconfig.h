@@ -1,3 +1,14 @@
+/*
+ * Copyright 2024-2026 Scramble Tools
+ * License: MIT
+ *
+ * ESP_AVB Component
+ *
+ * This component provides an implementation of an AVB talker and listener.
+ *
+ * This file provides the common definitions and types for the AVB protocol.
+ */
+
 #ifndef ESP_AVB_CONFIG_H_
 #define ESP_AVB_CONFIG_H_
 
@@ -18,12 +29,12 @@
    .association_id = 0xffffffffffffffff,                                       \
    .model_id = 0x0000007468696e67,                                             \
    .port_id = 0x0001,                                                          \
-   .entity_name = "Simple Talker/Listener",                                   \
-   .vendor_name = "ACME",                                                     \
-   .model_name = "AVB Device Model 1",                                        \
-   .group_name = "",                                                          \
-   .firmware_version = "1.0.0",                                               \
-   .serial_number = "12345678",                                               \
+   .entity_name = "Simple Talker/Listener",                                    \
+   .vendor_name = "ACME",                                                      \
+   .model_name = "AVB Device Model 1",                                         \
+   .group_name = "",                                                           \
+   .firmware_version = "1.0.0",                                                \
+   .serial_number = "12345678",                                                \
    .eth_interface = DEF_ETH_IF,                                                \
    .i2s_port = 0,                                                              \
    .codec_pins = {.mclk = 13,                                                  \
@@ -79,8 +90,8 @@ static const avb_locale_strings_s AVB_LOCALIZED_STRINGS[] = {
                     "Identify",       /* 9: Identify Control Name */
                     "Clock Domain",   /* 10: Clock Domain Name */
                     "Internal Clock", /* 11: Internal Clock Source Name */
-                    "",              /* 12: Vendor Name (from config) */
-                    "",              /* 13: Model Name (from config) */
+                    "",               /* 12: Vendor Name (from config) */
+                    "",               /* 13: Model Name (from config) */
                     "Speaker Volume", /* 14: Speaker Volume Control Name */
                 },
                 /* Strings descriptor 2: localized refs 16..22 */
