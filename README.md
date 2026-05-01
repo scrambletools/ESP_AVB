@@ -4,6 +4,8 @@ This component provides a basic implementation of an AVB talker and listener.
 
 For a demo on how to use it, see the example on Github (scrambletools/ESP-AVB-Example).
 
+This component is available via the ESP Component Registry (https://components.espressif.com).
+
 Current features:
 
 - 1 Talker
