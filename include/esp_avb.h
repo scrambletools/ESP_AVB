@@ -63,14 +63,15 @@ typedef struct {
 
 /* Pin assignments for the codec audio buses */
 typedef struct {
-  uint8_t mclk;    // I2S MCLK
-  uint8_t bclk;    // I2S BCLK
-  uint8_t ws;      // I2S word select / LRCK
-  uint8_t dout;    // I2S data out (host -> codec DAC)
-  uint8_t din;     // I2S data in (codec ADC -> host)
-  uint8_t i2c_scl; // I2C SCL
-  uint8_t i2c_sda; // I2C SDA
-  uint8_t pa;      // PA enable (output amplifier)
+  uint8_t mclk;       // I2S MCLK
+  uint8_t bclk;       // I2S BCLK
+  uint8_t ws;         // I2S word select / LRCK
+  uint8_t dout;       // I2S data out (host -> codec DAC)
+  uint8_t din;        // I2S data in (codec ADC -> host)
+  uint8_t i2c_scl;    // I2C SCL
+  uint8_t i2c_sda;    // I2C SDA
+  int16_t pa;         // PA enable (output amplifier), -1 if unused
+  bool pa_reverted;   // true if PA enable pin is active-low (inverter on board)
 } avb_codec_pins_s;
 
 /* AVB configuration structure
@@ -82,6 +83,7 @@ typedef struct {
   bool listener;                             // enable listener
   bool atdecc_control;                       // allow remote control via ATDECC
   bool milan_compliant;                      // enable Milan-specific behavior
+  bool avb_lite_compliant;                  // allow AVB Lite mode with standard PTP
   uint64_t association_id;                   // AVDECC association ID
   uint64_t model_id;                         // AVDECC entity model ID
   uint16_t port_id;                          // AVB interface port number
@@ -113,6 +115,7 @@ typedef struct {
 /* AVB status information structure */
 typedef struct {
   bool clock_source_valid; // clock source valid
+  bool avb_lite;           // operating in AVB Lite mode (standard PTP)
   bool streaming_in;       // one or more input streams are active
   bool streaming_out;      // one or more output streams are active
   struct {

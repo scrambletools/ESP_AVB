@@ -10,13 +10,23 @@
  */
 
 #include "avb.h"
+#include "audio_codec_if.h"
 #include "esp_codec_dev.h"
 #include "esp_timer.h"
+#include <driver/gpio.h>
 #include <esp_task_wdt.h>
+#include <math.h>
 #include <nvs_flash.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* Global state */
 avb_state_s *s_state;
+
+#if AVB_AUDIO_TEST_BOOT_RATE_HZ > 0
+static void avb_audio_test_run(avb_state_s *state);
+#endif
 
 // logo.png
 extern const char logo_png_start[] asm("_binary_logo_png_start");
@@ -144,6 +154,18 @@ static void avb_intersect_bit_rates(avb_bit_rates_s *out,
       out->bit_rates[out->num_rates++] = bits;
     }
   }
+}
+
+static void avb_update_avb_lite_from_ptp(avb_state_s *state) {
+  bool avb_lite = state->config.avb_lite_compliant &&
+                  state->ptp_status.ptp_profile == ptp_profile_standard;
+  if (state->avb_lite != avb_lite) {
+    avbinfo("AVB Lite mode %s (PTP profile: %s, compliant: %s)",
+            avb_lite ? "enabled" : "disabled",
+            state->ptp_status.ptp_profile == ptp_profile_gptp ? "gPTP" : "standard",
+            state->config.avb_lite_compliant ? "yes" : "no");
+  }
+  state->avb_lite = avb_lite;
 }
 
 static size_t avb_build_audio_formats(avtp_stream_format_s *formats,
@@ -438,6 +460,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   // if valid PTP status
   if (ptpd_status(0, &ptp_status) == 0) {
     state->ptp_status = ptp_status;
+    avb_update_avb_lite_from_ptp(state);
   }
 
   // Initialize MAAP for output stream multicast address acquisition
@@ -475,6 +498,7 @@ static void avb_update_ptp_status(avb_state_s *state) {
   // if valid PTP status
   if (ptpd_status(0, &ptp_status) == 0) {
     memcpy(&state->ptp_status, &ptp_status, sizeof(struct ptpd_status_s));
+    avb_update_avb_lite_from_ptp(state);
     avb_update_avb_interface_from_ptp(state);
   }
 }
@@ -641,6 +665,12 @@ static int avb_periodic_send(avb_state_s *state) {
     }
   }
 
+  /* Process ACMP/AECP command timeouts. This is especially important for
+   * listener DISCONNECT_RX: if the talker does not answer our forwarded
+   * DISCONNECT_TX quickly, we must still answer the controller instead of
+   * leaving it to time out. */
+  avb_process_inflight_timeouts(state);
+
   /* Attempt fast-connect for any listener stream with a saved binding
    * that hasn't reconnected yet. Self-throttled per-stream. */
   if (state->config.listener) {
@@ -756,6 +786,7 @@ static void avb_process_statusreq(avb_state_s *state) {
   status = state->status_req.dest;
 
   status->clock_source_valid = state->ptp_status.clock_source_valid;
+  status->avb_lite = state->avb_lite;
   memcpy(status->entity.id, state->own_entity.summary.entity_id,
          sizeof(status->entity.id));
 
@@ -805,6 +836,13 @@ static void avb_task(void *task_param) {
     config->eth_interface = "ETH_DEF";
   }
 
+  if (config->milan_compliant) {
+    avbinfo("AVB endpoint configured for Milan 1.3 compliance");
+  }
+  if (config->avb_lite_compliant) {
+    avbinfo("AVB endpoint configured for AVB Lite compliance");
+  }
+
   // Initialize AVB state
   if (avb_initialize_state(state, config) != OK) {
     avberr("Failed to initialize AVB state, stopping AVB task");
@@ -845,6 +883,16 @@ static void avb_task(void *task_param) {
     avb_codec_set_vol(state, state->ctrl_speaker_vol);
     avb_codec_set_mic_gain(state, state->ctrl_mic_gain);
   }
+
+#if AVB_AUDIO_TEST_BOOT_RATE_HZ > 0
+  /* Boot-time audio test (avbconfig.h: AVB_AUDIO_TEST_BOOT_RATE_HZ).
+   * Spawn as a dedicated task at the same priority that identify_tone_task
+   * uses, then block here for the test duration so the test completes
+   * before the main control loop starts and AVTP streaming begins. */
+  if (state->codec_enabled) {
+    avb_audio_test_run(state);
+  }
+#endif
 
   /* Spin up the deferred NVS writer. Create the snapshot mutex first
    * so avb_persist_request_save() calls from protocol handlers will
@@ -996,6 +1044,55 @@ static void identify_tone_task(void *param) {
   uint32_t duration_ms = 500;
   uint32_t phase = 0;
 
+  const audio_codec_if_t *codec = (const audio_codec_if_t *)state->codec_if;
+  if (codec) {
+    if (codec->mute) {
+      int ret = codec->mute(codec, false);
+      avbinfo("Identify tone: codec mute(false) ret=%d", ret);
+    }
+    if (codec->set_vol) {
+      int ret = codec->set_vol(codec, state->ctrl_speaker_vol);
+      avbinfo("Identify tone: codec set_vol %.1f dB ret=%d",
+              state->ctrl_speaker_vol, ret);
+    }
+    if (codec->get_reg) {
+      int regs[] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                    0x08, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x10, 0x11,
+                    0x12, 0x13, 0x14, 0x31, 0x32, 0x33, 0x34, 0x35,
+                    0x37, 0x44, 0x45, 0xFD, 0xFE, 0xFF};
+      char line[192];
+      size_t pos = 0;
+      pos += snprintf(line + pos, sizeof(line) - pos, "ES8311 regs:");
+      for (int i = 0; i < (int)(sizeof(regs) / sizeof(regs[0])); i++) {
+        int val = 0;
+        int ret = codec->get_reg(codec, regs[i], &val);
+        if (ret == 0) {
+          pos += snprintf(line + pos, sizeof(line) - pos, " %02x=%02x", regs[i],
+                          val & 0xff);
+        } else {
+          pos += snprintf(line + pos, sizeof(line) - pos, " %02x=ERR%d", regs[i],
+                          ret);
+        }
+        if (pos > sizeof(line) - 16 || i == (int)(sizeof(regs) / sizeof(regs[0])) - 1) {
+          avbinfo("%s", line);
+          pos = 0;
+          line[0] = '\0';
+          pos += snprintf(line + pos, sizeof(line) - pos, "ES8311 regs:");
+        }
+      }
+    }
+  }
+
+  if (state->config.codec_pins.pa >= 0) {
+    int pa_active = state->config.codec_pins.pa_reverted ? 0 : 1;
+    int pa_level = (state->ctrl_identify == 2) ? !pa_active : pa_active;
+    gpio_reset_pin(state->config.codec_pins.pa);
+    gpio_set_direction(state->config.codec_pins.pa, GPIO_MODE_OUTPUT);
+    gpio_set_level(state->config.codec_pins.pa, pa_level);
+    avbinfo("Identify tone: forcing PA GPIO%d=%d", state->config.codec_pins.pa,
+            pa_level);
+  }
+
   avbinfo("Identify tone: %lums", duration_ms);
 
   int64_t end_time = esp_timer_get_time() + (int64_t)duration_ms * 1000;
@@ -1003,10 +1100,11 @@ static void identify_tone_task(void *param) {
     uint8_t *p = buf;
     for (int i = 0; i < frames_per_ms; i++) {
       int32_t val = sine48[phase % 48];
-      /* 24-bit little-endian stereo: [LSB, MID, MSB, LSB, MID, MSB] */
-      p[0] = val & 0xFF;
+      /* 24-bit big-endian stereo: [MSB, MID, LSB, MSB, MID, LSB].
+       * I2S is configured with slot_cfg.big_endian = true. */
+      p[0] = (val >> 16) & 0xFF;
       p[1] = (val >> 8) & 0xFF;
-      p[2] = (val >> 16) & 0xFF;
+      p[2] = val & 0xFF;
       p[3] = p[0];
       p[4] = p[1];
       p[5] = p[2];
@@ -1026,6 +1124,159 @@ void avb_identify_tone(avb_state_s *state, uint32_t duration_ms) {
   xTaskCreatePinnedToCore(identify_tone_task, "IDENTIFY", 4096, (void *)state,
                           configMAX_PRIORITIES - 2, NULL, 0);
 }
+
+#if AVB_AUDIO_TEST_BOOT_RATE_HZ > 0
+/* Boot-time audio test (avbconfig.h: AVB_AUDIO_TEST_BOOT_RATE_HZ). Plays a
+ * 1 kHz sine at the requested sample rate for AVB_AUDIO_TEST_DURATION_MS,
+ * Runs the actual write loop on a dedicated task at the same priority
+ * identify_tone_task uses, then blocks the caller until the test ends so
+ * the main control loop only starts after the tone has finished. */
+typedef struct {
+  avb_state_s *state;
+  uint32_t duration_ms;
+  uint32_t sample_rate;
+  SemaphoreHandle_t done;
+} avb_audio_test_args_s;
+
+static void avb_audio_test_task(void *param) {
+  avb_audio_test_args_s *args = (avb_audio_test_args_s *)param;
+  avb_state_s *state = args->state;
+  uint32_t actual_rate = args->sample_rate;
+  uint32_t duration_ms = args->duration_ms;
+
+  /* Make sure the codec is unmuted at the saved volume so the user actually
+   * hears the tone (mirrors what identify_tone_task does). */
+  const audio_codec_if_t *codec = (const audio_codec_if_t *)state->codec_if;
+  if (codec) {
+    if (codec->mute) {
+      int r = codec->mute(codec, false);
+      avbinfo("Audio test: codec mute(false) ret=%d", r);
+    }
+    if (codec->set_vol) {
+      int r = codec->set_vol(codec, state->ctrl_speaker_vol);
+      avbinfo("Audio test: codec set_vol %.1f dB ret=%d",
+              state->ctrl_speaker_vol, r);
+    }
+    if (codec->get_reg) {
+      int regs[] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                    0x08, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x10, 0x11,
+                    0x12, 0x13, 0x14, 0x31, 0x32, 0x33, 0x34, 0x35,
+                    0x37, 0x44, 0x45, 0xFD, 0xFE, 0xFF};
+      char line[192];
+      size_t pos = 0;
+      pos += snprintf(line + pos, sizeof(line) - pos, "ES8311 regs:");
+      for (int i = 0; i < (int)(sizeof(regs) / sizeof(regs[0])); i++) {
+        int val = 0;
+        int r = codec->get_reg(codec, regs[i], &val);
+        if (r == 0) {
+          pos += snprintf(line + pos, sizeof(line) - pos, " %02x=%02x",
+                          regs[i], val & 0xff);
+        } else {
+          pos += snprintf(line + pos, sizeof(line) - pos, " %02x=ERR%d",
+                          regs[i], r);
+        }
+        if (pos > sizeof(line) - 16 ||
+            i == (int)(sizeof(regs) / sizeof(regs[0])) - 1) {
+          avbinfo("%s", line);
+          pos = 0;
+          line[0] = '\0';
+          pos += snprintf(line + pos, sizeof(line) - pos, "ES8311 regs:");
+        }
+      }
+    }
+  }
+  if (state->config.codec_pins.pa >= 0) {
+    int pa_active = state->config.codec_pins.pa_reverted ? 0 : 1;
+    gpio_reset_pin(state->config.codec_pins.pa);
+    gpio_set_direction(state->config.codec_pins.pa, GPIO_MODE_OUTPUT);
+    gpio_set_level(state->config.codec_pins.pa, pa_active);
+    avbinfo("Audio test: forcing PA GPIO%d=%d",
+            state->config.codec_pins.pa, pa_active);
+  }
+
+  /* Generate 1 kHz sine on the fly so any sample rate works. ~50% amplitude
+   * in 24-bit signed (matches identify tone level). 24-bit big-endian stereo
+   * to match the I2S slot config. Write 1 ms chunks. */
+  const float tone_hz = 1000.0f;
+  const float two_pi = 6.28318530717958647692f;
+  const float phase_inc = two_pi * tone_hz / (float)actual_rate;
+  const int32_t amp = 4194304; /* ~0.5 of full-scale 24-bit */
+  uint32_t frames_per_ms = actual_rate / 1000;
+  if (frames_per_ms < 1) frames_per_ms = 1;
+  size_t buf_len = frames_per_ms * 6; /* 24-bit stereo = 6 bytes/frame */
+  uint8_t *buf = malloc(buf_len);
+  if (buf) {
+    float phase = 0.0f;
+    int64_t end_time = esp_timer_get_time() + (int64_t)duration_ms * 1000;
+    while (esp_timer_get_time() < end_time) {
+      uint8_t *p = buf;
+      for (uint32_t i = 0; i < frames_per_ms; i++) {
+        int32_t v = (int32_t)(sinf(phase) * (float)amp);
+        p[0] = (v >> 16) & 0xFF;
+        p[1] = (v >> 8)  & 0xFF;
+        p[2] = v         & 0xFF;
+        p[3] = p[0]; p[4] = p[1]; p[5] = p[2];
+        p += 6;
+        phase += phase_inc;
+        if (phase >= two_pi) phase -= two_pi;
+      }
+      size_t bw = 0;
+      i2s_channel_write(state->i2s_tx_handle, buf, buf_len, &bw, 100);
+    }
+    free(buf);
+  } else {
+    avberr("Audio test: malloc(%u) failed", (unsigned)buf_len);
+  }
+
+  avbinfo("Audio test: done");
+  xSemaphoreGive(args->done);
+  vTaskDelete(NULL);
+}
+
+static void avb_audio_test_run(avb_state_s *state) {
+  if (!state->i2s_tx_handle) {
+    avbwarn("Audio test: i2s_tx_handle is null, skipping");
+    return;
+  }
+
+  uint32_t configured_rate = AVB_AUDIO_TEST_BOOT_RATE_HZ;
+  uint32_t actual_rate = state->config.default_sample_rate;
+  uint32_t duration_ms = AVB_AUDIO_TEST_DURATION_MS;
+
+  if (configured_rate != actual_rate) {
+    avbwarn("Audio test: AVB_AUDIO_TEST_BOOT_RATE_HZ=%lu but codec is "
+            "configured for %lu Hz; tone will play at %lu Hz. To verify "
+            "another rate, also set default_sample_rate accordingly.",
+            (unsigned long)configured_rate, (unsigned long)actual_rate,
+            (unsigned long)actual_rate);
+  }
+  avbinfo("Audio test: 1 kHz sine, %lu Hz, %lu ms",
+          (unsigned long)actual_rate, (unsigned long)duration_ms);
+
+  avb_audio_test_args_s args = {
+    .state = state,
+    .duration_ms = duration_ms,
+    .sample_rate = actual_rate,
+    .done = xSemaphoreCreateBinary(),
+  };
+  if (!args.done) {
+    avberr("Audio test: failed to create semaphore");
+    return;
+  }
+  /* Same priority/core as identify_tone_task. */
+  if (xTaskCreatePinnedToCore(avb_audio_test_task, "AUDIOTEST", 4096,
+                              &args, configMAX_PRIORITIES - 2, NULL,
+                              0) != pdPASS) {
+    avberr("Audio test: failed to spawn task");
+    vSemaphoreDelete(args.done);
+    return;
+  }
+  /* Block here until the task signals it's finished, so the test runs
+   * before the main control loop and AVTP streaming start up. */
+  xSemaphoreTake(args.done, portMAX_DELAY);
+  vSemaphoreDelete(args.done);
+}
+#endif /* AVB_AUDIO_TEST_BOOT_RATE_HZ > 0 */
 
 /****************************************************************************
  * NVS Persistent Storage
@@ -1078,6 +1329,185 @@ static bool avb_persist_stream_format_supported(avb_state_s *state,
 }
 
 /* Populate the persist struct from current state */
+static uint32_t s_persist_journal_seq = 0;
+
+typedef struct {
+  avb_persist_input_stream_s stream;
+  uint8_t reserved[2];
+} avb_persist_input_stream_journal_s;
+
+typedef struct {
+  avb_persist_output_stream_s stream;
+  uint8_t reserved[20];
+} avb_persist_output_stream_journal_s;
+
+_Static_assert(sizeof(avb_persist_input_stream_journal_s) == 32,
+               "input stream journal record must remain 32 bytes");
+_Static_assert(sizeof(avb_persist_output_stream_journal_s) == 32,
+               "output stream journal record must remain 32 bytes");
+
+static bool avb_persist_parse_stream_journal_key(const char *key, bool *input,
+                                                 uint16_t *index,
+                                                 uint32_t *seq) {
+  if (!key || strlen(key) != 9)
+    return false;
+  if (strncmp(key, "si", 2) == 0) {
+    *input = true;
+  } else if (strncmp(key, "so", 2) == 0) {
+    *input = false;
+  } else {
+    return false;
+  }
+  char idx_ch = key[2];
+  if (idx_ch < '0' || idx_ch > '7')
+    return false;
+  *index = idx_ch - '0';
+  char *end = NULL;
+  *seq = strtoul(&key[3], &end, 16);
+  return end && *end == '\0';
+}
+
+static void avb_persist_fill_input_stream_record(
+    avb_state_s *state, uint16_t index, avb_persist_input_stream_s *dst) {
+  memset(dst, 0, sizeof(*dst));
+  if (index >= state->num_input_streams)
+    return;
+  const avb_listener_stream_s *src = &state->input_streams[index];
+  memcpy(dst->talker_id, src->talker_id, 8);
+  memcpy(dst->talker_uid, src->talker_uid, 2);
+  memcpy(dst->controller_id, src->controller_id, 8);
+  memcpy(dst->stream_format, &src->stream_format, 8);
+  dst->connected = src->connected ? 1 : 0;
+  dst->streaming_wait = src->stream_flags.streaming_wait ? 1 : 0;
+}
+
+static void avb_persist_fill_output_stream_record(
+    avb_state_s *state, uint16_t index, avb_persist_output_stream_journal_s *dst) {
+  memset(dst, 0, sizeof(*dst));
+  if (index >= state->num_output_streams)
+    return;
+  const avb_talker_stream_s *src = &state->output_streams[index];
+  memcpy(dst->stream.stream_format, &src->stream_format, 8);
+  dst->stream.presentation_time_offset_ns = src->presentation_time_offset_ns;
+}
+
+static esp_err_t avb_persist_append_stream_record(bool input, uint16_t index,
+                                                  const void *record,
+                                                  size_t record_len) {
+  if (index >= 8 || record_len != 32)
+    return ESP_ERR_INVALID_ARG;
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(AVB_NVS_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    avberr("NVS: failed to open stream journal: %d", err);
+    return err;
+  }
+
+  uint32_t seq = ++s_persist_journal_seq & 0xFFFFFF;
+  char key[10];
+  snprintf(key, sizeof(key), "%s%1x%06lx", input ? "si" : "so", index,
+           (unsigned long)seq);
+  err = nvs_set_blob(handle, key, record, record_len);
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+  nvs_close(handle);
+  if (err != ESP_OK) {
+    avberr("NVS: failed to append stream journal %s: %d", key, err);
+  } else {
+    avbinfo("NVS: appended %s stream journal %s (32 bytes)",
+            input ? "input" : "output", key);
+  }
+  return err;
+}
+
+esp_err_t avb_persist_append_input_stream(avb_state_s *state, uint16_t index) {
+  avb_persist_input_stream_journal_s rec = {0};
+  avb_persist_fill_input_stream_record(state, index, &rec.stream);
+  return avb_persist_append_stream_record(true, index, &rec, sizeof(rec));
+}
+
+esp_err_t avb_persist_append_output_stream(avb_state_s *state, uint16_t index) {
+  avb_persist_output_stream_journal_s rec;
+  avb_persist_fill_output_stream_record(state, index, &rec);
+  return avb_persist_append_stream_record(false, index, &rec, sizeof(rec));
+}
+
+static void avb_persist_apply(avb_state_s *state);
+
+static void avb_persist_replay_stream_journal(avb_state_s *state) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(AVB_NVS_NAMESPACE, NVS_READONLY, &handle);
+  if (err != ESP_OK)
+    return;
+
+  uint32_t latest_in[AVB_PERSIST_MAX_INPUT_STREAMS] = {0};
+  uint32_t latest_out[AVB_PERSIST_MAX_OUTPUT_STREAMS] = {0};
+  avb_persist_input_stream_journal_s in_rec[AVB_PERSIST_MAX_INPUT_STREAMS] = {0};
+  avb_persist_output_stream_journal_s out_rec[AVB_PERSIST_MAX_OUTPUT_STREAMS] =
+      {0};
+  int replayed = 0;
+
+  nvs_iterator_t it = NULL;
+  err = nvs_entry_find_in_handle(handle, NVS_TYPE_BLOB, &it);
+  while (err == ESP_OK && it) {
+    nvs_entry_info_t info;
+    if (nvs_entry_info(it, &info) == ESP_OK) {
+      bool input = false;
+      uint16_t index = 0;
+      uint32_t seq = 0;
+      if (avb_persist_parse_stream_journal_key(info.key, &input, &index,
+                                               &seq)) {
+        s_persist_journal_seq = seq > s_persist_journal_seq
+                                    ? seq
+                                    : s_persist_journal_seq;
+        if (input && index < AVB_PERSIST_MAX_INPUT_STREAMS &&
+            seq >= latest_in[index]) {
+          size_t len = sizeof(in_rec[index]);
+          if (nvs_get_blob(handle, info.key, &in_rec[index], &len) == ESP_OK &&
+              len == sizeof(in_rec[index])) {
+            latest_in[index] = seq;
+            replayed++;
+          }
+        } else if (!input && index < AVB_PERSIST_MAX_OUTPUT_STREAMS &&
+                   seq >= latest_out[index]) {
+          size_t len = sizeof(out_rec[index]);
+          if (nvs_get_blob(handle, info.key, &out_rec[index], &len) == ESP_OK &&
+              len == sizeof(out_rec[index])) {
+            latest_out[index] = seq;
+            replayed++;
+          }
+        }
+      }
+    }
+    err = nvs_entry_next(&it);
+  }
+  nvs_release_iterator(it);
+  nvs_close(handle);
+
+  for (int i = 0; i < state->num_input_streams &&
+                  i < AVB_PERSIST_MAX_INPUT_STREAMS;
+       i++) {
+    if (!latest_in[i])
+      continue;
+    state->persist.input_streams[i] = in_rec[i].stream;
+  }
+  for (int i = 0; i < state->num_output_streams &&
+                  i < AVB_PERSIST_MAX_OUTPUT_STREAMS;
+       i++) {
+    if (!latest_out[i])
+      continue;
+    state->persist.output_streams[i] = out_rec[i].stream;
+  }
+
+  if (replayed || s_persist_journal_seq) {
+    avbinfo("NVS: replayed stream journal through seq=%lu",
+            (unsigned long)s_persist_journal_seq);
+  }
+  avb_persist_apply(state);
+}
+
 static void avb_persist_gather(avb_state_s *state) {
   avb_persistent_data_s *p = &state->persist;
   memset(p, 0, sizeof(*p));
@@ -1272,6 +1702,7 @@ esp_err_t avb_persist_load(avb_state_s *state) {
       need_reinit = true;
     } else {
       avb_persist_apply(state);
+      avb_persist_replay_stream_journal(state);
       avbinfo("NVS: loaded persistent data (%d bytes, version %d)",
               (int)stored_size, state->persist.version);
     }

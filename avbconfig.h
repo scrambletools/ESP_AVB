@@ -18,14 +18,63 @@
 #define AVB_DEFAULT_MILAN_COMPLIANT false
 #endif
 
-/**
+#if CONFIG_ESP_AVB_AVB_LITE_COMPLIANT
+#define AVB_DEFAULT_AVB_LITE_COMPLIANT true
+#else
+#define AVB_DEFAULT_AVB_LITE_COMPLIANT false
+#endif
+
+/* Boot-time audio test. When AVB_AUDIO_TEST_BOOT_RATE_HZ is defined and
+ * non-zero, the AVB task plays a 1 kHz sine through the codec for
+ * AVB_AUDIO_TEST_DURATION_MS milliseconds at startup, after I2S/codec
+ * init and before the main control loop begins. The I2S clock is
+ * temporarily switched to the test rate and restored to
+ * config.default_sample_rate after the tone ends. Useful for verifying
+ * that each supported sample rate produces audible output through the
+ * full I2S → codec path independent of any AVTP streaming. */
+#ifndef AVB_AUDIO_TEST_BOOT_RATE_HZ
+#define AVB_AUDIO_TEST_BOOT_RATE_HZ 0 /* 0 = test disabled */
+#endif
+#ifndef AVB_AUDIO_TEST_DURATION_MS
+#define AVB_AUDIO_TEST_DURATION_MS 10000 /* 10 seconds */
+#endif
+
+/*
  * default AVB configuration
+ *
+ * note: dout and din represent data out and data in on on the mcu
+ * dout should map to din on the codec, din should map to dout on the codec
+ *
+ * for ESP32-P4-ETH board using onboard codec the following pins are used:
+ * MCLK: GPIO 13
+ * BCLK: GPIO 12
+ * WS: GPIO 10
+ * DOUT: GPIO 9
+ * DIN: GPIO 11
+ * I2C_SDA: GPIO 7
+ * I2C_SCL: GPIO 8
+ * PA: GPIO 53 (active high)
+ *
+ * for ESP32-P4-ETH board using a Scramble Hat the following pins are used:
+ * MCLK: GPIO 16
+ * BCLK: GPIO 17
+ * WS: GPIO 19
+ * DOUT: GPIO 18
+ * DIN: GPIO 54
+ * I2C_SDA: GPIO 21
+ * I2C_SCL: GPIO 20
+ * PA: GPIO -1
+ *
+ * pa_reverted: set true if the PA enable pin on the board is wired
+ * through an inverter (active-low). The codec driver and the
+ * identify/audio-test paths both honor this setting.
  */
 #define AVB_DEFAULT_CONFIG()                                                   \
   {.talker = true,                                                             \
    .listener = true,                                                           \
    .atdecc_control = true,                                                     \
    .milan_compliant = AVB_DEFAULT_MILAN_COMPLIANT,                             \
+   .avb_lite_compliant = AVB_DEFAULT_AVB_LITE_COMPLIANT,                       \
    .association_id = 0xffffffffffffffff,                                       \
    .model_id = 0x0000007468696e67,                                             \
    .port_id = 0x0001,                                                          \
@@ -44,7 +93,8 @@
                   .din = 11,                                                   \
                   .i2c_scl = 8,                                                \
                   .i2c_sda = 7,                                                \
-                  .pa = 53},                                                   \
+                  .pa = 53,                                                    \
+                  .pa_reverted = false},                                       \
    .eth_handle = NULL,                                                         \
    .codec_type = avb_codec_type_es8311,                                        \
    .default_sample_rate = 48000,                                               \

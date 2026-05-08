@@ -204,6 +204,7 @@ static esp_err_t codec_factory_es8311(avb_state_s *state,
       .ctrl_if = ctrl,
       .gpio_if = gpio_if,
       .pa_pin = state->config.codec_pins.pa,
+      .pa_reverted = state->config.codec_pins.pa_reverted,
       .use_mclk = true,
       .mclk_div = AVB_MCLK_MULTIPLE,
   };
@@ -237,6 +238,7 @@ static esp_err_t codec_factory_es8388(avb_state_s *state,
       .ctrl_if = ctrl,
       .gpio_if = gpio_if,
       .pa_pin = state->config.codec_pins.pa,
+      .pa_reverted = state->config.codec_pins.pa_reverted,
       .master_mode = false,
   };
   out->codec_if = es8388_codec_new(&cfg);

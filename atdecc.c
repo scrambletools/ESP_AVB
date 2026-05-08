@@ -12,8 +12,8 @@
 #include "avb.h"
 #include <stddef.h> /* offsetof */
 
-static uint16_t count_acmp_connected_talker_listeners(
-    avb_talker_stream_s *stream);
+static uint16_t
+count_acmp_connected_talker_listeners(avb_talker_stream_s *stream);
 
 /* Send ADP entity available message */
 int avb_send_adp_entity_available(avb_state_s *state) {
@@ -355,9 +355,8 @@ int avb_send_aecp_rsp_read_descr_configuration(avb_state_s *state,
   /* descriptor_type and descriptor_index (4 bytes) are already counted
    * in the initial control_data_len; only add the descriptor body, minus
    * the unused slots in the descriptor_counts array. */
-  control_data_len +=
-      sizeof(aem_config_desc_s) -
-      (4 * (AEM_MAX_NUM_DESC - descriptor_counts_count));
+  control_data_len += sizeof(aem_config_desc_s) -
+                      (4 * (AEM_MAX_NUM_DESC - descriptor_counts_count));
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -422,10 +421,9 @@ int avb_send_aecp_rsp_read_descr_audio_unit(avb_state_s *state,
   /* descriptor_type and descriptor_index (4 bytes) are already counted
    * in the initial control_data_len; only add the descriptor body, minus
    * the unused slots in the sampling_rates array. */
-  control_data_len +=
-      sizeof(aem_audio_unit_desc_s) -
-      (sizeof(aem_sample_rate_t) *
-       (AEM_MAX_NUM_SAMPLE_RATES - sampling_rates_count));
+  control_data_len += sizeof(aem_audio_unit_desc_s) -
+                      (sizeof(aem_sample_rate_t) *
+                       (AEM_MAX_NUM_SAMPLE_RATES - sampling_rates_count));
 
   // set the control data length
   msg->common.header.control_data_len_h = (control_data_len >> 8) & 0xFF;
@@ -459,7 +457,8 @@ int avb_send_aecp_rsp_read_descr_stream(avb_state_s *state,
     localized_description = 5;
     current_format = state->output_streams[index].stream_format;
     if (index == avb_get_crf_output_index(state)) {
-      localized_description = 18; // strings desc 2, string_2: CRF Media Clock Out
+      localized_description =
+          18; // strings desc 2, string_2: CRF Media Clock Out
     }
   } else if (index == avb_get_crf_input_index(state)) {
     localized_description = 17; // strings desc 2, string_1: CRF Media Clock In
@@ -974,14 +973,14 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
   case 0: { /* IDENTIFY */
     int localized_description = 9;
     uint16_t control_value_type = 1; // CONTROL_LINEAR_UINT8
-    uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
-                               0x00, 0x00, 0x00, 0x01};
+    uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x01};
     aem_identify_control_value_s control_values = {
         .values = {0, 255, 255, 0, 0},
         .units = {0},
         .string_ref = {0, 21},
     };
-    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_0], 64);
+    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_0],
+           64);
     int_to_octets(&localized_description, descriptor.localized_description, 2);
     int_to_octets(&control_value_type, descriptor.control_value_type, 2);
     memcpy(descriptor.control_type, control_type, 8);
@@ -994,11 +993,12 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
       avbwarn("Control index 1 (volume) not available: listener not enabled");
       return OK;
     }
-    int localized_desc_vol = 14; /* strings desc 1, string_6 */
+    int localized_desc_vol = 14;     /* strings desc 1, string_6 */
     uint16_t control_value_type = 2; // CONTROL_LINEAR_INT16
     uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
                                0x00, 0x00, 0x00, 0x04}; // GAIN
-    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_1], 64);
+    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_1],
+           64);
     int_to_octets(&localized_desc_vol, descriptor.localized_description, 2);
     int_to_octets(&control_value_type, descriptor.control_value_type, 2);
     memcpy(descriptor.control_type, control_type, 8);
@@ -1015,8 +1015,8 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
     int_to_octets(&r->vol_default_tenth_db, v + 6, 2);
     int_to_octets(&current, v + 8, 2);
     /* units: multiplier=-1 (0xFF), code=0xB0 (DB) */
-    v[10] = 0xFF; /* multiplier */
-    v[11] = 0xB0; /* code: DB */
+    v[10] = 0xFF;                   /* multiplier */
+    v[11] = 0xB0;                   /* code: DB */
     uint16_t value_string_ref = 19; /* strings desc 2, string_3: Volume */
     int_to_octets(&value_string_ref, v + 12, 2);
     break;
@@ -1026,11 +1026,12 @@ int avb_send_aecp_rsp_read_descr_control(avb_state_s *state,
       avbwarn("Control index 2 (mic gain) not available: talker not enabled");
       return OK;
     }
-    int localized_desc_gain = 16; /* strings desc 2, string_0 */
+    int localized_desc_gain = 16;    /* strings desc 2, string_0 */
     uint16_t control_value_type = 2; // CONTROL_LINEAR_INT16
     uint8_t control_type[8] = {0x90, 0xe0, 0xf0, 0x00,
                                0x00, 0x00, 0x00, 0x04}; // GAIN
-    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_2], 64);
+    memcpy(descriptor.object_name, state->descriptor_names[AVB_NAME_CONTROL_2],
+           64);
     int_to_octets(&localized_desc_gain, descriptor.localized_description, 2);
     int_to_octets(&control_value_type, descriptor.control_value_type, 2);
     memcpy(descriptor.control_type, control_type, 8);
@@ -1150,15 +1151,14 @@ int avb_process_aecp_cmd_set_control(avb_state_s *state, aecp_message_u *msg,
    * command length — some controllers send extra data (full value_details)
    * in the command that must not be echoed back. */
   uint16_t values_len = (desc_index == 0) ? 1 : 2;
-  uint16_t control_data_len =
-      sizeof(aecp_common_s) + sizeof(aecp_common_aem_s) + 4 + values_len -
-      AVTP_CDL_PREAMBLE_LEN;
+  uint16_t control_data_len = sizeof(aecp_common_s) +
+                              sizeof(aecp_common_aem_s) + 4 + values_len -
+                              AVTP_CDL_PREAMBLE_LEN;
   msg->header.control_data_len_h = (control_data_len >> 8) & 0xFF;
   msg->header.control_data_len = control_data_len & 0xFF;
   uint16_t msg_len =
       sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
-  int ret =
-      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  int ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
   if (ret < 0) {
     avberr("send AECP SET_CONTROL response failed: %d", errno);
   }
@@ -1208,16 +1208,15 @@ int avb_process_aecp_cmd_get_control(avb_state_s *state, aecp_message_u *msg,
 
   /* Set control_data_len to include the values field */
   uint16_t values_len = (desc_index == 0) ? 1 : 2;
-  uint16_t control_data_len =
-      sizeof(aecp_common_s) + sizeof(aecp_common_aem_s) + 4 + values_len -
-      AVTP_CDL_PREAMBLE_LEN;
+  uint16_t control_data_len = sizeof(aecp_common_s) +
+                              sizeof(aecp_common_aem_s) + 4 + values_len -
+                              AVTP_CDL_PREAMBLE_LEN;
   msg->header.control_data_len_h = (control_data_len >> 8) & 0xFF;
   msg->header.control_data_len = control_data_len & 0xFF;
 
   uint16_t msg_len =
       sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
-  int ret =
-      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  int ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
   if (ret < 0) {
     avberr("send AECP GET_CONTROL response failed: %d", errno);
   }
@@ -1423,8 +1422,7 @@ int avb_process_adp(avb_state_s *state, adp_message_s *msg,
 /* Resolve a descriptor's object_name pointer from type/index/name_index.
  * Returns NULL if the descriptor type is not supported for naming. */
 static uint8_t *avb_resolve_name_ptr(avb_state_s *state, uint16_t desc_type,
-                                     uint16_t desc_index,
-                                     uint16_t name_index) {
+                                     uint16_t desc_index, uint16_t name_index) {
   switch (desc_type) {
   case aem_desc_type_entity:
     if (name_index == 0)
@@ -1438,18 +1436,18 @@ static uint8_t *avb_resolve_name_ptr(avb_state_s *state, uint16_t desc_type,
                : NULL;
   case aem_desc_type_stream_input:
     if (desc_index < AVB_MAX_NUM_INPUT_STREAMS && name_index == 0)
-      return (uint8_t *)state->descriptor_names[AVB_NAME_STREAM_INPUT_0 +
-                                                desc_index];
+      return (uint8_t *)
+          state->descriptor_names[AVB_NAME_STREAM_INPUT_0 + desc_index];
     return NULL;
   case aem_desc_type_stream_output:
     if (desc_index < AVB_MAX_NUM_OUTPUT_STREAMS && name_index == 0)
-      return (uint8_t *)state->descriptor_names[AVB_NAME_STREAM_OUTPUT_0 +
-                                                desc_index];
+      return (uint8_t *)
+          state->descriptor_names[AVB_NAME_STREAM_OUTPUT_0 + desc_index];
     return NULL;
   case aem_desc_type_control:
     if (desc_index < AEM_NUM_CONTROLS && name_index == 0)
-      return (uint8_t *)state->descriptor_names[AVB_NAME_CONTROL_0 +
-                                                desc_index];
+      return (uint8_t *)
+          state->descriptor_names[AVB_NAME_CONTROL_0 + desc_index];
     return NULL;
   default:
     return NULL;
@@ -1469,8 +1467,8 @@ int avb_process_aecp_cmd_set_name(avb_state_s *state, aecp_message_u *msg,
   uint8_t *name = data + 8; /* 64-byte name field at offset 8 */
   uint8_t status = aecp_status_success;
 
-  uint8_t *target = avb_resolve_name_ptr(state, desc_type, desc_index,
-                                         name_index);
+  uint8_t *target =
+      avb_resolve_name_ptr(state, desc_type, desc_index, name_index);
   if (target) {
     memcpy(target, name, 64);
     /* Sync to canonical locations for descriptors that read from elsewhere */
@@ -1480,8 +1478,8 @@ int avb_process_aecp_cmd_set_name(avb_state_s *state, aecp_message_u *msg,
       memcpy(state->own_entity.detail.group_name, target, 64);
     else if (desc_type == aem_desc_type_avb_interface)
       memcpy(state->avb_interface.object_name, target, 64);
-    avbinfo("SET_NAME: type=0x%04x idx=%d name='%.64s'",
-            desc_type, desc_index, (char *)target);
+    avbinfo("SET_NAME: type=0x%04x idx=%d name='%.64s'", desc_type, desc_index,
+            (char *)target);
     avb_persist_request_save(state);
   } else {
     status = aecp_status_not_implemented;
@@ -1498,8 +1496,7 @@ int avb_process_aecp_cmd_set_name(avb_state_s *state, aecp_message_u *msg,
       (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
   uint16_t msg_len =
       sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
-  int ret =
-      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  int ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
   if (ret < 0) {
     avberr("send AECP SET_NAME response failed: %d", errno);
   }
@@ -1520,8 +1517,8 @@ int avb_process_aecp_cmd_get_name(avb_state_s *state, aecp_message_u *msg,
   uint8_t *name = data + 8;
   uint8_t status = aecp_status_success;
 
-  uint8_t *target = avb_resolve_name_ptr(state, desc_type, desc_index,
-                                         name_index);
+  uint8_t *target =
+      avb_resolve_name_ptr(state, desc_type, desc_index, name_index);
   if (target) {
     memcpy(name, target, 64);
   } else {
@@ -1533,16 +1530,15 @@ int avb_process_aecp_cmd_get_name(avb_state_s *state, aecp_message_u *msg,
   msg->header.status_valtime = status;
 
   /* Update control_data_len to include the 64-byte name field */
-  uint16_t control_data_len =
-      sizeof(aecp_common_s) + sizeof(aecp_common_aem_s) + 8 + 64 -
-      AVTP_CDL_PREAMBLE_LEN;
+  uint16_t control_data_len = sizeof(aecp_common_s) +
+                              sizeof(aecp_common_aem_s) + 8 + 64 -
+                              AVTP_CDL_PREAMBLE_LEN;
   msg->header.control_data_len_h = (control_data_len >> 8) & 0xFF;
   msg->header.control_data_len = control_data_len & 0xFF;
 
   uint16_t msg_len =
       sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
-  int ret =
-      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  int ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
   if (ret < 0) {
     avberr("send AECP GET_NAME response failed: %d", errno);
   }
@@ -1613,12 +1609,126 @@ int avb_process_aecp_addr_access(avb_state_s *state, aecp_message_u *msg,
       (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
   uint16_t msg_len =
       sizeof(atdecc_header_s) + sizeof(unique_id_t) + control_data_len;
-  int ret =
-      avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  int ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
   if (ret < 0) {
     avberr("send AECP ADDRESS_ACCESS response failed: %d", errno);
   }
   return ret;
+}
+
+/* ---- AVB Community Vendor Unique (CVU) command handlers ---- */
+
+int avb_send_cvu_srp_attr(avb_state_s *state, void *attr, int attr_list_len,
+                           const char *label) {
+  msrp_attr_header_s *header = (msrp_attr_header_s *)attr;
+  size_t attr_size = 4 + attr_list_len; /* attr hdr w/o vechead + attr list */
+  aecp_message_u msg;
+  struct timespec ts;
+  memset(&msg, 0, sizeof(msg));
+
+  msg.cvu.common.header.subtype = avtp_subtype_aecp;
+  msg.cvu.common.header.version = 0;
+  msg.cvu.common.header.sv = 0;
+  msg.cvu.common.header.msg_type = aecp_msg_type_vendor_unique_command;
+  msg.cvu.common.header.status_valtime = aecp_status_success;
+  uint16_t msg_len = sizeof(aecp_cvu_common_s) + attr_size;
+  uint16_t cdl = msg_len - AVTP_CDL_PREAMBLE_LEN;
+  msg.cvu.common.header.control_data_len_h = (cdl >> 8) & 0x07;
+  msg.cvu.common.header.control_data_len = cdl & 0xFF;
+  memcpy(msg.cvu.common.target_entity_id, &EMPTY_ID, UNIQUE_ID_LEN);
+  memcpy(msg.cvu.common.controller_entity_id,
+         state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
+  uint16_t seq_id = state->aecp_seq_id++;
+  int_to_octets(&seq_id, msg.cvu.common.seq_id, 2);
+  uint8_t protocol_id[] = CVU_PROTOCOL_ID;
+  memcpy(msg.cvu.protocol_id, protocol_id, sizeof(msg.cvu.protocol_id));
+  msg.cvu.command_type = header->attr_type;
+  memcpy(((uint8_t *)&msg) + sizeof(aecp_cvu_common_s), attr, attr_size);
+
+  eth_addr_t dest_addr;
+  memcpy(&dest_addr, &BCAST_MAC_ADDR, ETH_ADDR_LEN);
+  int ret =
+      avb_net_send_to(state, ethertype_avtp, &msg, msg_len, &ts, &dest_addr);
+  if (ret < 0) {
+    avberr("send CVU %s failed: %d", label, errno);
+  }
+  return ret;
+}
+
+/* Send a CVU response. CVU SRP commands are transported as AECP vendor unique
+ * commands but semantically originate from the talker/listener endpoint itself,
+ * just like native MSRP. The response reflects the command payload with AECP
+ * status set. */
+static int avb_send_cvu_response(avb_state_s *state, void *msg,
+                                 eth_addr_t *src_addr, uint16_t msg_len,
+                                 uint8_t status) {
+  struct timespec ts;
+  aecp_cvu_common_s *cvu = (aecp_cvu_common_s *)msg;
+  cvu->common.header.msg_type = aecp_msg_type_vendor_unique_response;
+  cvu->common.header.status_valtime = status;
+  uint16_t cdl = msg_len - AVTP_CDL_PREAMBLE_LEN;
+  cvu->common.header.control_data_len_h = (cdl >> 8) & 0x07;
+  cvu->common.header.control_data_len = cdl & 0xFF;
+  int ret = avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
+  if (ret < 0)
+    avberr("send CVU response failed: %d", errno);
+  return ret;
+}
+
+static uint16_t avb_aecp_msg_len(aecp_message_u *msg) {
+  uint16_t cdl =
+      (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
+  return AVTP_CDL_PREAMBLE_LEN + cdl;
+}
+
+/* AVB Lite CVU SRP wrapper. The embedded payload is a normal MSRP attribute;
+ * synthesize a one-attribute MSRP buffer and route through the existing MSRP
+ * handlers so talker/listener state logic stays in exactly one place. */
+int avb_process_aecp_cmd_cvu_srp(avb_state_s *state, aecp_message_u *msg,
+                                  eth_addr_t *src_addr) {
+  size_t msg_len = avb_aecp_msg_len(msg);
+  if (msg_len < sizeof(aecp_cvu_common_s) + sizeof(msrp_attr_header_s)) {
+    return avb_send_cvu_response(state, msg, src_addr, msg_len,
+                                 aecp_status_bad_arguments);
+  }
+
+  uint8_t *payload = ((uint8_t *)msg) + sizeof(aecp_cvu_common_s);
+  msrp_attr_header_s *attr = (msrp_attr_header_s *)payload;
+  size_t attr_size = octets_to_uint(attr->attr_list_len, 2) + 4;
+  size_t max_attr = msg_len - sizeof(aecp_cvu_common_s);
+
+  if (attr_size < sizeof(msrp_attr_header_s) || attr_size > max_attr ||
+      attr_size > sizeof(((msrp_msgbuf_s *)0)->messages_raw)) {
+    return avb_send_cvu_response(state, msg, src_addr, msg_len,
+                                 aecp_status_bad_arguments);
+  }
+
+  msrp_msgbuf_s msrp_msg;
+  memset(&msrp_msg, 0, sizeof(msrp_msg));
+  memcpy(msrp_msg.messages_raw, attr, attr_size);
+
+  int ret = OK;
+  switch (attr->attr_type) {
+  case msrp_attr_type_talker_advertise:
+    ret = avb_process_msrp_talker(state, &msrp_msg, 0, attr_size, false,
+                                  src_addr);
+    break;
+  case msrp_attr_type_talker_failed:
+    ret =
+        avb_process_msrp_talker(state, &msrp_msg, 0, attr_size, true, src_addr);
+    break;
+  case msrp_attr_type_listener:
+    ret = avb_process_msrp_listener(state, &msrp_msg, 0, attr_size, src_addr);
+    break;
+  default:
+    avbinfo("CVU: unsupported MSRP attribute type 0x%02x", attr->attr_type);
+    return avb_send_cvu_response(state, msg, src_addr, msg_len,
+                                 aecp_status_not_implemented);
+  }
+
+  return avb_send_cvu_response(state, msg, src_addr, msg_len,
+                               ret == OK ? aecp_status_success
+                                         : aecp_status_bad_arguments);
 }
 
 /* ---- Milan Vendor Unique (MVU) command handlers ---- */
@@ -1655,8 +1765,8 @@ int avb_process_aecp_cmd_mvu_get_milan_info(avb_state_s *state,
                                             eth_addr_t *src_addr) {
   if (!state->config.milan_compliant) {
     /* Reflect command with NOT_IMPLEMENTED — same length as incoming */
-    uint16_t cdl = (msg->header.control_data_len_h << 8) |
-                   msg->header.control_data_len;
+    uint16_t cdl =
+        (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
     uint16_t msg_len = AVTP_CDL_PREAMBLE_LEN + cdl;
     return avb_send_mvu_response(state, msg, src_addr, msg_len,
                                  aecp_status_not_implemented);
@@ -1681,7 +1791,7 @@ int avb_process_aecp_cmd_mvu_get_milan_info(avb_state_s *state,
 int avb_process_aecp_cmd_mvu_get_system_unique_id(avb_state_s *state,
                                                   aecp_message_u *msg,
                                                   eth_addr_t *src_addr) {
-  aecp_mvu_system_unique_id_s rsp;
+  aecp_mvu_get_system_unique_id_rsp_s rsp;
   memset(&rsp, 0, sizeof(rsp));
   memcpy(&rsp.mvu, msg, sizeof(aecp_mvu_common_s));
   /* number: 0 (not assigned), name: empty string (defaults) */
@@ -1689,6 +1799,10 @@ int avb_process_aecp_cmd_mvu_get_system_unique_id(avb_state_s *state,
   return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
                                aecp_status_success);
 }
+
+static int avb_send_listener_talker_command(avb_state_s *state,
+                                            acmp_message_s *msg,
+                                            bool disconnect, bool mvu_bind);
 
 /* BIND_STREAM / UNBIND_STREAM (MVU 0x0005 / 0x0006)
  * Binds/unbinds a listener stream input to a talker.
@@ -1699,6 +1813,7 @@ int avb_process_aecp_cmd_mvu_get_system_unique_id(avb_state_s *state,
 int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
                                          aecp_message_u *msg,
                                          eth_addr_t *src_addr, bool unbind) {
+  /* UNBIND_STREAM */
   if (unbind) {
     aecp_mvu_unbind_stream_s *cmd = (aecp_mvu_unbind_stream_s *)msg;
     uint16_t desc_type = octets_to_uint(cmd->descriptor_type, 2);
@@ -1710,46 +1825,34 @@ int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
                                    aecp_status_no_such_descriptor);
     }
 
-    /* Per Milan §5.5.3.6.45, UNBIND_STREAM is equivalent to
-     * DISCONNECT_RX. Route through the exact same sequence AAF takes
-     * so both streams end up with the same cleared state (which is
-     * the behavior that's been working for AAF): synthesize an
-     * acmp_message_s with the current binding and invoke
-     * avb_disconnect_listener + DISCONNECT_TX_COMMAND. */
+    /* Per Milan §5.5.3.6.45, UNBIND_STREAM is equivalent to DISCONNECT_RX for
+     * local listener state. Synthesize an ACMP message from the current binding
+     * and route through the shared CONNECT/DISCONNECT_RX path. */
     avb_listener_stream_s *stream = &state->input_streams[desc_index];
-    if (stream->connected) {
-      acmp_message_s synth = {0};
-      memcpy(synth.talker_entity_id, stream->talker_id, UNIQUE_ID_LEN);
-      memcpy(synth.talker_uid, stream->talker_uid, 2);
-      memcpy(synth.listener_entity_id,
-             state->own_entity.summary.entity_id, UNIQUE_ID_LEN);
-      int_to_octets(&desc_index, synth.listener_uid, 2);
-      memcpy(synth.controller_entity_id, stream->controller_id,
-             UNIQUE_ID_LEN);
-      /* Stops stream_in, sends MSRP Leave, memsets struct (preserving
-       * format + vlan), requests NVS save. */
-      avb_disconnect_listener(state, &synth);
-      /* Tell the talker to drop its ACMP connection_count (mirrors
-       * what avb_process_acmp_connect_rx_command does after its own
-       * avb_disconnect_listener call). */
-      avb_send_acmp_command(state, acmp_msg_type_disconnect_tx_command,
-                            &synth, false);
+    acmp_message_s synth = {0};
+    memcpy(synth.talker_entity_id, stream->talker_id, UNIQUE_ID_LEN);
+    memcpy(synth.talker_uid, stream->talker_uid, 2);
+    memcpy(synth.listener_entity_id, state->own_entity.summary.entity_id,
+           UNIQUE_ID_LEN);
+    int_to_octets(&desc_index, synth.listener_uid, 2);
+    memcpy(synth.controller_entity_id, msg->common.controller_entity_id,
+           UNIQUE_ID_LEN);
+
+    int ret = avb_process_acmp_connect_rx_command(state, &synth, true, true);
+    if (ret >= 0) {
+      ret = avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
+                                  aecp_status_success);
+      avb_send_listener_talker_command(state, &synth, true, true);
     } else {
-      /* Not currently connected but may have a saved binding — clear
-       * it and persist so fast-connect doesn't fire on next boot. */
-      avtp_stream_format_s saved_format = stream->stream_format;
-      uint8_t saved_vlan[2];
-      memcpy(saved_vlan, stream->vlan_id, 2);
-      memset(stream, 0, sizeof(*stream));
-      stream->stream_format = saved_format;
-      memcpy(stream->vlan_id, saved_vlan, 2);
-      avb_persist_request_save(state);
+      ret = avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
+                                  aecp_status_bad_arguments);
     }
     avbinfo("MVU: unbind stream input %d", desc_index);
-    return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
-                                 aecp_status_success);
+    avb_persist_append_input_stream(state, desc_index);
+    return ret;
   }
 
+  /* BIND_STREAM */
   aecp_mvu_bind_stream_s *cmd = (aecp_mvu_bind_stream_s *)msg;
   uint16_t desc_type = octets_to_uint(cmd->descriptor_type, 2);
   uint16_t desc_index = octets_to_uint(cmd->descriptor_index, 2);
@@ -1761,58 +1864,75 @@ int avb_process_aecp_cmd_mvu_bind_stream(avb_state_s *state,
   }
 
   avb_listener_stream_s *stream = &state->input_streams[desc_index];
-  memcpy(stream->talker_id, cmd->talker_entity_id, UNIQUE_ID_LEN);
-  memcpy(stream->talker_uid, cmd->talker_stream_index, 2);
-  memcpy(stream->controller_id, msg->common.controller_entity_id,
-         UNIQUE_ID_LEN);
   uint16_t flags = octets_to_uint(cmd->flags, 2);
   /* Milan v1.3 §5.4.4.6: STREAMING_WAIT is bit 15 (MSB) of the flags field */
   stream->stream_flags.streaming_wait = (flags & 0x8000) ? 1 : 0;
 
-  /* Milan §5.5.3.6.17 step 5: save binding params to NVM BEFORE probing,
-   * so a reboot mid-probe still reconnects on next boot. */
-  avb_persist_request_save(state);
-
-  /* Send ACMP CONNECT_TX_COMMAND to the talker to get stream info */
-  acmp_message_s acmp_cmd = {0};
-  acmp_cmd.header.subtype = avtp_subtype_acmp;
-  acmp_cmd.header.msg_type = acmp_msg_type_connect_tx_command;
-  memcpy(acmp_cmd.talker_entity_id, stream->talker_id, UNIQUE_ID_LEN);
-  memcpy(acmp_cmd.talker_uid, stream->talker_uid, 2);
-  memcpy(acmp_cmd.listener_entity_id, state->own_entity.summary.entity_id,
+  acmp_message_s synth = {0};
+  memcpy(synth.talker_entity_id, cmd->talker_entity_id, UNIQUE_ID_LEN);
+  memcpy(synth.talker_uid, cmd->talker_stream_index, 2);
+  memcpy(synth.listener_entity_id, state->own_entity.summary.entity_id,
          UNIQUE_ID_LEN);
   uint16_t listener_uid = desc_index;
-  int_to_octets(&listener_uid, acmp_cmd.listener_uid, 2);
-  memcpy(acmp_cmd.controller_entity_id, msg->common.controller_entity_id,
+  int_to_octets(&listener_uid, synth.listener_uid, 2);
+  memcpy(synth.controller_entity_id, msg->common.controller_entity_id,
          UNIQUE_ID_LEN);
 
-  avb_send_acmp_command(state, acmp_msg_type_connect_tx_command, &acmp_cmd,
-                        false);
-  stream->pending_connection = true;
+  int ret = avb_process_acmp_connect_rx_command(state, &synth, false, true);
+  if (ret >= 0) {
+    ret = avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
+                                aecp_status_success);
+    avb_send_listener_talker_command(state, &synth, false, true);
+  } else {
+    ret = avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
+                                aecp_status_bad_arguments);
+  }
   avbinfo("MVU: bind stream input %d to talker", desc_index);
-  return avb_send_mvu_response(state, cmd, src_addr, sizeof(*cmd),
-                               aecp_status_success);
+  avb_persist_append_input_stream(state, desc_index);
+  return ret;
 }
 
-/* GET_MEDIA_CLOCK_REFERENCE_INFO (MVU 0x0004)
- * Layout after aecp_mvu_s: clock_domain_index(2)
- * Response adds: flags(2) default_mcr_prio(1) user_mcr_prio(1)
- *   media_clock_domain_name(64) */
-int avb_process_aecp_cmd_mvu_get_media_clock_ref_info(avb_state_s *state,
-                                                      aecp_message_u *msg,
-                                                      eth_addr_t *src_addr) {
-  aecp_mvu_media_clock_ref_info_s *cmd =
-      (aecp_mvu_media_clock_ref_info_s *)msg;
+static uint8_t s_mcr_user_prio = 192;
+static uint8_t s_mcr_domain_name[64] = "DEFAULT";
+
+/* SET/GET_MEDIA_CLOCK_REFERENCE_INFO (MVU 0x0003 / 0x0004)
+ * Layout: clock_domain_index(2), flags(1), reserved(1), default_mcr_prio(1),
+ * user_mcr_prio(1), reserved(4), media_clock_domain_name(64).
+ * The command is mandatory for Milan PAADs; Hive sends it during Milan stream
+ * binding, so replying NOT_IMPLEMENTED makes connection fail as unsupported. */
+int avb_process_aecp_cmd_mvu_media_clock_ref_info(avb_state_s *state,
+                                                  aecp_message_u *msg,
+                                                  eth_addr_t *src_addr,
+                                                  bool set) {
+  (void)state;
+  aecp_mvu_media_clock_ref_info_s *cmd = (aecp_mvu_media_clock_ref_info_s *)msg;
+  uint16_t clock_domain_index = octets_to_uint(cmd->clock_domain_index, 2);
 
   aecp_mvu_media_clock_ref_info_s rsp;
   memset(&rsp, 0, sizeof(rsp));
   memcpy(&rsp.mvu, &cmd->mvu, sizeof(aecp_mvu_common_s));
   memcpy(rsp.clock_domain_index, cmd->clock_domain_index, 2);
-  rsp.flags = 0x03; /* bits 7+6: user_mcr_prio and domain_name valid */
+
+  if (clock_domain_index != 0) {
+    return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
+                                 aecp_status_no_such_descriptor);
+  }
+
+  /* Milan Table 5.18: bit values are 0x01 (user_mcr_prio valid) and
+   * 0x02 (media_clock_domain_name valid). We support changing both. */
+  if (set) {
+    if (cmd->flags & 0x01)
+      s_mcr_user_prio = cmd->user_mcr_prio;
+    if (cmd->flags & 0x02)
+      memcpy(s_mcr_domain_name, cmd->media_clock_domain_name,
+             sizeof(s_mcr_domain_name));
+  }
+
+  rsp.flags = 0x03;
   rsp.default_mcr_prio = 192; /* Stageboxes/audio interfaces */
-  rsp.user_mcr_prio = 192;
-  strncpy((char *)rsp.media_clock_domain_name, "DEFAULT",
-          sizeof(rsp.media_clock_domain_name));
+  rsp.user_mcr_prio = s_mcr_user_prio;
+  memcpy(rsp.media_clock_domain_name, s_mcr_domain_name,
+         sizeof(rsp.media_clock_domain_name));
 
   return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
                                aecp_status_success);
@@ -1826,8 +1946,8 @@ int avb_process_aecp_cmd_mvu_get_media_clock_ref_info(avb_state_s *state,
 int avb_process_aecp_cmd_mvu_get_stream_input_info_ex(avb_state_s *state,
                                                       aecp_message_u *msg,
                                                       eth_addr_t *src_addr) {
-  aecp_mvu_get_stream_input_info_ex_cmd_s *cmd =
-      (aecp_mvu_get_stream_input_info_ex_cmd_s *)msg;
+  aecp_mvu_get_stream_input_info_ex_s *cmd =
+      (aecp_mvu_get_stream_input_info_ex_s *)msg;
   uint16_t desc_index = octets_to_uint(cmd->descriptor_index, 2);
 
   aecp_mvu_get_stream_input_info_ex_rsp_s rsp;
@@ -1852,169 +1972,6 @@ int avb_process_aecp_cmd_mvu_get_stream_input_info_ex(avb_state_s *state,
 
   return avb_send_mvu_response(state, &rsp, src_addr, sizeof(rsp),
                                aecp_status_success);
-}
-
-int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
-                     eth_addr_t *src_addr) {
-
-  /* Drop commands not addressed to us. Responses must always pass through
-   * so the inflight tracker can match them. */
-  uint8_t msg_type = msg->header.msg_type;
-  bool is_command = (msg_type == aecp_msg_type_aem_command ||
-                     msg_type == aecp_msg_type_addr_access_command ||
-                     msg_type == aecp_msg_type_vendor_unique_command);
-  if (is_command &&
-      memcmp(msg->common.target_entity_id,
-             state->own_entity.summary.entity_id, UNIQUE_ID_LEN) != 0) {
-    return OK;
-  }
-
-  /* Process ADDRESS_ACCESS command (separate message type from AEM) */
-  if (msg->header.msg_type == aecp_msg_type_addr_access_command) {
-    return avb_process_aecp_addr_access(state, msg, src_addr);
-  }
-
-  /* Process Milan Vendor Unique command */
-  if (msg->header.msg_type == aecp_msg_type_vendor_unique_command) {
-    /* Validate MVU protocol ID */
-    aecp_mvu_common_s *mvu = (aecp_mvu_common_s *)msg;
-    uint8_t expected_pid[] = MVU_PROTOCOL_ID;
-    if (memcmp(mvu->protocol_id, expected_pid, 6) != 0) {
-      return OK; /* Not Milan MVU — ignore */
-    }
-    uint16_t mvu_cmd = (mvu->command_type_h << 8) | mvu->command_type;
-    switch (mvu_cmd) {
-    case mvu_cmd_get_milan_info:
-      return avb_process_aecp_cmd_mvu_get_milan_info(state, msg, src_addr);
-    case mvu_cmd_bind_stream:
-      return avb_process_aecp_cmd_mvu_bind_stream(state, msg, src_addr, false);
-    case mvu_cmd_unbind_stream:
-      return avb_process_aecp_cmd_mvu_bind_stream(state, msg, src_addr, true);
-    case mvu_cmd_get_system_unique_id:
-      return avb_process_aecp_cmd_mvu_get_system_unique_id(state, msg, src_addr);
-    case mvu_cmd_get_media_clock_ref_info:
-      return avb_process_aecp_cmd_mvu_get_media_clock_ref_info(state, msg,
-                                                               src_addr);
-    case mvu_cmd_get_stream_input_info_ex:
-      return avb_process_aecp_cmd_mvu_get_stream_input_info_ex(state, msg,
-                                                               src_addr);
-    default:
-      /* Milan v1.3 §5.4.3: unsupported MVU commands must be reflected back
-       * with NOT_IMPLEMENTED status rather than silently dropped */
-      avbinfo("MVU: unsupported command 0x%04x, returning NOT_IMPLEMENTED",
-              mvu_cmd);
-      uint16_t cdl = (mvu->common.header.control_data_len_h << 8) |
-                     mvu->common.header.control_data_len;
-      uint16_t msg_len = AVTP_CDL_PREAMBLE_LEN + cdl;
-      return avb_send_mvu_response(state, msg, src_addr, msg_len,
-                                   aecp_status_not_implemented);
-    }
-  }
-
-  /* Process AECP command */
-  if (msg->header.msg_type == aecp_msg_type_aem_command) {
-    switch (msg->basic.aem.command_type) {
-    case aecp_cmd_code_register_unsol_notif:
-      return avb_process_aecp_cmd_register_unsol_notif(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_deregister_unsol_notif:
-      return avb_process_aecp_cmd_deregister_unsol_notif(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_acquire_entity:
-      return avb_process_aecp_cmd_acquire_entity(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_lock_entity:
-      return avb_process_aecp_cmd_lock_entity(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_entity_available:
-      return avb_process_aecp_cmd_entity_available(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_configuration:
-      return avb_process_aecp_cmd_get_configuration(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_read_descriptor:
-      return avb_process_aecp_cmd_read_descriptor(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_set_stream_format:
-      return avb_process_aecp_cmd_set_stream_format(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_stream_format:
-      return avb_process_aecp_cmd_get_stream_format(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_clock_source:
-      return avb_process_aecp_cmd_get_clock_source(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_set_clock_source:
-      return avb_process_aecp_cmd_set_clock_source(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_stream_info:
-      return avb_process_aecp_cmd_get_stream_info(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_avb_info:
-      return avb_process_aecp_cmd_get_avb_info(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_as_path:
-      return avb_process_aecp_cmd_get_as_path(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_counters:
-      return avb_process_aecp_cmd_get_counters(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_set_max_transit_time:
-    case aecp_cmd_code_get_max_transit_time:
-      return avb_process_aecp_cmd_get_max_transit_time(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_set_name:
-      return avb_process_aecp_cmd_set_name(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_name:
-      return avb_process_aecp_cmd_get_name(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_set_control:
-      return avb_process_aecp_cmd_set_control(state, msg, src_addr);
-      break;
-    case aecp_cmd_code_get_control:
-      return avb_process_aecp_cmd_get_control(state, msg, src_addr);
-      break;
-    default: {
-      /* IEEE 1722.1-2021 §9.2.1.3.1.4: unhandled AEM commands must be reflected
-       * back with NOT_IMPLEMENTED status rather than silently dropped */
-      avbinfo("AECP: unhandled AEM command 0x%04x, returning NOT_IMPLEMENTED",
-              msg->basic.aem.command_type);
-      struct timespec ts;
-      uint16_t cdl = (msg->header.control_data_len_h << 8) |
-                     msg->header.control_data_len;
-      uint16_t msg_len = AVTP_CDL_PREAMBLE_LEN + cdl;
-      msg->header.msg_type = aecp_msg_type_aem_response;
-      msg->header.status_valtime = aecp_status_not_implemented;
-      return avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts, src_addr);
-    }
-    }
-  }
-  /* Process AECP response */
-  else {
-    switch (msg->basic.aem.command_type) {
-    case aecp_cmd_code_register_unsol_notif:
-      return avb_process_aecp_rsp_register_unsol_notif(state, msg);
-      break;
-    case aecp_cmd_code_deregister_unsol_notif:
-      return avb_process_aecp_rsp_deregister_unsol_notif(state, msg);
-      break;
-    case aecp_cmd_code_entity_available:
-      return avb_process_aecp_rsp_entity_available(state, msg);
-      break;
-    case aecp_cmd_code_controller_available:
-      return avb_process_aecp_rsp_controller_available(state, msg);
-      break;
-    case aecp_cmd_code_get_stream_info:
-      return avb_process_aecp_rsp_get_stream_info(state, msg);
-      break;
-    case aecp_cmd_code_get_counters:
-      return avb_process_aecp_rsp_get_counters(state, msg);
-      break;
-    default:
-      return OK;
-    }
-  }
 }
 
 /* Process AECP command register unsolicited notification.
@@ -2283,68 +2240,76 @@ int avb_process_aecp_cmd_read_descriptor(avb_state_s *state,
 int avb_process_aecp_cmd_set_stream_format(avb_state_s *state,
                                            aecp_message_u *msg,
                                            eth_addr_t *src_addr) {
-  // validate descriptor type is stream input or output
+  uint8_t status = aecp_status_success;
   uint16_t descriptor_type =
       octets_to_uint(msg->stream_format.descriptor_type, 2);
+  uint16_t index = octets_to_uint(msg->stream_format.descriptor_index, 2);
+  bool is_output = descriptor_type == aem_desc_type_stream_output;
+
   if (descriptor_type != aem_desc_type_stream_input &&
       descriptor_type != aem_desc_type_stream_output) {
     avberr("AECP Set Stream Format: unsupported descriptor type: %d",
            descriptor_type);
-    return ERROR;
-  }
-
-  // validate descriptor index is in range
-  uint16_t index = octets_to_uint(msg->stream_format.descriptor_index, 2);
-  bool is_output = descriptor_type == aem_desc_type_stream_output;
-  if ((is_output && index >= state->num_output_streams) ||
-      (!is_output && index >= state->num_input_streams)) {
+    status = aecp_status_no_such_descriptor;
+  } else if ((is_output && index >= state->num_output_streams) ||
+             (!is_output && index >= state->num_input_streams)) {
     avberr("AECP Set Stream Format: descriptor index out of range: %d", index);
-    return ERROR;
-  }
-
-  // check requested format against supported formats. CRF input/output streams
-  // only accept the IEEE 1722 CRF media-clock format (AAF and CRF are mutually
-  // exclusive in one stream).
-  avtp_stream_format_s *requested = &msg->stream_format.stream_format;
-  bool is_crf_stream = (!is_output && index == avb_get_crf_input_index(state)) ||
-                       (is_output && index == avb_get_crf_output_index(state));
-  bool format_supported = false;
-  if (is_crf_stream) {
-    uint8_t crf_bytes[8] = AVB_CRF_AUDIO_SAMPLE_48K_FORMAT_BYTES;
-    if (memcmp(requested, crf_bytes, sizeof(crf_bytes)) == 0)
-      format_supported = true;
+    status = aecp_status_no_such_descriptor;
   } else {
-    const avtp_stream_format_s *supported = is_output
-                                               ? state->supported_formats_out
-                                               : state->supported_formats_in;
-    size_t num_supported = is_output ? state->num_supported_formats_out
-                                     : state->num_supported_formats_in;
-    for (size_t i = 0; i < num_supported; i++) {
-      if (memcmp(requested, &supported[i], sizeof(avtp_stream_format_s)) == 0) {
+    // check requested format against supported formats. CRF input/output
+    // streams only accept the IEEE 1722 CRF media-clock format (AAF and CRF
+    // are mutually exclusive in one stream).
+    avtp_stream_format_s *requested = &msg->stream_format.stream_format;
+    bool is_crf_stream =
+        (!is_output && index == avb_get_crf_input_index(state)) ||
+        (is_output && index == avb_get_crf_output_index(state));
+    bool format_supported = false;
+    if (is_crf_stream) {
+      uint8_t crf_bytes[8] = AVB_CRF_AUDIO_SAMPLE_48K_FORMAT_BYTES;
+      if (memcmp(requested, crf_bytes, sizeof(crf_bytes)) == 0)
         format_supported = true;
-        break;
+    } else {
+      const avtp_stream_format_s *supported = is_output
+                                                  ? state->supported_formats_out
+                                                  : state->supported_formats_in;
+      size_t num_supported = is_output ? state->num_supported_formats_out
+                                       : state->num_supported_formats_in;
+      for (size_t i = 0; i < num_supported; i++) {
+        if (memcmp(requested, &supported[i],
+                   sizeof(avtp_stream_format_s)) == 0) {
+          format_supported = true;
+          break;
+        }
+      }
+    }
+
+    if (!format_supported) {
+      avberr("AECP Set Stream Format: unsupported format requested");
+      status = aecp_status_not_supported;
+    } else {
+      if (is_output) {
+        memcpy(&state->output_streams[index].stream_format, requested,
+               sizeof(avtp_stream_format_s));
+      } else {
+        memcpy(&state->input_streams[index].stream_format, requested,
+               sizeof(avtp_stream_format_s));
       }
     }
   }
 
-  if (!format_supported) {
-    avberr("AECP Set Stream Format: unsupported format requested");
+  // Always send a response — silent drops force the controller to wait for a
+  // timeout and can't distinguish "no such device" from "format rejected".
+  msg->stream_format.common.header.status_valtime = status;
+  avb_send_aecp_rsp_set_stream_format(state, &msg->stream_format, src_addr);
+
+  if (status != aecp_status_success) {
     return ERROR;
   }
-
-  // update the stream format in state
   if (is_output) {
-    memcpy(&state->output_streams[index].stream_format, requested,
-           sizeof(avtp_stream_format_s));
+    return avb_persist_append_output_stream(state, index);
   } else {
-    memcpy(&state->input_streams[index].stream_format, requested,
-           sizeof(avtp_stream_format_s));
+    return avb_persist_append_input_stream(state, index);
   }
-  avb_persist_request_save(state);
-
-  // send the response
-  return avb_send_aecp_rsp_set_stream_format(state, &msg->stream_format,
-                                             src_addr);
 }
 
 /* Process AECP command get stream format */
@@ -2384,8 +2349,8 @@ int avb_process_aecp_cmd_get_clock_source(avb_state_s *state,
   struct timespec ts;
   aecp_aem_short_s *cmd = (aecp_aem_short_s *)msg;
 
-  /* Response: descriptor_type + descriptor_index + clock_source_index (2 bytes).
-   * Echo the currently-selected source the SET command committed, so
+  /* Response: descriptor_type + descriptor_index + clock_source_index (2
+   * bytes). Echo the currently-selected source the SET command committed, so
    * controllers can read-after-write to confirm the change. */
   uint8_t *clock_source_index = (uint8_t *)cmd + sizeof(aecp_aem_short_s);
   uint16_t active = state->media_clock.active_clock_source_index;
@@ -2445,7 +2410,8 @@ int avb_process_aecp_cmd_set_clock_source(avb_state_s *state,
              output_stream_running) {
     /* Output streams reference CLOCK_DOMAIN[0]. Until we implement a
      * glitchless media-clock source switch, reject changes while any output is
-     * actively streaming. Idempotent SETs to the already-active source are OK. */
+     * actively streaming. Idempotent SETs to the already-active source are OK.
+     */
     status = aecp_status_stream_is_running;
   } else if (requested_index == 1 &&
              (!state->input_streams[avb_get_crf_input_index(state)].connected ||
@@ -2491,8 +2457,7 @@ int avb_process_aecp_cmd_get_max_transit_time(avb_state_s *state,
 
   struct timespec ts;
   aecp_max_transit_time_s *rsp = (aecp_max_transit_time_s *)msg;
-  bool is_set =
-      (rsp->aem.command_type == aecp_cmd_code_set_max_transit_time);
+  bool is_set = (rsp->aem.command_type == aecp_cmd_code_set_max_transit_time);
   uint16_t descriptor_type = octets_to_uint(rsp->descriptor_type, 2);
   uint16_t index = octets_to_uint(rsp->descriptor_index, 2);
   uint64_t requested_ns = is_set ? octets_to_uint(rsp->max_transit_time, 8) : 0;
@@ -2516,7 +2481,7 @@ int avb_process_aecp_cmd_get_max_transit_time(avb_state_s *state,
   } else if (is_set) {
     state->output_streams[index].presentation_time_offset_ns =
         (uint32_t)requested_ns;
-    avb_persist_request_save(state);
+    avb_persist_append_output_stream(state, index);
     avbinfo("Stream Output %u presentation offset set to %lu ns", index,
             (unsigned long)requested_ns);
   }
@@ -2580,10 +2545,18 @@ int avb_send_aecp_rsp_get_avb_info(avb_state_s *state, aecp_get_avb_info_s *msg,
   memcpy(&response, msg, sizeof(aecp_get_avb_info_s));
   response.common.header.msg_type = aecp_msg_type_aem_response;
 
-  // populate gPTP grandmaster ID from PTP status
+  // populate gPTP grandmaster ID from PTP status. Two cases:
+  //   1. We are syncing to a remote master → report that master's gm_id.
+  //   2. BMCA has elected us as GM (no remote source selected) → report our
+  //      own clock identity, otherwise this field would stay zero and look
+  //      like "no GM" to controllers like Hive. Applies in both gPTP and
+  //      standard PTP profiles.
   if (state->ptp_status.clock_source_valid) {
     memcpy(&response.gptp_grandmaster_id,
            state->ptp_status.clock_source_info.gm_id, UNIQUE_ID_LEN);
+  } else {
+    memcpy(&response.gptp_grandmaster_id,
+           state->ptp_status.own_identity_info.id, UNIQUE_ID_LEN);
   }
 
   // populate propagation delay from PTP peer delay measurement
@@ -2663,16 +2636,15 @@ int avb_send_aecp_rsp_get_as_path(avb_state_s *state, aecp_get_as_path_s *msg,
     // if the selected source is not the grandmaster (i.e. an intermediate
     // boundary clock like the AVB switch), add it to the path
     if (memcmp(state->ptp_status.clock_source_info.id,
-               state->ptp_status.clock_source_info.gm_id,
-               UNIQUE_ID_LEN) != 0) {
+               state->ptp_status.clock_source_info.gm_id, UNIQUE_ID_LEN) != 0) {
       memcpy(&response.path_sequence[count],
              state->ptp_status.clock_source_info.id, UNIQUE_ID_LEN);
       count++;
     }
   }
   // always end with this entity's own clock identity
-  memcpy(&response.path_sequence[count],
-         state->ptp_status.own_identity_info.id, UNIQUE_ID_LEN);
+  memcpy(&response.path_sequence[count], state->ptp_status.own_identity_info.id,
+         UNIQUE_ID_LEN);
   count++;
   int_to_octets(&count, response.count, 2);
 
@@ -2719,7 +2691,6 @@ int avb_process_aecp_cmd_get_counters(avb_state_s *state, aecp_message_u *msg,
   struct timespec ts;
   uint16_t control_data_len =
       sizeof(aecp_get_counters_rsp_s) - sizeof(atdecc_header_s);
-
 
   // create a response, copy the cmd message data and change the msg type
   aecp_get_counters_rsp_s response;
@@ -2846,6 +2817,189 @@ int avb_process_aecp_rsp_get_counters(avb_state_s *state, aecp_message_u *msg) {
   return OK;
 }
 
+/* Process received ATDECC AECP message */
+int avb_process_aecp(avb_state_s *state, aecp_message_u *msg,
+                     eth_addr_t *src_addr) {
+
+  /* Drop commands not addressed to us. Responses must always pass through
+   * so the inflight tracker can match them. AVB Community Vendor Unique MSRP
+   * wrappers are endpoint-origin multicast advertisements, not controller
+   * commands, so process them regardless of target_entity_id. */
+  uint8_t msg_type = msg->header.msg_type;
+  bool is_cvu_command = false;
+  if (msg_type == aecp_msg_type_vendor_unique_command) {
+    aecp_cvu_common_s *cvu = (aecp_cvu_common_s *)msg;
+    uint8_t expected_cvu_pid[] = CVU_PROTOCOL_ID;
+    is_cvu_command = memcmp(cvu->protocol_id, expected_cvu_pid, 6) == 0;
+  }
+  bool is_command = (msg_type == aecp_msg_type_aem_command ||
+                     msg_type == aecp_msg_type_addr_access_command ||
+                     msg_type == aecp_msg_type_vendor_unique_command);
+  if (is_command && !is_cvu_command &&
+      memcmp(msg->common.target_entity_id, state->own_entity.summary.entity_id,
+             UNIQUE_ID_LEN) != 0) {
+    return OK;
+  }
+
+  /* Process ADDRESS_ACCESS command (separate message type from AEM) */
+  if (msg->header.msg_type == aecp_msg_type_addr_access_command) {
+    return avb_process_aecp_addr_access(state, msg, src_addr);
+  }
+
+  /* Process AVB Lite CVU / Milan MVU Vendor Unique commands */
+  if (msg->header.msg_type == aecp_msg_type_vendor_unique_command) {
+    aecp_cvu_common_s *cvu = (aecp_cvu_common_s *)msg;
+    uint8_t expected_cvu_pid[] = CVU_PROTOCOL_ID;
+    if (memcmp(cvu->protocol_id, expected_cvu_pid, 6) == 0) {
+      return avb_process_aecp_cmd_cvu_srp(state, msg, src_addr);
+    }
+
+    /* Validate MVU protocol ID */
+    aecp_mvu_common_s *mvu = (aecp_mvu_common_s *)msg;
+    uint8_t expected_pid[] = MVU_PROTOCOL_ID;
+    if (memcmp(mvu->protocol_id, expected_pid, 6) != 0) {
+      return OK; /* Not AVB Lite CVU or Milan MVU — ignore */
+    }
+    uint16_t mvu_cmd = (mvu->command_type_h << 8) | mvu->command_type;
+    switch (mvu_cmd) {
+    case mvu_cmd_get_milan_info:
+      return avb_process_aecp_cmd_mvu_get_milan_info(state, msg, src_addr);
+    case mvu_cmd_bind_stream:
+      return avb_process_aecp_cmd_mvu_bind_stream(state, msg, src_addr, false);
+    case mvu_cmd_unbind_stream:
+      return avb_process_aecp_cmd_mvu_bind_stream(state, msg, src_addr, true);
+    case mvu_cmd_get_system_unique_id:
+      return avb_process_aecp_cmd_mvu_get_system_unique_id(state, msg,
+                                                           src_addr);
+    case mvu_cmd_set_media_clock_ref_info:
+      return avb_process_aecp_cmd_mvu_media_clock_ref_info(state, msg, src_addr,
+                                                           true);
+    case mvu_cmd_get_media_clock_ref_info:
+      return avb_process_aecp_cmd_mvu_media_clock_ref_info(state, msg, src_addr,
+                                                           false);
+    case mvu_cmd_get_stream_input_info_ex:
+      return avb_process_aecp_cmd_mvu_get_stream_input_info_ex(state, msg,
+                                                               src_addr);
+    default:
+      /* Milan v1.3 §5.4.3: unsupported MVU commands must be reflected back
+       * with NOT_IMPLEMENTED status rather than silently dropped */
+      avbinfo("MVU: unsupported command 0x%04x, returning NOT_IMPLEMENTED",
+              mvu_cmd);
+      uint16_t cdl = (mvu->common.header.control_data_len_h << 8) |
+                     mvu->common.header.control_data_len;
+      uint16_t msg_len = AVTP_CDL_PREAMBLE_LEN + cdl;
+      return avb_send_mvu_response(state, msg, src_addr, msg_len,
+                                   aecp_status_not_implemented);
+    }
+  }
+
+  /* Process AECP AEM commands */
+  if (msg->header.msg_type == aecp_msg_type_aem_command) {
+    switch (msg->basic.aem.command_type) {
+    case aecp_cmd_code_register_unsol_notif:
+      return avb_process_aecp_cmd_register_unsol_notif(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_deregister_unsol_notif:
+      return avb_process_aecp_cmd_deregister_unsol_notif(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_acquire_entity:
+      return avb_process_aecp_cmd_acquire_entity(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_lock_entity:
+      return avb_process_aecp_cmd_lock_entity(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_entity_available:
+      return avb_process_aecp_cmd_entity_available(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_configuration:
+      return avb_process_aecp_cmd_get_configuration(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_read_descriptor:
+      return avb_process_aecp_cmd_read_descriptor(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_set_stream_format:
+      return avb_process_aecp_cmd_set_stream_format(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_stream_format:
+      return avb_process_aecp_cmd_get_stream_format(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_clock_source:
+      return avb_process_aecp_cmd_get_clock_source(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_set_clock_source:
+      return avb_process_aecp_cmd_set_clock_source(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_stream_info:
+      return avb_process_aecp_cmd_get_stream_info(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_avb_info:
+      return avb_process_aecp_cmd_get_avb_info(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_as_path:
+      return avb_process_aecp_cmd_get_as_path(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_counters:
+      return avb_process_aecp_cmd_get_counters(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_set_max_transit_time:
+    case aecp_cmd_code_get_max_transit_time:
+      return avb_process_aecp_cmd_get_max_transit_time(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_set_name:
+      return avb_process_aecp_cmd_set_name(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_name:
+      return avb_process_aecp_cmd_get_name(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_set_control:
+      return avb_process_aecp_cmd_set_control(state, msg, src_addr);
+      break;
+    case aecp_cmd_code_get_control:
+      return avb_process_aecp_cmd_get_control(state, msg, src_addr);
+      break;
+    default: {
+      /* IEEE 1722.1-2021 §9.2.1.3.1.4: unhandled AEM commands must be reflected
+       * back with NOT_IMPLEMENTED status rather than silently dropped */
+      avbinfo("AECP: unhandled AEM command 0x%04x, returning NOT_IMPLEMENTED",
+              msg->basic.aem.command_type);
+      struct timespec ts;
+      uint16_t cdl =
+          (msg->header.control_data_len_h << 8) | msg->header.control_data_len;
+      uint16_t msg_len = AVTP_CDL_PREAMBLE_LEN + cdl;
+      msg->header.msg_type = aecp_msg_type_aem_response;
+      msg->header.status_valtime = aecp_status_not_implemented;
+      return avb_net_send_to(state, ethertype_avtp, msg, msg_len, &ts,
+                             src_addr);
+    }
+    }
+  }
+  /* Process AECP responses */
+  else {
+    switch (msg->basic.aem.command_type) {
+    case aecp_cmd_code_register_unsol_notif:
+      return avb_process_aecp_rsp_register_unsol_notif(state, msg);
+      break;
+    case aecp_cmd_code_deregister_unsol_notif:
+      return avb_process_aecp_rsp_deregister_unsol_notif(state, msg);
+      break;
+    case aecp_cmd_code_entity_available:
+      return avb_process_aecp_rsp_entity_available(state, msg);
+      break;
+    case aecp_cmd_code_controller_available:
+      return avb_process_aecp_rsp_controller_available(state, msg);
+      break;
+    case aecp_cmd_code_get_stream_info:
+      return avb_process_aecp_rsp_get_stream_info(state, msg);
+      break;
+    case aecp_cmd_code_get_counters:
+      return avb_process_aecp_rsp_get_counters(state, msg);
+      break;
+    default:
+      return OK;
+    }
+  }
+}
+
 /* Process received ATDECC ACMP message */
 int avb_process_acmp(avb_state_s *state, acmp_message_s *msg) {
 
@@ -2856,7 +3010,7 @@ int avb_process_acmp(avb_state_s *state, acmp_message_s *msg) {
       avbinfo("Ignoring ACMP Connect RX Command for different listener");
       break;
     }
-    avb_process_acmp_connect_rx_command(state, msg, false);
+    avb_process_acmp_connect_rx_command(state, msg, false, false);
     break;
   case acmp_msg_type_disconnect_rx_command:
     if (memcmp(msg->listener_entity_id, state->own_entity.summary.entity_id,
@@ -2864,7 +3018,7 @@ int avb_process_acmp(avb_state_s *state, acmp_message_s *msg) {
       avbinfo("Ignoring ACMP Disconnect RX Command for different listener");
       break;
     }
-    avb_process_acmp_connect_rx_command(state, msg, true);
+    avb_process_acmp_connect_rx_command(state, msg, true, false);
     break;
   case acmp_msg_type_connect_tx_command:
     if (memcmp(msg->talker_entity_id, state->own_entity.summary.entity_id,
@@ -2932,7 +3086,8 @@ int avb_process_acmp(avb_state_s *state, acmp_message_s *msg) {
 
 /* Send an ACMP command message */
 int avb_send_acmp_command(avb_state_s *state, acmp_msg_type_t msg_type,
-                          acmp_message_s *command, bool retried) {
+                          acmp_message_s *command, bool retried,
+                          bool track_inflight) {
   int ret = OK;
   struct timespec ts;
   int control_data_len = 84; // IEEE 1722.1-2021 sets it at 84 bytes
@@ -2962,10 +3117,13 @@ int avb_send_acmp_command(avb_state_s *state, acmp_msg_type_t msg_type,
            get_acmp_message_type_name(msg_type), errno);
   }
 
-  // add the command to the inflight commands list
-  avb_add_inflight_command(state, (atdecc_command_u *)command, false);
+  if (track_inflight) {
+    // add the command to the inflight commands list
+    avb_add_inflight_command(state, (atdecc_command_u *)command, false);
+  }
 
-  avbinfo("Sent %s", get_acmp_message_type_name(msg_type));
+  avbinfo("Sent %s%s", get_acmp_message_type_name(msg_type),
+          track_inflight ? "" : " (best-effort)");
   return ret;
 }
 
@@ -3001,91 +3159,120 @@ int avb_send_acmp_response(avb_state_s *state, acmp_msg_type_t msg_type,
 }
 
 /* Process ACMP connect/disconnect rx command */
-int avb_process_acmp_connect_rx_command(avb_state_s *state, acmp_message_s *msg,
-                                        bool disconnect) {
-  int ret = OK;
-  uint16_t index = octets_to_uint(msg->listener_uid, 2);
-  acmp_status_t status = acmp_status_success;
-  acmp_msg_type_t rx_response_type = disconnect
-                                         ? acmp_msg_type_disconnect_rx_response
-                                         : acmp_msg_type_connect_rx_response;
+static int avb_send_listener_talker_command(avb_state_s *state,
+                                            acmp_message_s *msg,
+                                            bool disconnect, bool mvu_bind) {
   acmp_msg_type_t tx_command_type = disconnect
                                         ? acmp_msg_type_disconnect_tx_command
                                         : acmp_msg_type_connect_tx_command;
 
-  // check if listener is valid
-  uint16_t listener_uid = octets_to_uint(msg->listener_uid, 2);
-  if (!avb_valid_talker_listener_uid(state, listener_uid,
-                                     avb_entity_type_listener)) {
-    avb_send_acmp_response(state, rx_response_type, msg,
-                           acmp_status_listener_unknown_id);
-    return ERROR;
-  }
-
-  // check if locked or acquired by another controller
-  if (avb_acquired_or_locked_by_other(state, &msg->controller_entity_id)) {
-    avberr("ConnRX cmd: Locked or acquired by another controller");
-    avb_send_acmp_response(state, rx_response_type, msg,
-                           acmp_status_controller_not_authorized);
-    return ERROR;
-  }
-
-  // check if listener is connected to another talker in case of connect rx
-  // check if listener is not connected to the same talker in case of disconnect
-  // rx
-  bool same_talker = disconnect ? true : false;
-  if (!avb_listener_is_connected(state, msg, same_talker)) {
-    if (disconnect) {
-      // listener is not connected to the talker in case of disconnect rx
-      avberr("DisconnRX cmd: Listener is not connected to the talker");
-      avb_send_acmp_response(state, rx_response_type, msg,
-                             acmp_status_not_connected);
-      return ERROR;
-    }
-  } else if (!disconnect) {
-    // listener is connected to the another talker in case of connect rx
-    avberr("ConnRX cmd: Listener is already connected to another talker");
-    avb_send_acmp_response(state, rx_response_type, msg,
-                           acmp_status_listener_exclusive);
-    return ERROR;
-  } else {
-    // disconnect the listener
-    status = avb_disconnect_listener(state, msg);
-    if (status != acmp_status_success) {
-      avberr("Failed to disconnect listener");
-      avb_send_acmp_response(state, rx_response_type, msg, status);
-      return ERROR;
-    }
-  }
-
-  // add the inbound command to the inflight commands list
-  ret = avb_add_inflight_command(state, (atdecc_command_u *)msg, true);
-  if (ret == ERROR) {
-    avberr("Failed to add inflight command");
-    avb_send_acmp_response(state, rx_response_type, msg,
-                           acmp_status_listener_misbehaving);
-    return ERROR;
-  }
-
-  // create a new command for the connect/disconnect tx command
   acmp_message_s new_command = {0};
   memcpy(&new_command, msg, sizeof(acmp_message_s));
 
-  // send connect/disconnect tx command to talker
-  ret = avb_send_acmp_command(state, tx_command_type, &new_command, false);
-  /* For CONNECT only: stash the talker binding and mark pending so the
-   * subsequent CONNECT_TX_RESPONSE can resolve. On DISCONNECT this path
-   * must NOT run — avb_disconnect_listener has already cleared the
-   * binding and queued a NVS save; re-populating here would restore the
-   * talker_id and the saved blob would still carry the old binding,
-   * causing auto-reconnect on reboot. */
-  if (ret && !disconnect) {
-    memcpy(&state->input_streams[index].talker_id, &msg->talker_entity_id,
-           UNIQUE_ID_LEN);
-    memcpy(&state->input_streams[index].talker_uid, &msg->talker_uid, 2);
-    state->input_streams[index].pending_connection = true;
-  }
+  /* For MVU BIND/UNBIND the AECP response has already accepted the binding
+   * state change. This talker-side ACMP command is the listener's subsequent
+   * probe/cleanup step, and is especially needed for non-Milan talkers. */
+  int ret = avb_send_acmp_command(state, tx_command_type, &new_command, false,
+                                  !mvu_bind && !disconnect);
   return ret;
+}
+
+int avb_process_acmp_connect_rx_command(avb_state_s *state, acmp_message_s *msg,
+                                        bool disconnect, bool mvu_bind) {
+  uint16_t index = octets_to_uint(msg->listener_uid, 2);
+  acmp_msg_type_t rx_response_type = disconnect
+                                         ? acmp_msg_type_disconnect_rx_response
+                                         : acmp_msg_type_connect_rx_response;
+
+  /* Basic protocol checks common to ACMP CONNECT/DISCONNECT_RX and MVU
+   * BIND/UNBIND_STREAM. MVU callers translate failures to AECP status. */
+  if (!avb_valid_talker_listener_uid(state, index, avb_entity_type_listener)) {
+    if (!mvu_bind) {
+      avb_send_acmp_response(state, rx_response_type, msg,
+                             acmp_status_listener_unknown_id);
+    }
+    return ERROR;
+  }
+  if (avb_acquired_or_locked_by_other(state, &msg->controller_entity_id)) {
+    avberr("ConnRX cmd: Locked or acquired by another controller");
+    if (!mvu_bind) {
+      avb_send_acmp_response(state, rx_response_type, msg,
+                             acmp_status_controller_not_authorized);
+    }
+    return ERROR;
+  }
+
+  avb_listener_stream_s *stream = &state->input_streams[index];
+  bool has_binding = stream->connected || stream->pending_connection;
+  bool same_talker =
+      memcmp(stream->talker_id, msg->talker_entity_id, UNIQUE_ID_LEN) == 0 &&
+      memcmp(stream->talker_uid, msg->talker_uid, 2) == 0;
+
+  if (!disconnect && has_binding && !same_talker) {
+    avberr("ConnRX cmd: Listener is already connected to another talker");
+    if (!mvu_bind) {
+      avb_send_acmp_response(state, rx_response_type, msg,
+                             acmp_status_listener_exclusive);
+    }
+    return ERROR;
+  }
+
+  if (disconnect && has_binding && !same_talker) {
+    avberr("DisconnRX cmd: Listener is connected to a different talker");
+    if (!mvu_bind) {
+      avb_send_acmp_response(state, rx_response_type, msg,
+                             acmp_status_not_connected);
+    }
+    return ERROR;
+  }
+
+  if (disconnect) {
+    if (has_binding) {
+      acmp_status_t status = avb_disconnect_listener(state, msg);
+      if (status != acmp_status_success) {
+        avberr("Failed to disconnect listener");
+        if (!mvu_bind) {
+          avb_send_acmp_response(state, rx_response_type, msg, status);
+        }
+        return ERROR;
+      }
+    } else {
+      /* Idempotent unbind/disconnect of a saved or absent binding: clear the
+       * listener binding while preserving descriptor configuration fields. */
+      avtp_stream_format_s saved_format = stream->stream_format;
+      uint8_t saved_vlan[2];
+      memcpy(saved_vlan, stream->vlan_id, 2);
+      memset(stream, 0, sizeof(*stream));
+      stream->stream_format = saved_format;
+      memcpy(stream->vlan_id, saved_vlan, 2);
+    }
+
+    if (mvu_bind) {
+      return OK;
+    }
+    int tx_ret = avb_send_listener_talker_command(state, msg, true, false);
+    acmp_status_t rsp_status =
+        tx_ret >= 0 ? acmp_status_success : acmp_status_listener_misbehaving;
+    avb_send_acmp_response(state, rx_response_type, msg, rsp_status);
+    return avb_persist_append_input_stream(state, index);
+  }
+
+  /* CONNECT_RX / BIND_STREAM: update and persist the listener binding before
+   * probing the talker. This keeps Milan and non-Milan controller binding state
+   * handling aligned and lets the binding survive talker-side ACMP failure. */
+  memcpy(stream->talker_id, msg->talker_entity_id, UNIQUE_ID_LEN);
+  memcpy(stream->talker_uid, msg->talker_uid, 2);
+  memcpy(stream->controller_id, msg->controller_entity_id, UNIQUE_ID_LEN);
+  stream->pending_connection = true;
+
+  if (mvu_bind) {
+    return OK;
+  }
+  int tx_ret = avb_send_listener_talker_command(state, msg, false, false);
+  acmp_status_t rsp_status =
+      tx_ret >= 0 ? acmp_status_success : acmp_status_listener_misbehaving;
+  avb_send_acmp_response(state, rx_response_type, msg, rsp_status);
+  return avb_persist_append_input_stream(state, index);
 }
 
 static int find_talker_listener_by_identity(avb_talker_stream_s *stream,
@@ -3114,8 +3301,8 @@ static int find_talker_listener_by_entity(avb_talker_stream_s *stream,
   return NOT_FOUND;
 }
 
-static uint16_t count_acmp_connected_talker_listeners(
-    avb_talker_stream_s *stream) {
+static uint16_t
+count_acmp_connected_talker_listeners(avb_talker_stream_s *stream) {
   uint16_t count = octets_to_uint(stream->connection_count, 2);
   uint16_t connected = 0;
 
@@ -3223,8 +3410,10 @@ int avb_process_acmp_connect_tx_command(avb_state_s *state, acmp_message_s *msg,
 
   if (disconnect && listener_idx == NOT_FOUND) {
     /* Be tolerant of older half-state where the MSRP entry had entity_id but no
-     * listener_uid yet. ACMP disconnect is still authoritative for the entity. */
-    listener_idx = find_talker_listener_by_entity(stream, msg->listener_entity_id);
+     * listener_uid yet. ACMP disconnect is still authoritative for the entity.
+     */
+    listener_idx =
+        find_talker_listener_by_entity(stream, msg->listener_entity_id);
   }
 
   if (disconnect) {
@@ -3272,8 +3461,8 @@ int avb_process_acmp_connect_tx_command(avb_state_s *state, acmp_message_s *msg,
   memcpy(msg->stream_dest_addr,
          state->output_streams[talker_uid].stream_dest_addr, ETH_ADDR_LEN);
   memcpy(msg->stream_vlan_id, state->output_streams[talker_uid].vlan_id, 2);
-  memcpy(msg->connection_count, state->output_streams[talker_uid].connection_count,
-         2);
+  memcpy(msg->connection_count,
+         state->output_streams[talker_uid].connection_count, 2);
   avb_send_acmp_response(state, tx_response_type, msg, acmp_status_success);
   return ret;
 }
@@ -3300,57 +3489,64 @@ int avb_process_acmp_connect_tx_response(avb_state_s *state,
     status = acmp_status_listener_unknown_id;
   }
 
-  // create a response message for the controller
+  // TODO: is this needed? create a response message for the controller
   acmp_message_s new_response = {0};
   memcpy(&new_response, response, sizeof(acmp_message_s));
 
+  bool start_stream_in = false;
   if (!disconnect) {
     // if succcessful connect tx response then connect the listener
     if (response->header.status_valtime == acmp_status_success) {
       status = avb_connect_listener(state, response);
-      avbinfo("ConnTX rsp: listener_uid=%d, connect_status=%d", listener_uid, status);
-      if (status == acmp_status_success) {
-        int stream_ret = avb_start_stream_in(state, listener_uid);
-        avbinfo("avb_start_stream_in returned %d", stream_ret);
-      }
+      avbinfo("ConnTX rsp: listener_uid=%d, connect_status=%d", listener_uid,
+              status);
+      start_stream_in = status == acmp_status_success;
     } else {
-      avbwarn("ConnTX rsp: talker returned status %d", response->header.status_valtime);
+      avbwarn("ConnTX rsp: talker returned status %d",
+              response->header.status_valtime);
     }
     // update input stream
     state->input_streams[listener_uid].pending_connection = false;
   }
 
-  // put the sequence ID from the inflight command into the new response
-  response->header.msg_type = rx_reponse_type;
-  int index = avb_find_inflight_command_by_data(
-      state, (atdecc_command_u *)response, true);
-  if (index != NOT_FOUND) {
-    int_to_octets(&state->inflight_commands[index].acmp_seq_id,
-                  &new_response.seq_id, 2);
+  /* Find the original controller-facing RX command and copy its sequence ID
+   * before removing anything from the compacted inflight array. Removing the
+   * TX inflight first can shift indices; using state->inflight_commands[index]
+   * after that is fragile and can remove the wrong RX command or suppress the
+   * RX response under load. */
+  acmp_message_s lookup_response = {0};
+  memcpy(&lookup_response, response, sizeof(lookup_response));
+  lookup_response.header.msg_type = rx_reponse_type;
+
+  int inbound_index = avb_find_inflight_command_by_data(
+      state, (atdecc_command_u *)&lookup_response, true);
+  uint16_t inbound_seq_id = 0;
+  bool has_inbound_rx = inbound_index != NOT_FOUND;
+  if (has_inbound_rx) {
+    inbound_seq_id = state->inflight_commands[inbound_index].acmp_seq_id;
+    int_to_octets(&inbound_seq_id, &new_response.seq_id, 2);
   }
 
-  // remove the inflight command for the connect tx command
-  avb_remove_inflight_command(state, octets_to_uint(response->seq_id, 2),
-                              false);
+  // remove the inflight command for the connect tx command, if tracked.
+  // Plain ACMP/MVU disconnect TX is often sent best-effort after the RX
+  // response has already gone to the controller, so its TX response may have
+  // no outbound inflight entry. Late responses after a timeout can also arrive
+  // without an inflight entry. Do not log a removal error for those cases.
+  uint16_t tx_seq_id = octets_to_uint(response->seq_id, 2);
+  if (avb_find_inflight_command(state, tx_seq_id, false) != NOT_FOUND) {
+    avb_remove_inflight_command(state, tx_seq_id, false);
+  } else if (!disconnect) {
+    avbwarn("ConnTX rsp: no outbound inflight for seq=%u", tx_seq_id);
+  }
 
   // remove the inflight command for the original connect rx command
-  if (index != NOT_FOUND) {
-    avb_remove_inflight_command(
-        state, state->inflight_commands[index].acmp_seq_id, true);
+  if (has_inbound_rx) {
+    avb_remove_inflight_command(state, inbound_seq_id, true);
   }
 
-  /* Only send a CONNECT_RX_RESPONSE back to a controller if this
-   * TX response was actually triggered by a controller's CONNECT_RX.
-   * Fast-connect probes (self-issued at boot) have no matching
-   * inflight RX — sending would emit a spurious response with a
-   * stale seq_id that no controller asked for. */
-  if (index != NOT_FOUND) {
-    ret = avb_send_acmp_response(state, rx_reponse_type, &new_response, status);
-  }
-
-  if (status == acmp_status_success) {
-    /* Stream-in now handled by the unified EMAC RX dispatcher via
-     * avb_net_set_stream_rx_handler — no EMAC callback change needed here. */
+  if (start_stream_in) {
+    int stream_ret = avb_start_stream_in(state, listener_uid);
+    avbinfo("avb_start_stream_in returned %d", stream_ret);
   }
   return ret;
 }
@@ -3473,15 +3669,17 @@ int avb_process_acmp_get_tx_state_command(avb_state_s *state,
 int avb_process_acmp_get_tx_connection_command(avb_state_s *state,
                                                acmp_message_s *msg, bool tx) {
   if (state->config.milan_compliant) {
-    return avb_send_acmp_response(state, acmp_msg_type_get_tx_connection_response,
-                                  msg, acmp_status_not_supported);
+    return avb_send_acmp_response(state,
+                                  acmp_msg_type_get_tx_connection_response, msg,
+                                  acmp_status_not_supported);
   }
 
   uint16_t talker_uid = octets_to_uint(msg->talker_uid, 2);
   if (!avb_valid_talker_listener_uid(state, talker_uid,
                                      avb_entity_type_talker)) {
-    return avb_send_acmp_response(state, acmp_msg_type_get_tx_connection_response,
-                                  msg, acmp_status_talker_unknown_id);
+    return avb_send_acmp_response(state,
+                                  acmp_msg_type_get_tx_connection_response, msg,
+                                  acmp_status_talker_unknown_id);
   }
 
   avb_talker_stream_s *stream = &state->output_streams[talker_uid];
@@ -3489,8 +3687,9 @@ int avb_process_acmp_get_tx_connection_command(avb_state_s *state,
   uint16_t count = octets_to_uint(stream->connection_count, 2);
   if (connection_index >= count ||
       connection_index >= AVB_MAX_NUM_CONNECTED_LISTENERS) {
-    return avb_send_acmp_response(state, acmp_msg_type_get_tx_connection_response,
-                                  msg, acmp_status_no_such_connection);
+    return avb_send_acmp_response(state,
+                                  acmp_msg_type_get_tx_connection_response, msg,
+                                  acmp_status_no_such_connection);
   }
 
   acmp_message_s response = {0};
@@ -3671,34 +3870,31 @@ bool avb_acquired_or_locked_by_other(avb_state_s *state,
   return false;
 }
 
-/* Check if the listener is connected to another talker or same talker */
+/* Check whether the target listener stream input is connected/pending to the
+ * same talker stream or to a different talker stream. ACMP listener_uid is the
+ * local STREAM_INPUT descriptor index; do not scan all inputs here, otherwise
+ * a valid audio+CRF pair from the same talker can cross-contaminate state. */
 bool avb_listener_is_connected(avb_state_s *state, acmp_message_s *msg,
                                bool same_talker) {
-  // walk through all input streams
-  for (int i = 0; i < state->num_input_streams; i++) {
-    // check if the stream is connected or pending connection
-    if (state->input_streams[i].connected ||
-        state->input_streams[i].pending_connection) {
-      if (same_talker) {
-        // check if the talker is the same
-        if (memcmp(state->input_streams[i].talker_id, msg->talker_entity_id,
-                   UNIQUE_ID_LEN) == 0 &&
-            memcmp(state->input_streams[i].talker_uid, msg->talker_uid, 2) ==
-                0) {
-          return true;
-        }
-      } else {
-        // check if the talker is different
-        if (memcmp(state->input_streams[i].talker_id, msg->talker_entity_id,
-                   UNIQUE_ID_LEN) != 0 &&
-            memcmp(state->input_streams[i].talker_uid, msg->talker_uid, 2) !=
-                0) {
-          return true;
-        }
-      }
-    }
+  uint16_t listener_uid = octets_to_uint(msg->listener_uid, 2);
+  if (listener_uid >= state->num_input_streams) {
+    return false;
   }
-  return false;
+
+  avb_listener_stream_s *stream = &state->input_streams[listener_uid];
+  if (!stream->connected && !stream->pending_connection) {
+    return false;
+  }
+
+  bool entity_same =
+      memcmp(stream->talker_id, msg->talker_entity_id, UNIQUE_ID_LEN) == 0;
+  bool uid_same = memcmp(stream->talker_uid, msg->talker_uid, 2) == 0;
+
+  if (same_talker) {
+    return entity_same && uid_same;
+  }
+
+  return !entity_same || !uid_same;
 }
 
 /* add an inflight command to the inflight commands list */
@@ -3831,7 +4027,8 @@ void avb_remove_inflight_command(avb_state_s *state, uint16_t seq_id,
   state->num_inflight_commands--;
 }
 
-/* Connect a listener to a stream */
+/* Connect a listener to a stream (setup stream as connected, send SRP, send
+ * ACMP connect/probe tx as needed)*/
 acmp_status_t avb_connect_listener(avb_state_s *state,
                                    acmp_message_s *response) {
   acmp_status_t status = acmp_status_success;
@@ -3866,9 +4063,10 @@ acmp_status_t avb_connect_listener(avb_state_s *state,
     memcpy(stream->vlan_id, response->stream_vlan_id, 2);
   }
 
+  // Setting as connected will cause the stream-in handler to start
   stream->connected = true;
 
-  // send SRP listener ready command
+  // send SRP listener ready command, as MSRP or CVU depending on avb mode
   int ret = avb_send_msrp_listener(state, mrp_attr_event_new,
                                    msrp_listener_event_ready, false,
                                    &state->input_streams[index].stream_id);
@@ -3876,19 +4074,11 @@ acmp_status_t avb_connect_listener(avb_state_s *state,
     return acmp_status_listener_misbehaving;
   }
 
-  /* Persist the new connection state to NVS so it survives reboots
-   * (Milan §5.5.3.6.17 saved-state requirement). Async path: the
-   * persist task gates writes against active streaming so we don't
-   * glitch audio with a flash-cache-disable, and force-flushes after
-   * AVB_PERSIST_FORCED_FLUSH_MSEC if the gate stays closed too long.
-   * Caller (avb_process_acmp_connect_tx_response) immediately calls
-   * avb_start_stream_in for audio listeners, so a synchronous save
-   * here would race with the next-millisecond drain timer. */
-  avb_persist_request_save(state);
-
   return status;
 }
 
+/* Disconnect a listener from a stream (stop stream-in, reset stream state, send
+ * SRP leave) */
 acmp_status_t avb_disconnect_listener(avb_state_s *state,
                                       acmp_message_s *response) {
   acmp_status_t status = acmp_status_success;
@@ -3915,9 +4105,6 @@ acmp_status_t avb_disconnect_listener(avb_state_s *state,
   if (ret < 0) {
     return acmp_status_listener_misbehaving;
   }
-
-  /* Persist the cleared state so we don't auto-reconnect on next boot. */
-  avb_persist_request_save(state);
 
   return status;
 }
@@ -3959,7 +4146,7 @@ static bool avb_fast_connect_listener(avb_state_s *state, uint16_t index) {
   memcpy(cmd.controller_entity_id, stream->controller_id, UNIQUE_ID_LEN);
 
   if (avb_send_acmp_command(state, acmp_msg_type_connect_tx_command, &cmd,
-                            false) < 0) {
+                            false, true) < 0) {
     return false;
   }
 
@@ -3995,6 +4182,86 @@ void avb_periodic_fast_connect(avb_state_s *state) {
 
     stream->last_fast_connect_attempt = now;
     avb_fast_connect_listener(state, i);
+  }
+}
+
+static acmp_msg_type_t
+acmp_rx_response_for_tx_command(acmp_msg_type_t msg_type) {
+  switch (msg_type) {
+  case acmp_msg_type_connect_tx_command:
+    return acmp_msg_type_connect_rx_response;
+  case acmp_msg_type_disconnect_tx_command:
+    return acmp_msg_type_disconnect_rx_response;
+  default:
+    return 0xff;
+  }
+}
+
+void avb_process_inflight_timeouts(avb_state_s *state) {
+  struct timeval now;
+  gettimeofday(&now, NULL);
+
+  for (int i = 0; i < state->num_inflight_commands;) {
+    atdecc_inflight_command_s *inflight = &state->inflight_commands[i];
+    if (compare_timeval(now, inflight->timeout) < 0) {
+      i++;
+      continue;
+    }
+
+    uint8_t subtype = inflight->command.header.subtype;
+    uint8_t msg_type = inflight->command.header.msg_type;
+    bool inbound = inflight->inbound;
+    uint16_t seq_id = subtype == avtp_subtype_acmp ? inflight->acmp_seq_id
+                                                   : inflight->aecp_seq_id;
+
+    avbwarn("Inflight %s command timed out: subtype=0x%02x msg_type=0x%02x "
+            "seq=%u inbound=%d",
+            subtype == avtp_subtype_acmp ? "ACMP" : "AECP", subtype, msg_type,
+            seq_id, inbound);
+
+    if (subtype == avtp_subtype_acmp && !inbound) {
+      if (msg_type == acmp_msg_type_connect_tx_command) {
+        uint16_t listener_uid =
+            octets_to_uint(inflight->command.acmp.listener_uid, 2);
+        if (listener_uid < state->num_input_streams) {
+          state->input_streams[listener_uid].pending_connection = false;
+          avbwarn("Cleared pending connection for listener_uid=%u after "
+                  "CONNECT_TX timeout",
+                  listener_uid);
+        }
+      }
+
+      acmp_msg_type_t rx_response_type =
+          acmp_rx_response_for_tx_command(msg_type);
+      if (rx_response_type != 0xff) {
+        /* We forwarded a CONNECT_TX/DISCONNECT_TX to the talker on behalf of a
+         * controller's CONNECT_RX/DISCONNECT_RX. If the talker does not respond
+         * inside its shorter TX timeout, answer the controller with
+         * LISTENER_TALKER_TIMEOUT before the controller's RX timeout expires.
+         */
+        acmp_message_s response = {0};
+        memcpy(&response, &inflight->command.acmp, sizeof(response));
+        response.header.msg_type = rx_response_type;
+
+        int inbound_idx = avb_find_inflight_command_by_data(
+            state, (atdecc_command_u *)&response, true);
+        if (inbound_idx != NOT_FOUND) {
+          uint16_t inbound_seq =
+              state->inflight_commands[inbound_idx].acmp_seq_id;
+          int_to_octets(&inbound_seq, &response.seq_id, 2);
+          avb_send_acmp_response(state, rx_response_type, &response,
+                                 acmp_status_listener_talker_timeout);
+          avb_remove_inflight_command(state, inbound_seq, true);
+        } else {
+          avbwarn("Timed-out %s had no matching inbound RX command",
+                  get_acmp_message_type_name(msg_type));
+        }
+      }
+    }
+
+    /* Remove the expired command. Restart at the same index because removal
+     * compacts the array. */
+    avb_remove_inflight_command(state, seq_id, inbound);
   }
 }
 

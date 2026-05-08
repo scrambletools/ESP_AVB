@@ -189,14 +189,35 @@ uint16_t avb_compute_tspec_max_frame_size(avb_state_s *state, uint16_t index) {
   return (uint16_t)(14 /*ETH*/ + 4 /*VLAN*/ + avtp_hdr + payload);
 }
 
+static int avb_send_msrp_attr(avb_state_s *state, void *attr,
+                              int attr_list_len, const char *label) {
+  size_t attr_size = 4 + attr_list_len; /* attr hdr w/o vechead + attr list */
+  struct timespec ts;
+  int ret;
+
+  if (state->avb_lite) {
+    return avb_send_cvu_srp_attr(state, attr, attr_list_len, label);
+  }
+
+  msrp_msgbuf_s msrp_msg;
+  memset(&msrp_msg, 0, sizeof(msrp_msg));
+  msrp_msg.protocol_ver = 0;
+  memcpy(msrp_msg.messages_raw, attr, attr_size);
+  uint16_t msg_len = 5 + attr_list_len + 2; // header + attr_list_len + end mark
+
+  ret = avb_net_send(state, ethertype_msrp, &msrp_msg, msg_len, &ts);
+  if (ret < 0) {
+    avberr("send MSRP %s failed: %d", label, errno);
+  }
+  return ret;
+}
+
 /* Send MSRP talker advertise message with appropriate event */
 int avb_send_msrp_talker(avb_state_s *state, mrp_attr_event_t attr_event,
                          bool leave_all, bool is_failed, unique_id_t *stream_id,
                          eth_addr_t *stream_dest_addr, uint8_t *vlan_id,
                          uint16_t max_frame_size) {
   msrp_talker_message_u msg;
-  struct timespec ts;
-  int ret;
   int attr_list_len;
   memset(&msg, 0, sizeof(msg));
 
@@ -240,18 +261,9 @@ int avb_send_msrp_talker(avb_state_s *state, mrp_attr_event_t attr_event,
     msg.talker.event_data[0] = int_to_3pe(attr_event, 0, 0);
   }
 
-  // Create an MSRP message buffer
-  msrp_msgbuf_s msrp_msg;
-  memset(&msrp_msg, 0, sizeof(msrp_msg));
-  msrp_msg.protocol_ver = 0;
-  memcpy(msrp_msg.messages_raw, &msg, sizeof(msg));
-  uint16_t msg_len = 5 + attr_list_len + 2; // header + attr_list_len + end mark
-
-  ret = avb_net_send(state, ethertype_msrp, &msrp_msg, msg_len, &ts);
-  if (ret < 0) {
-    avberr("send MSRP Talker Advertise failed: %d", errno);
-  }
-  return ret;
+  return avb_send_msrp_attr(state, &msg, attr_list_len,
+                            is_failed ? "Talker Failed"
+                                      : "Talker Advertise");
 }
 
 /* Send MSRP listener message with appropriate event */
@@ -259,8 +271,6 @@ int avb_send_msrp_listener(avb_state_s *state, mrp_attr_event_t attr_event,
                            msrp_listener_event_t listener_event, bool leave_all,
                            unique_id_t *stream_id) {
   msrp_listener_message_s msg;
-  struct timespec ts;
-  int ret;
   memset(&msg, 0, sizeof(msg));
 
   // Populate the message
@@ -275,18 +285,7 @@ int avb_send_msrp_listener(avb_state_s *state, mrp_attr_event_t attr_event,
   msg.event_decl_data[0].event = int_to_3pe(attr_event, 0, 0);
   msg.event_decl_data[1].declaration.event1 = listener_event;
 
-  // Create an MSRP message buffer
-  msrp_msgbuf_s msrp_msg;
-  memset(&msrp_msg, 0, sizeof(msrp_msg));
-  msrp_msg.protocol_ver = 0;
-  memcpy(msrp_msg.messages_raw, &msg, sizeof(msg));
-  uint16_t msg_len = 5 + attr_list_len + 2; // header + attr_list_len + end mark
-
-  ret = avb_net_send(state, ethertype_msrp, &msrp_msg, msg_len, &ts);
-  if (ret < 0) {
-    avberr("send MSRP Listener failed: %d", errno);
-  }
-  return ret;
+  return avb_send_msrp_attr(state, &msg, attr_list_len, "Listener");
 }
 
 /* MAAP timing constants (IEEE 1722-2016 Annex B) */
@@ -1860,11 +1859,11 @@ err:
  ****************************************************************************/
 
 /* Time-scheduled packet queue for presentation-time rendering
- * (IEEE 1722 §AAF + Milan v1.3 §7.2): each received packet is stored
+ * (IEEE 1722 AVTP audio + Milan v1.3 §7.2): each received packet is stored
  * with its avtp_timestamp; the drain emits the packet whose
  * presentation time has come rather than in arrival order.
  *
- * Producer: AAF RX handler (EMAC task).
+ * Producer: audio stream RX handler (EMAC task).
  * Consumer: drain callback (esp_timer task).
  * Single-producer / single-consumer ring of fixed-size packet slots.
  *
@@ -1874,14 +1873,14 @@ err:
  * recompilation. Packet duration and byte count are bounded per-slot
  * rather than hard-coded so multi-sample-rate or larger-packet formats
  * work too. */
-/* Upper bound on samples per AAF packet after listener downmix to
+/* Upper bound on samples per audio packet after listener downmix to
  * stereo. Class B at 96 kHz = 96 samples/packet (1 ms × 96 kHz); Class
  * A at 192 kHz = 24. We size the queue slots for the worst of the
  * rates we currently test with. Bump this if 192 kHz Class B streams
  * (192 sa/packet) ever need to be accepted — at the cost of queue
  * memory (queue_capacity × max_packet_bytes of SRAM). */
-#define AAF_MAX_PACKET_SAMPLES 96
-#define AAF_MAX_PACKET_BYTES   (AAF_MAX_PACKET_SAMPLES * 2 /*ch*/ * 3 /*bytes*/)
+#define STREAM_MAX_PACKET_SAMPLES 96
+#define STREAM_MAX_PACKET_BYTES   (STREAM_MAX_PACKET_SAMPLES * 2 /*ch*/ * 3 /*bytes*/)
 
 /* Jitter ring buffer — SPSC byte FIFO. Single producer = EMAC RX handler
  * (inline in emac_rx task). Single consumer = drain esp_timer callback.
@@ -1998,7 +1997,7 @@ typedef struct {
 static stream_rx_ctx_t *s_stream_rx_ctx = NULL;
 
 /* CRF stream RX context. Allocated by avb_start_stream_in when index is the
- * endpoint's CRF media-clock STREAM_INPUT. Unlike the AAF
+ * endpoint's CRF media-clock STREAM_INPUT. Unlike the audio stream
  * context this has no I2S/jitter-buffer machinery, just packet reception
  * state for Phase 2 media-clock recovery. */
 typedef struct {
@@ -2014,7 +2013,7 @@ typedef struct {
   uint64_t last_timestamp_ns;
   uint32_t timestamp_count;
   /* Latest-packet snapshot for the deferred drift sampler. Same
-   * rationale as the AAF variant. */
+   * rationale as the audio stream variant. */
   volatile uint64_t drift_latest_crf_ts_ns;
   volatile int64_t drift_latest_rx_ts_us;
   volatile bool drift_latest_valid;
@@ -2178,7 +2177,7 @@ static void avb_crf_rx_handler(uint8_t *avtp_data, uint16_t len,
   }
 
   /* Stash the latest CRF timestamp + arrival esp_timer value for the
-   * deferred drift sampler. Same rationale as the AAF path:
+   * deferred drift sampler. Same rationale as the audio stream path:
    * clock_gettime(CLOCK_PTP_SYSTEM) goes into the PTP clock driver
    * and was contending with PTPD internals. */
   ctx->drift_latest_crf_ts_ns = timestamp_ns;
@@ -2273,11 +2272,13 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
     ctx->diag_captured = 1;
   }
 
-  /* AVTP wire → I2S stereo 24-bit BE, written directly into the jitter
-   * ring with a single atomic head-publish at the end. The in-memory
-   * layout matches the wire (big_endian=true slot_cfg), so AAF is just
-   * a copy of the first 3 bytes of each 4-byte container; AM824 strips
-   * the 1-byte label per quadlet. Extra channels are ignored. */
+  /* AVTP wire → I2S stereo 24-bit samples, written directly into the
+   * jitter ring with a single atomic head-publish at the end. I2S slot
+   * config is big-endian (avbcodec.c: slot_cfg.big_endian = true) so the
+   * DMA/DAC path expects [MSB, MID, LSB] in memory — same byte order as
+   * AAF wire format, which lets us memcpy the 3 sample bytes straight
+   * across. AM824 prefixes a label byte; skip it. Extra channels are
+   * ignored. */
   uint32_t total = (uint32_t)samples * 6; /* stereo 24-bit */
   if (total > 0 && ring_writable(&ctx->ring) >= total) {
     uint32_t h = atomic_load_explicit(&ctx->ring.head, memory_order_relaxed);
@@ -2292,7 +2293,7 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
         uint32_t p1 = (h + offset + 1) & mask;
         uint32_t p2 = (h + offset + 2) & mask;
         if (subtype == avtp_subtype_aaf) {
-          /* AAF: [MSB, MID, LSB, pad] — copy first 3 bytes */
+          /* AAF: [MSB, MID, LSB, pad] → I2S memory [MSB, MID, LSB] */
           if (src_offset + 2 < pcm_len) {
             rbuf[p0] = pcm_data[src_offset + 0];
             rbuf[p1] = pcm_data[src_offset + 1];
@@ -2300,7 +2301,7 @@ static void avb_stream_rx_handler(uint8_t *avtp_data, uint16_t len,
           } else {
             rbuf[p0] = rbuf[p1] = rbuf[p2] = 0;
           }
-        } else { /* AM824: [label, MSB, MID, LSB] — skip label */
+        } else { /* AM824: [label, MSB, MID, LSB] → [MSB, MID, LSB] */
           if (src_offset + 3 < pcm_len) {
             rbuf[p0] = pcm_data[src_offset + 1];
             rbuf[p1] = pcm_data[src_offset + 2];
@@ -2474,9 +2475,9 @@ void avb_stream_out_print_diag(void) {
 /* Deferred drift sampler. Called from AVB main's periodic loop at
  * ~100 Hz. Reads the "latest packet" snapshot each RX handler stashed,
  * does the single expensive clock_gettime(CLOCK_PTP_SYSTEM) call, and
- * updates the aaf_* / crf_* drift stats that avb_pll_tick consumes.
+ * updates the stream_* / crf_* drift stats that avb_pll_tick consumes.
  *
- * Moved out of the RX hot path so the 800 Hz AAF handler no longer
+ * Moved out of the RX hot path so the audio stream handler no longer
  * contends with PTPD on the PTP-clock driver. ~100 samples/s over the
  * PLL's 5-s window = ~500 samples per PLL computation — plenty for a
  * stable mean.
@@ -2501,12 +2502,12 @@ void avb_stream_in_sample_drift(avb_state_s *state) {
   next_sample_us = now_us + 10 * 1000; /* 10 ms */
 
   /* Snapshot whichever streams are active. Single PTP read shared
-   * between AAF and CRF. */
-  stream_rx_ctx_t *aaf_ctx = s_stream_rx_ctx;
+   * between the audio stream and CRF. */
+  stream_rx_ctx_t *stream_ctx = s_stream_rx_ctx;
   crf_rx_ctx_t *crf_ctx = s_crf_rx_ctx;
-  bool have_aaf = (aaf_ctx && aaf_ctx->drift_latest_valid);
+  bool have_stream = (stream_ctx && stream_ctx->drift_latest_valid);
   bool have_crf = (crf_ctx && crf_ctx->drift_latest_valid);
-  if (!have_aaf && !have_crf)
+  if (!have_stream && !have_crf)
     return;
 
   struct timespec now_ts;
@@ -2516,32 +2517,32 @@ void avb_stream_in_sample_drift(avb_state_s *state) {
       (uint64_t)now_ts.tv_sec * 1000000000ULL + (uint64_t)now_ts.tv_nsec;
   int64_t now_esp_us = esp_timer_get_time();
 
-  if (have_aaf) {
-    uint32_t avtp_ts = aaf_ctx->drift_latest_avtp_ts;
-    int64_t rx_ts_us = aaf_ctx->drift_latest_rx_ts_us;
+  if (have_stream) {
+    uint32_t avtp_ts = stream_ctx->drift_latest_avtp_ts;
+    int64_t rx_ts_us = stream_ctx->drift_latest_rx_ts_us;
     int64_t elapsed_us = now_esp_us - rx_ts_us;
     if (elapsed_us < 0)
       elapsed_us = 0;
     uint64_t arrival_ptp_ns =
         now_ptp_ns - (uint64_t)((int64_t)elapsed_us * 1000);
     int32_t drift = (int32_t)(avtp_ts - (uint32_t)arrival_ptp_ns);
-    state->media_clock.aaf_last_drift_ns = drift;
-    state->media_clock.aaf_drift_sum_ns += drift;
-    state->media_clock.aaf_samples++;
-    if (state->media_clock.aaf_samples == 1 ||
-        drift < state->media_clock.aaf_drift_min_ns) {
-      state->media_clock.aaf_drift_min_ns = drift;
+    state->media_clock.stream_last_drift_ns = drift;
+    state->media_clock.stream_drift_sum_ns += drift;
+    state->media_clock.stream_samples++;
+    if (state->media_clock.stream_samples == 1 ||
+        drift < state->media_clock.stream_drift_min_ns) {
+      state->media_clock.stream_drift_min_ns = drift;
     }
-    if (state->media_clock.aaf_samples == 1 ||
-        drift > state->media_clock.aaf_drift_max_ns) {
-      state->media_clock.aaf_drift_max_ns = drift;
+    if (state->media_clock.stream_samples == 1 ||
+        drift > state->media_clock.stream_drift_max_ns) {
+      state->media_clock.stream_drift_max_ns = drift;
     }
     /* Milan late_ts / early_ts — approximate at sample rate, which is
      * enough for trend. */
     if (drift < 0)
-      aaf_ctx->late_ts_count++;
+      stream_ctx->late_ts_count++;
     else if (drift > 50 * 1000 * 1000)
-      aaf_ctx->early_ts_count++;
+      stream_ctx->early_ts_count++;
   }
 
   if (have_crf) {
@@ -2619,7 +2620,7 @@ void avb_get_stream_in_counters(aem_stream_in_counters_val_s *valid,
 }
 
 /* Stream RX dispatcher — registered with the net layer; routes incoming
- * VLAN AVTP frames by stream_id to either the AAF handler or the CRF
+ * VLAN AVTP frames by stream_id to either the audio stream handler or the CRF
  * handler. Both contexts are checked because either may be active. */
 static void avb_stream_rx_dispatcher(uint8_t *avtp_data, uint16_t len,
                                      void *unused_ctx) {
@@ -2639,7 +2640,7 @@ static void avb_stream_rx_dispatcher(uint8_t *avtp_data, uint16_t len,
 }
 
 /* Start CRF media clock input (Milan v1.3 §7.2.2).
- * Lightweight compared to AAF: no I2S, no jitter buffer — just a context
+ * Lightweight compared to the audio stream input: no I2S, no jitter buffer — just a context
  * for packet reception and stats. Phase 2 will use the recorded
  * timestamps to drive a media-clock PLL. */
 static int avb_start_stream_in_crf(avb_state_s *state, uint16_t index) {
@@ -2657,7 +2658,7 @@ static int avb_start_stream_in_crf(avb_state_s *state, uint16_t index) {
          UNIQUE_ID_LEN);
   s_crf_rx_ctx = ctx;
   state->input_streams[index].connected = true;
-  /* Ensure the dispatcher is registered even if AAF isn't running yet */
+  /* Ensure the dispatcher is registered even if audio stream input isn't running yet */
   avb_net_set_stream_rx_handler(avb_stream_rx_dispatcher, NULL);
   avbinfo("CRF stream in started (stream index %d)", index);
   return OK;
@@ -2728,7 +2729,7 @@ int avb_start_stream_in(avb_state_s *state, uint16_t index) {
   state->stream_in_active = true;
   state->input_streams[index].connected = true;
 
-  /* Register the shared dispatcher — routes to AAF or CRF by stream_id */
+  /* Register the shared dispatcher — routes to audio stream input or CRF by stream_id */
   avb_net_set_stream_rx_handler(avb_stream_rx_dispatcher, NULL);
 
   avbinfo("Stream in started (ring=%d B, prefill=%d B, 1 ms drain)",

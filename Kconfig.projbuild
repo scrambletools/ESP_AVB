@@ -86,4 +86,15 @@ menu "AVB Configuration"
             pure IEEE 1722.1-2021 AVB/AVDECC endpoint rather than a
             Milan endpoint.
 
+
+    config ESP_AVB_AVB_LITE_COMPLIANT
+        bool "Advertise AVB Lite compliance"
+        default y
+        depends on ESP_AVB
+        help
+            Allow ESP-AVB to advertise/report AVB Lite operation when the PTP
+            daemon falls back from gPTP to the standard PTP profile. If this is
+            disabled, ESP-AVB will not switch its public AVB Lite status on even
+            if PTP is running in standard profile.
+
 endmenu # ESP_AVB Configuration

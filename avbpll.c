@@ -263,7 +263,7 @@ static bool read_crf_anchor(avb_state_s *state, uint64_t *ts_out,
  * Dispatches on the active CLOCK_SOURCE that AECP SET_CLOCK_SOURCE
  * selected:
  *   - INTERNAL: use local gPTP + current i2s_bytes_written. Works
- *     for any Milan-compliant talker and for non-Milan AAF streams
+ *     for any Milan-compliant talker and for non-Milan AVTP audio streams
  *     that don't ship a CRF.
  *   - CRF INPUT: use the CRF-anchor pair only. If no fresh CRF PDU
  *     has arrived (anchor stale or missing), skip this PLL tick —
@@ -319,14 +319,14 @@ void avb_pll_print_stats(avb_state_s *state) {
   int32_t cumul_ppm_q16 = state->media_clock.pll_cumulative_ppm_error_q16;
   /* Nothing to report if we haven't measured anything this window. */
   if (state->media_clock.crf_samples == 0 &&
-      state->media_clock.aaf_samples == 0)
+      state->media_clock.stream_samples == 0)
     return;
   uint32_t crf_n = state->media_clock.crf_samples;
-  uint32_t aaf_n = state->media_clock.aaf_samples;
+  uint32_t stream_n = state->media_clock.stream_samples;
   int32_t crf_mean =
       crf_n > 0 ? (int32_t)(state->media_clock.crf_drift_sum_ns / crf_n) : 0;
-  int32_t aaf_mean =
-      aaf_n > 0 ? (int32_t)(state->media_clock.aaf_drift_sum_ns / aaf_n) : 0;
+  int32_t stream_mean =
+      stream_n > 0 ? (int32_t)(state->media_clock.stream_drift_sum_ns / stream_n) : 0;
   int32_t inst_centippm = (int32_t)(((int64_t)inst_ppm_q16 * 100) >> 16);
   int32_t cumul_centippm = (int32_t)(((int64_t)cumul_ppm_q16 * 100) >> 16);
   int32_t applied_centippm =
@@ -340,14 +340,14 @@ void avb_pll_print_stats(avb_state_s *state) {
                                            s_hw.nominal_apll_hz)
                                : 0;
   avbinfo("MCLK: crf n=%lu drift=%lldns mean=%ldns min=%ldns max=%ldns | "
-          "aaf n=%lu drift=%ldns mean=%ldns min=%ldns max=%ldns | "
+          "stream n=%lu drift=%ldns mean=%ldns min=%ldns max=%ldns | "
           "pll inst=%ld.%02ld cumul=%ld.%02ld applied=%ld.%02ld hw=%ld ppm",
           crf_n, state->media_clock.crf_last_drift_ns, crf_mean,
           state->media_clock.crf_drift_min_ns,
-          state->media_clock.crf_drift_max_ns, aaf_n,
-          state->media_clock.aaf_last_drift_ns, aaf_mean,
-          state->media_clock.aaf_drift_min_ns,
-          state->media_clock.aaf_drift_max_ns, inst_centippm / 100,
+          state->media_clock.crf_drift_max_ns, stream_n,
+          state->media_clock.stream_last_drift_ns, stream_mean,
+          state->media_clock.stream_drift_min_ns,
+          state->media_clock.stream_drift_max_ns, inst_centippm / 100,
           (inst_centippm < 0 ? -inst_centippm : inst_centippm) % 100,
           cumul_centippm / 100,
           (cumul_centippm < 0 ? -cumul_centippm : cumul_centippm) % 100,
@@ -360,10 +360,10 @@ void avb_pll_print_stats(avb_state_s *state) {
   state->media_clock.crf_drift_min_ns = 0;
   state->media_clock.crf_drift_max_ns = 0;
   state->media_clock.crf_samples = 0;
-  state->media_clock.aaf_drift_sum_ns = 0;
-  state->media_clock.aaf_drift_min_ns = 0;
-  state->media_clock.aaf_drift_max_ns = 0;
-  state->media_clock.aaf_samples = 0;
+  state->media_clock.stream_drift_sum_ns = 0;
+  state->media_clock.stream_drift_min_ns = 0;
+  state->media_clock.stream_drift_max_ns = 0;
+  state->media_clock.stream_samples = 0;
 }
 
 int avb_pll_init(uint32_t nominal_mclk_hz) {
