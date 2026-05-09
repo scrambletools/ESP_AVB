@@ -272,7 +272,7 @@ static bool read_crf_anchor(avb_state_s *state, uint64_t *ts_out,
 static bool read_sample(avb_state_s *state, uint64_t *bytes_out,
                         uint64_t *gptp_ns_out) {
   struct timespec gptp;
-  if (clock_gettime(CLOCK_PTP_SYSTEM, &gptp) != 0)
+  if (ptpd_now(&gptp) != 0)
     return false;
   uint64_t local_ns =
       (uint64_t)gptp.tv_sec * 1000000000ULL + (uint64_t)gptp.tv_nsec;

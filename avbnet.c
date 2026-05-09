@@ -150,14 +150,14 @@ int avb_net_init(avb_state_s *state) {
   for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
 
     int fd = open("/dev/net/tap", 0);
-    state->l2if[i] = fd;
-    if (state->l2if[i] < 0) {
+    state->port[0].l2if[i] = fd;
+    if (state->port[0].l2if[i] < 0) {
       avberr("Failed to create tx l2if: %d", errno);
       return ERROR;
     }
 
     // Set Ethernet interface on which to get raw frames
-    if (ioctl(state->l2if[i], L2TAP_S_INTF_DEVICE,
+    if (ioctl(state->port[0].l2if[i], L2TAP_S_INTF_DEVICE,
               state->config.eth_interface) < 0) {
       avberr(
           "failed to set network interface at fd %d on interface %s: errno %d",
@@ -187,7 +187,7 @@ int avb_net_init(avb_state_s *state) {
     // Set the Ethertype filter — required for L2TAP write() to work,
     // and also registers this ethertype with the L2TAP filter so the
     // EMAC callback can pass unmatched frames through.
-    if (ioctl(state->l2if[i], L2TAP_S_RCV_FILTER, &ethertype) < 0) {
+    if (ioctl(state->port[0].l2if[i], L2TAP_S_RCV_FILTER, &ethertype) < 0) {
       avberr("Failed to set Ethertype filter for fd %d: errno %d", fd, errno);
       return ERROR;
     }
@@ -202,14 +202,14 @@ int avb_net_init(avb_state_s *state) {
 
   /* Create a handle to the Ethernet driver */
   esp_eth_handle_t eth_handle;
-  if (ioctl(state->l2if[0], L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) < 0) {
-    avberr("Failed to get eth_handle for fd %d: errno %d", state->l2if[0],
+  if (ioctl(state->port[0].l2if[0], L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) < 0) {
+    avberr("Failed to get eth_handle for fd %d: errno %d", state->port[0].l2if[0],
            errno);
     return ERROR;
   }
 
   // Get MAC address and store in state
-  esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, &state->internal_mac_addr);
+  esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, &state->port[0].internal_mac_addr);
 
   /* Create the control frame RX queue */
   s_ctrl_rx_queue = xQueueCreate(CTRL_RX_QUEUE_DEPTH, sizeof(ctrl_rx_pkt_t));
@@ -248,7 +248,7 @@ void avb_create_eth_frame(uint8_t *eth_frame, eth_addr_t *dest_addr,
                                           htons((prio << 13) | (vid & 0x0FFF)),
                                       .tpid = htons(ethertype_avtp)};
   memcpy(&eth_hdr.dest.addr, dest_addr, ETH_ADDR_LEN);
-  memcpy(&eth_hdr.src.addr, state->internal_mac_addr, ETH_ADDR_LEN);
+  memcpy(&eth_hdr.src.addr, state->port[0].internal_mac_addr, ETH_ADDR_LEN);
   memcpy(eth_frame, &eth_hdr, sizeof(eth_hdr));
   if (ethertype == ethertype_vlan) {
     memcpy(eth_frame + sizeof(eth_hdr), &eth_vlan_hdr, sizeof(eth_vlan_hdr));
@@ -272,16 +272,16 @@ int avb_net_send_to(avb_state_s *state, ethertype_t ethertype, void *msg,
   // Get the L2IF for the given ethertype
   switch (ethertype) {
   case ethertype_avtp:
-    l2if = state->l2if[AVTP];
+    l2if = state->port[0].l2if[AVTP];
     break;
   case ethertype_msrp:
-    l2if = state->l2if[MSRP];
+    l2if = state->port[0].l2if[MSRP];
     break;
   case ethertype_mvrp:
-    l2if = state->l2if[MVRP];
+    l2if = state->port[0].l2if[MVRP];
     break;
   case ethertype_vlan:
-    l2if = state->l2if[VLAN];
+    l2if = state->port[0].l2if[VLAN];
     break;
   default:
     avberr("Invalid ethertype: %d", ethertype);
@@ -305,16 +305,16 @@ int avb_net_send_to_vlan(avb_state_s *state, ethertype_t ethertype, void *msg,
 
   switch (ethertype) {
   case ethertype_avtp:
-    l2if = state->l2if[AVTP];
+    l2if = state->port[0].l2if[AVTP];
     break;
   case ethertype_msrp:
-    l2if = state->l2if[MSRP];
+    l2if = state->port[0].l2if[MSRP];
     break;
   case ethertype_mvrp:
-    l2if = state->l2if[MVRP];
+    l2if = state->port[0].l2if[MVRP];
     break;
   case ethertype_vlan:
-    l2if = state->l2if[VLAN];
+    l2if = state->port[0].l2if[VLAN];
     break;
   default:
     avberr("Invalid ethertype: %d", ethertype);

@@ -756,6 +756,11 @@ typedef enum {
   cip_sfc_sample_rate_192k
 } cip_sfc_sample_rate_t;
 
+/* CIP SFC code → sample rate in Hz. Defined in msrp.c (the MSRP
+ * TALKER advertise needs it for bandwidth calculation); the AVTP
+ * talker also calls it. */
+uint32_t cip_sfc_to_sample_rate(uint8_t sfc);
+
 /* Network types */
 
 typedef uint8_t eth_addr_t[ETH_ADDR_LEN];
@@ -2559,6 +2564,42 @@ typedef struct {
   avb_status_s *dest;
 } avb_statusreq_s;
 
+/* Per-port AVB state. Phase 2a holds configuration + new per-port state
+ * (asCapable, neighborGptpCapable). The historical per-port runtime
+ * state (eth_handle, internal_mac_addr, l2if[], last_transmitted_*
+ * timers) remains in avb_state_s for Phase 2a to preserve bit-identical
+ * behavior; Phase 2b migrates those scalars into this struct and
+ * threads port_index through the network and timer paths.
+ *
+ * With CONFIG_ESP_AVB_NUM_PORTS=1 (the default) only port[0] exists
+ * and its config is fixed to { ethernet, gptp_wired } so no call site
+ * branches on this struct yet. */
+typedef struct {
+  /* Configuration. */
+  bool enabled;
+  avb_port_medium_e medium;
+  avb_port_time_source_e time_source;
+  char eth_interface[16];
+
+  /* IEEE 802.1AS-2020 §10.2.5 / §12.4 per-port flags. Phase 2a
+   * placeholders — populated by port-init in avb_task and read by
+   * future per-port logic (Phase 5+). */
+  bool as_capable;
+  bool neighbor_gptp_capable;
+
+  /* Per-port runtime state (migrated from avb_state_s in Phase 2b). */
+  eth_addr_t internal_mac_addr;
+  int l2if[AVB_NUM_PROTOCOLS]; // L2TAP fds for AVTP, MSRP, MVRP
+
+  /* Last time we sent a periodic message on this port. */
+  struct timespec last_transmitted_adp_entity_avail;
+  struct timespec last_transmitted_mvrp_vlan_id;
+  struct timespec last_transmitted_msrp_domain;
+  struct timespec last_transmitted_msrp_talker_adv;
+  struct timespec last_transmitted_msrp_listener;
+  struct timespec last_transmitted_msrp_leaveall;
+} avb_port_s;
+
 /* Main AVB state storage */
 typedef struct {
 
@@ -2567,15 +2608,15 @@ typedef struct {
   avb_sample_rates_s supported_sample_rates; // codec caps ∩ config policy
   avb_bit_rates_s supported_bits_per_sample; // codec caps ∩ config policy
 
+  /* Per-port array (Phase 2a: configuration only). */
+  avb_port_s port[CONFIG_ESP_AVB_NUM_PORTS];
+
   /* Request for AVB task to stop or report status */
   bool stop;
   avb_statusreq_s status_req;
   struct ptpd_status_s ptp_status;
 
-  eth_addr_t internal_mac_addr;
-  esp_eth_handle_t eth_handle;
-  int l2if[AVB_NUM_PROTOCOLS]; // 3 L2TAP interfaces (FDs) for AVTP, MSRP, and
-                               // MVRP
+  esp_eth_handle_t eth_handle;             // legacy slot, currently unused
   QueueHandle_t ctrl_rx_queue; // control frame queue from EMAC dispatcher
   bool stream_in_active;       // stream-in handler is registered
   bool avb_lite;               // operating in AVB Lite mode (standard PTP)
@@ -2750,13 +2791,9 @@ typedef struct {
   i2s_chan_handle_t i2s_tx_handle;
   i2s_chan_handle_t i2s_rx_handle;
 
-  /* Last time we sent a periodic message */
-  struct timespec last_transmitted_adp_entity_avail;
-  struct timespec last_transmitted_mvrp_vlan_id;
-  struct timespec last_transmitted_msrp_domain;
-  struct timespec last_transmitted_msrp_talker_adv;
-  struct timespec last_transmitted_msrp_listener;
-  struct timespec last_transmitted_msrp_leaveall;
+  /* Last time we sent a periodic message (per-port timers migrated
+   * into avb_port_s; these two stay in state because they are not
+   * tied to a specific port). */
   struct timespec last_ptp_status_update;
   struct timespec last_transmitted_unsol_notif;
 

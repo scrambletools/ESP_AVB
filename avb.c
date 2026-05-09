@@ -196,6 +196,41 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   // Copy config to state
   memcpy(&state->config, config, sizeof(avb_config_s));
 
+  /* Seed port[0] from the legacy single-port config so the per-port
+   * array reflects historical { ethernet, gptp_wired } behavior.
+   * Per-port runtime state (internal_mac_addr, l2if[],
+   * last_transmitted_* timers) lives in state->port[0] and is
+   * populated by avb_net_init and the periodic-send paths. */
+  state->port[0].enabled = true;
+#if defined(CONFIG_ESP_AVB_PORT0_MEDIUM_WIFI)
+  state->port[0].medium = avb_port_medium_wifi;
+#else
+  state->port[0].medium = avb_port_medium_ethernet;
+#endif
+#if defined(CONFIG_ESP_AVB_PORT0_TIME_SOURCE_BEACON_IE_WIFI)
+  state->port[0].time_source = avb_port_time_source_beacon_ie_wifi;
+#elif defined(CONFIG_ESP_AVB_PORT0_TIME_SOURCE_FTM_ONLY)
+  state->port[0].time_source = avb_port_time_source_ftm_only;
+#else
+  state->port[0].time_source = avb_port_time_source_gptp_wired;
+#endif
+  if (config->eth_interface) {
+    strncpy(state->port[0].eth_interface, config->eth_interface,
+            sizeof(state->port[0].eth_interface) - 1);
+    state->port[0].eth_interface[sizeof(state->port[0].eth_interface) - 1] = '\0';
+  }
+  /* asCapable defaults to true on the wired path because the existing gPTP
+   * daemon owns that determination; placeholder until per-port asCapable
+   * machinery lands in Phase 5+. */
+  state->port[0].as_capable = true;
+  state->port[0].neighbor_gptp_capable = true;
+
+#if defined(CONFIG_ESP_AVB_ROLE_BRIDGE)
+  /* Bridge has no codec / talker / listener. Skip the entire codec
+   * caps + sample-rate / bits-per-sample intersection block. */
+  const avb_codec_caps_s *codec_caps = NULL;
+  (void)codec_caps;
+#else
   const avb_codec_caps_s *codec_caps = avb_codec_get_caps(state->config.codec_type);
   if (!codec_caps) {
     avberr("Unsupported codec type: %d", state->config.codec_type);
@@ -245,6 +280,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
            codec_caps->max_output_channels);
     return ERROR;
   }
+#endif /* CONFIG_ESP_AVB_ROLE_BRIDGE */
 
   // Initialize the low level ethernet interface
   int ret = avb_net_init(state);
@@ -254,7 +290,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   }
 
   // Set entity id based on MAC address and model id
-  memcpy(state->own_entity.summary.entity_id, state->internal_mac_addr,
+  memcpy(state->own_entity.summary.entity_id, state->port[0].internal_mac_addr,
          ETH_ADDR_LEN);
   uint64_t model_id = state->config.model_id;
   int_to_octets(&model_id, state->own_entity.summary.model_id, 8);
@@ -282,7 +318,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   /* object_name fields are intentionally left empty unless restored from NVS
    * or set via AECP SET_NAME. Localized fallback strings are provided by the
    * STRINGS descriptors. */
-  memcpy(state->avb_interface.mac_address, state->internal_mac_addr,
+  memcpy(state->avb_interface.mac_address, state->port[0].internal_mac_addr,
          ETH_ADDR_LEN);
   state->avb_interface.flags.gptp_gm_supported = true;
   state->avb_interface.flags.gptp_supported = true;
@@ -435,7 +471,7 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
     for (int i = 0; i < state->num_output_streams; i++) {
       memcpy(&state->output_streams[i], &output_stream,
              sizeof(avb_talker_stream_s));
-      stream_id_from_mac(&state->internal_mac_addr,
+      stream_id_from_mac(&state->port[0].internal_mac_addr,
                          state->output_streams[i].stream_id, i);
       /* Stream dest addr will be set by MAAP after address acquisition */
       memset(&state->output_streams[i].stream_dest_addr, 0, ETH_ADDR_LEN);
@@ -483,9 +519,9 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
 static int avb_destroy_state(avb_state_s *state) {
 
   for (int i = 0; i < AVB_NUM_PROTOCOLS; i++) {
-    if (state->l2if[i] > 0) {
-      close(state->l2if[i]);
-      state->l2if[i] = -1;
+    if (state->port[0].l2if[i] > 0) {
+      close(state->port[0].l2if[i]);
+      state->port[0].l2if[i] = -1;
     }
   }
   return OK;
@@ -515,10 +551,10 @@ static int avb_periodic_send(avb_state_s *state) {
 
   // Send ADP entity available message when ATDECC control or Milan mode is enabled.
   if (state->config.atdecc_control || state->config.milan_compliant) {
-    timespecsub(&time_now, &state->last_transmitted_adp_entity_avail,
+    timespecsub(&time_now, &state->port[0].last_transmitted_adp_entity_avail,
                             &delta);
     if (timespec_to_ms(&delta) > ADP_ENTITY_AVAIL_INTERVAL_MSEC) {
-      state->last_transmitted_adp_entity_avail = time_now;
+      state->port[0].last_transmitted_adp_entity_avail = time_now;
       avb_send_adp_entity_available(state);
     }
   }
@@ -526,24 +562,24 @@ static int avb_periodic_send(avb_state_s *state) {
   // Send MVRP VLAN ID message — always JoinIn so the switch registers
   // VLAN membership on this port from boot. Required for MSRP Listener
   // registrations to be accepted by the switch.
-  timespecsub(&time_now, &state->last_transmitted_mvrp_vlan_id,
+  timespecsub(&time_now, &state->port[0].last_transmitted_mvrp_vlan_id,
                           &delta);
   if (timespec_to_ms(&delta) > MVRP_VLAN_ID_INTERVAL_MSEC) {
-    state->last_transmitted_mvrp_vlan_id = time_now;
+    state->port[0].last_transmitted_mvrp_vlan_id = time_now;
     avb_send_mvrp_vlan_id(state, mrp_attr_event_join_in, false);
   }
 
   // Send MSRP domain message — use JoinIn when connected
-  timespecsub(&time_now, &state->last_transmitted_msrp_domain,
+  timespecsub(&time_now, &state->port[0].last_transmitted_msrp_domain,
                           &delta);
   if (timespec_to_ms(&delta) > MSRP_DOMAIN_INTERVAL_MSEC) {
-    state->last_transmitted_msrp_domain = time_now;
+    state->port[0].last_transmitted_msrp_domain = time_now;
     avb_send_msrp_domain(state, mrp_attr_event_join_in, false);
   }
 
   // Send MSRP talker and AVTP MAAP announce messages
   if (state->config.talker) {
-    timespecsub(&time_now, &state->last_transmitted_msrp_talker_adv,
+    timespecsub(&time_now, &state->port[0].last_transmitted_msrp_talker_adv,
                             &delta);
     static const uint8_t zero_mac[ETH_ADDR_LEN] = {0};
     for (int i = 0; i < state->num_output_streams; i++) {
@@ -557,14 +593,14 @@ static int avb_periodic_send(avb_state_s *state) {
       // if connected and time to send
       if (octets_to_uint(state->output_streams[i].connection_count, 2) > 0 &&
           timespec_to_ms(&delta) > MSRP_TALKER_CONN_INTERVAL_MSEC) {
-        state->last_transmitted_msrp_talker_adv = time_now;
+        state->port[0].last_transmitted_msrp_talker_adv = time_now;
         avb_send_msrp_talker(state, mrp_attr_event_join_in, false, false,
                              &state->output_streams[i].stream_id,
                              &state->output_streams[i].stream_dest_addr,
                              state->output_streams[i].vlan_id, mfs);
         // if idle and time to send
       } else if (timespec_to_ms(&delta) > MSRP_TALKER_IDLE_INTERVAL_MSEC) {
-        state->last_transmitted_msrp_talker_adv = time_now;
+        state->port[0].last_transmitted_msrp_talker_adv = time_now;
         avb_send_msrp_talker(state, mrp_attr_event_join_mt, false, false,
                              &state->output_streams[i].stream_id,
                              &state->output_streams[i].stream_dest_addr,
@@ -576,12 +612,12 @@ static int avb_periodic_send(avb_state_s *state) {
 
   // Send MSRP listener message
   if (state->config.listener) {
-    timespecsub(&time_now, &state->last_transmitted_msrp_listener,
+    timespecsub(&time_now, &state->port[0].last_transmitted_msrp_listener,
                             &delta);
     for (int i = 0; i < state->num_input_streams; i++) {
       if (state->input_streams[i].connected &&
           timespec_to_ms(&delta) > MSRP_LISTENER_CONN_INTERVAL_MSEC) {
-        state->last_transmitted_msrp_listener = time_now;
+        state->port[0].last_transmitted_msrp_listener = time_now;
         avb_send_msrp_listener(state, mrp_attr_event_join_in,
                                msrp_listener_event_ready, false,
                                &state->input_streams[i].stream_id);
@@ -590,10 +626,10 @@ static int avb_periodic_send(avb_state_s *state) {
   }
 
   // if time to send leaveAll
-  timespecsub(&time_now, &state->last_transmitted_msrp_leaveall,
+  timespecsub(&time_now, &state->port[0].last_transmitted_msrp_leaveall,
                           &delta);
   if (timespec_to_ms(&delta) > MSRP_LEAVEALL_INTERVAL_MSEC) {
-    state->last_transmitted_msrp_leaveall = time_now;
+    state->port[0].last_transmitted_msrp_leaveall = time_now;
     avb_send_msrp_domain(state, mrp_attr_event_join_in, true);
 
     // After leaveAll, immediately re-declare all active registrations so the
@@ -612,7 +648,7 @@ static int avb_periodic_send(avb_state_s *state) {
                                avb_compute_tspec_max_frame_size(state, i));
         }
       }
-      state->last_transmitted_msrp_talker_adv = time_now;
+      state->port[0].last_transmitted_msrp_talker_adv = time_now;
     }
     if (state->config.listener) {
       for (int i = 0; i < state->num_input_streams; i++) {
@@ -627,7 +663,7 @@ static int avb_periodic_send(avb_state_s *state) {
     }
     // Re-declare MVRP VLAN registration
     avb_send_mvrp_vlan_id(state, mrp_attr_event_join_in, false);
-    state->last_transmitted_mvrp_vlan_id = time_now;
+    state->port[0].last_transmitted_mvrp_vlan_id = time_now;
   }
 
   // Send Unsolicited notifications
@@ -1591,24 +1627,28 @@ static void avb_persist_apply(avb_state_s *state) {
               i);
       continue;
     }
-    /* Restore the binding identity only. Do NOT restore `connected` —
+    /* Overwrite the binding identity from persist unconditionally. The
+     * latest applied source is authoritative: snapshot apply runs first,
+     * journal replay then runs apply again with the latest journal record,
+     * and a disconnect record carries zeroed talker_id by design. Gating
+     * this copy on any_nonzero8(talker_id) would skip the clear and let
+     * the snapshot's binding survive after a disconnect, causing
+     * fast-connect to fire on the next boot. Do NOT restore `connected` —
      * stream_id, stream_dest_addr, and vlan_id are derived on reconnect
      * (not persisted), so setting connected=true here would make
      * GET_RX_STATE report "connected=1 with zero stream_id/dest", which
-     * both violates Milan §5.5.3.6.16 (fields must be zero when not
-     * settled) and triggers a Hive enumeration fatal. Fast-connect
-     * fires on any stream with a non-zero talker_id and, on success,
-     * avb_connect_listener atomically sets connected=true together
-     * with stream_id / stream_dest_addr. */
-    if (any_nonzero8(src->talker_id)) {
-      memcpy(dst->talker_id, src->talker_id, 8);
-      memcpy(dst->talker_uid, src->talker_uid, 2);
-      memcpy(dst->controller_id, src->controller_id, 8);
-      dst->stream_flags.streaming_wait = src->streaming_wait ? 1 : 0;
-      avbinfo(
-          "NVS: restored binding for stream_input %d (pending fast-connect)",
-          i);
-    }
+     * both violates Milan §5.5.3.6.16 and triggers a Hive enumeration
+     * fatal. Fast-connect fires on any stream with a non-zero talker_id
+     * and, on success, avb_connect_listener atomically sets
+     * connected=true together with stream_id / stream_dest_addr.
+     *
+     * The post-apply "restored binding" log is emitted once at the end of
+     * avb_persist_load, after the journal replay has had a chance to
+     * override the snapshot, so the message reflects the final state. */
+    memcpy(dst->talker_id, src->talker_id, 8);
+    memcpy(dst->talker_uid, src->talker_uid, 2);
+    memcpy(dst->controller_id, src->controller_id, 8);
+    dst->stream_flags.streaming_wait = src->streaming_wait ? 1 : 0;
   }
 
   /* Per-output-stream state */
@@ -1705,6 +1745,17 @@ esp_err_t avb_persist_load(avb_state_s *state) {
       avb_persist_replay_stream_journal(state);
       avbinfo("NVS: loaded persistent data (%d bytes, version %d)",
               (int)stored_size, state->persist.version);
+      /* Single post-load summary of any persisted listener bindings.
+       * Emitted here so the snapshot apply's tentative binding doesn't
+       * log a "restored" line that the journal replay would later
+       * silently invalidate (e.g. after a disconnect). */
+      for (int i = 0; i < state->num_input_streams; i++) {
+        if (any_nonzero8(state->input_streams[i].talker_id)) {
+          avbinfo(
+              "NVS: restored binding for stream_input %d (pending fast-connect)",
+              i);
+        }
+      }
     }
   }
 

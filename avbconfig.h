@@ -45,7 +45,7 @@
  * note: dout and din represent data out and data in on on the mcu
  * dout should map to din on the codec, din should map to dout on the codec
  *
- * for ESP32-P4-ETH board using onboard codec the following pins are used:
+ * for ESP32-P4-ETH board using onboard es8311 the following pins are used:
  * MCLK: GPIO 13
  * BCLK: GPIO 12
  * WS: GPIO 10
@@ -64,6 +64,16 @@
  * I2C_SDA: GPIO 21
  * I2C_SCL: GPIO 20
  * PA: GPIO -1
+ *
+ * for ESP32-C6 test board using onboard es8311 the following pins are used:
+ * MCLK: GPIO 19
+ * BCLK: GPIO 20
+ * WS: GPIO 22
+ * DOUT: GPIO 21
+ * DIN: GPIO 23
+ * I2C_SDA: GPIO 8
+ * I2C_SCL: GPIO 7
+ * PA: GPIO 6
  *
  * pa_reverted: set true if the PA enable pin on the board is wired
  * through an inverter (active-low). The codec driver and the

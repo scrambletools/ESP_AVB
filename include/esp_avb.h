@@ -31,6 +31,33 @@
  * Public Types
  ****************************************************************************/
 
+/* High-level role of this AVB instance. Selected at compile time via
+ * CONFIG_ESP_AVB_ROLE_*. The default is endpoint_wired, which preserves
+ * historical behavior. Other roles gate codec / talker-listener init
+ * and (for bridge) enable forwarding + FQTSS. */
+typedef enum {
+  avb_role_endpoint_wired = 0,
+  avb_role_endpoint_wireless = 1,
+  avb_role_bridge = 2,
+} avb_role_e;
+
+/* Per-port physical medium. */
+typedef enum {
+  avb_port_medium_ethernet = 0,
+  avb_port_medium_wifi = 1,
+} avb_port_medium_e;
+
+/* How the port's slave-side time is synchronized. GPTP_WIRED is the
+ * historical 802.1AS path (Sync/Follow_Up + Pdelay on-wire). BEACON_IE_WIFI
+ * is the wireless variant where Sync rides the AP's 802.11 beacon Vendor IE
+ * and peer-delay rides FTM. FTM_ONLY is a peer-delay-only port (Sync
+ * transport handled elsewhere). */
+typedef enum {
+  avb_port_time_source_gptp_wired = 0,
+  avb_port_time_source_beacon_ie_wifi = 1,
+  avb_port_time_source_ftm_only = 2,
+} avb_port_time_source_e;
+
 /* Codec types */
 typedef enum {
   avb_codec_type_es8311, // Everest Semiconductor ES8311
