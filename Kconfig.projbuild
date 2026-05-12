@@ -97,93 +97,93 @@ menu "AVB Configuration"
             disabled, ESP-AVB will not switch its public AVB Lite status on even
             if PTP is running in standard profile.
 
-    choice ESP_AVB_ROLE
-        prompt "ESP-AVB role"
-        default ESP_AVB_ROLE_ENDPOINT_WIRED
-        depends on ESP_AVB
-        help
-            Selects the high-level role this build of ESP-AVB will serve:
-
-              * endpoint_wired   — the default wired AVB endpoint
-                                   (talker/listener with codec, full ATDECC).
-              * endpoint_wireless — a Wi-Fi-attached AVB endpoint (no gPTP
-                                   on-wire; clock recovered via beacon-IE
-                                   sync transport, peer-delay via FTM).
-              * bridge           — an Ethernet ↔ Wi-Fi AVB bridge with
-                                   FQTSS shaping and SRP propagation.
-                                   No codec, no ATDECC entity.
-
-        config ESP_AVB_ROLE_ENDPOINT_WIRED
-            bool "endpoint_wired (default)"
-        config ESP_AVB_ROLE_ENDPOINT_WIRELESS
-            bool "endpoint_wireless"
-        config ESP_AVB_ROLE_BRIDGE
-            bool "bridge"
-    endchoice
+    # ----------------------------------------------------------------
+    # Per-port topology — derived from esp_ptp's taxonomy.
+    #
+    # esp_ptp owns the user-facing per-port configuration (NUM_PORTS,
+    # MEDIUM, TYPE, WIFI_ROLE) because gPTP is mandatory for AVB and
+    # every AVB port is by definition a gPTP port (IEEE 802.1AS clause
+    # 12). The ESP_AVB_* port symbols below are mirrors that auto-track
+    # the ESP_PTP_* selections so the two components cannot drift.
+    #
+    # Mapping rules:
+    #   ESP_AVB_NUM_PORTS                ← ESP_PTP_NUM_PORTS
+    #   ESP_AVB_PORTn_MEDIUM_ETHERNET    ← ESP_PTP_PORTn_MEDIUM_ETHERNET
+    #   ESP_AVB_PORTn_MEDIUM_WIFI        ← ESP_PTP_PORTn_MEDIUM_WIFI
+    #                                      || ESP_PTP_PORTn_MEDIUM_WIFI_CP
+    #   ESP_AVB_PORTn_TIME_SOURCE_GPTP_WIRED
+    #                                    ← ESP_PTP_PORTn_MEDIUM_ETHERNET
+    #   ESP_AVB_PORTn_TIME_SOURCE_BEACON_IE_WIFI
+    #                                    ← ESP_PTP_PORTn_MEDIUM_WIFI[_CP]
+    #                                      (publisher when WIFI_ROLE_AP,
+    #                                       consumer when WIFI_ROLE_STA)
+    #   ESP_AVB_ROLE_BRIDGE              ← any port has TYPE_BRIDGED
+    #   ESP_AVB_ROLE_ENDPOINT_WIRELESS   ← port0 PRIMARY + WIFI[_CP] + STA
+    #   ESP_AVB_ROLE_ENDPOINT_WIRED      ← port0 PRIMARY + ETHERNET
+    #
+    # To change topology, edit the ESP_PTP_* settings (in menuconfig
+    # under "PTP Daemon Configuration") — these symbols follow.
+    # ----------------------------------------------------------------
 
     config ESP_AVB_NUM_PORTS
-        int "Number of AVB ports"
-        default 1
-        range 1 2
-        depends on ESP_AVB
-        help
-            Number of independent AVB port instances managed by the daemon.
-            Endpoints (wired or wireless) use 1 port; the bridge role uses 2
-            (one Ethernet + one Wi-Fi). Default 1.
-
-    choice ESP_AVB_PORT0_MEDIUM
-        prompt "Port 0 medium"
-        default ESP_AVB_PORT0_MEDIUM_ETHERNET
+        int
+        default ESP_PTP_NUM_PORTS
         depends on ESP_AVB
 
-        config ESP_AVB_PORT0_MEDIUM_ETHERNET
-            bool "ethernet"
-        config ESP_AVB_PORT0_MEDIUM_WIFI
-            bool "wifi"
-    endchoice
-
-    choice ESP_AVB_PORT0_TIME_SOURCE
-        prompt "Port 0 time source"
-        default ESP_AVB_PORT0_TIME_SOURCE_GPTP_WIRED
+    config ESP_AVB_PORT0_MEDIUM_ETHERNET
+        bool
+        default y if ESP_PTP_PORT0_MEDIUM_ETHERNET
         depends on ESP_AVB
 
-        config ESP_AVB_PORT0_TIME_SOURCE_GPTP_WIRED
-            bool "gptp_wired"
-            help
-                On-wire 802.1AS pdelay + Sync (current behavior).
-        config ESP_AVB_PORT0_TIME_SOURCE_BEACON_IE_WIFI
-            bool "beacon_ie_wifi"
-            help
-                Sync via 802.11 beacon Vendor IE; peer-delay via FTM.
-        config ESP_AVB_PORT0_TIME_SOURCE_FTM_ONLY
-            bool "ftm_only"
-            help
-                Peer-delay only; Sync transport elsewhere.
-    endchoice
+    config ESP_AVB_PORT0_MEDIUM_WIFI
+        bool
+        default y if ESP_PTP_PORT0_MEDIUM_WIFI || ESP_PTP_PORT0_MEDIUM_WIFI_CP
+        depends on ESP_AVB
 
-    choice ESP_AVB_PORT1_MEDIUM
-        prompt "Port 1 medium"
-        default ESP_AVB_PORT1_MEDIUM_WIFI
-        depends on ESP_AVB && ESP_AVB_NUM_PORTS = 2
+    config ESP_AVB_PORT0_TIME_SOURCE_GPTP_WIRED
+        bool
+        default y if ESP_PTP_PORT0_MEDIUM_ETHERNET
+        depends on ESP_AVB
 
-        config ESP_AVB_PORT1_MEDIUM_ETHERNET
-            bool "ethernet"
-        config ESP_AVB_PORT1_MEDIUM_WIFI
-            bool "wifi"
-    endchoice
+    config ESP_AVB_PORT0_TIME_SOURCE_BEACON_IE_WIFI
+        bool
+        default y if ESP_PTP_PORT0_MEDIUM_WIFI || ESP_PTP_PORT0_MEDIUM_WIFI_CP
+        depends on ESP_AVB
 
-    choice ESP_AVB_PORT1_TIME_SOURCE
-        prompt "Port 1 time source"
-        default ESP_AVB_PORT1_TIME_SOURCE_BEACON_IE_WIFI
-        depends on ESP_AVB && ESP_AVB_NUM_PORTS = 2
+    config ESP_AVB_PORT1_MEDIUM_ETHERNET
+        bool
+        default y if ESP_PTP_PORT1_MEDIUM_ETHERNET
+        depends on ESP_AVB && ESP_PTP_NUM_PORTS = 2
 
-        config ESP_AVB_PORT1_TIME_SOURCE_GPTP_WIRED
-            bool "gptp_wired"
-        config ESP_AVB_PORT1_TIME_SOURCE_BEACON_IE_WIFI
-            bool "beacon_ie_wifi"
-        config ESP_AVB_PORT1_TIME_SOURCE_FTM_ONLY
-            bool "ftm_only"
-    endchoice
+    config ESP_AVB_PORT1_MEDIUM_WIFI
+        bool
+        default y if ESP_PTP_PORT1_MEDIUM_WIFI || ESP_PTP_PORT1_MEDIUM_WIFI_CP
+        depends on ESP_AVB && ESP_PTP_NUM_PORTS = 2
+
+    config ESP_AVB_PORT1_TIME_SOURCE_GPTP_WIRED
+        bool
+        default y if ESP_PTP_PORT1_MEDIUM_ETHERNET
+        depends on ESP_AVB && ESP_PTP_NUM_PORTS = 2
+
+    config ESP_AVB_PORT1_TIME_SOURCE_BEACON_IE_WIFI
+        bool
+        default y if ESP_PTP_PORT1_MEDIUM_WIFI || ESP_PTP_PORT1_MEDIUM_WIFI_CP
+        depends on ESP_AVB && ESP_PTP_NUM_PORTS = 2
+
+    config ESP_AVB_ROLE_BRIDGE
+        bool
+        default y if ESP_PTP_PORT0_TYPE_BRIDGED || ESP_PTP_PORT1_TYPE_BRIDGED
+        depends on ESP_AVB
+
+    config ESP_AVB_ROLE_ENDPOINT_WIRELESS
+        bool
+        default y if ESP_PTP_PORT0_TYPE_PRIMARY && (ESP_PTP_PORT0_MEDIUM_WIFI || ESP_PTP_PORT0_MEDIUM_WIFI_CP) && ESP_PTP_PORT0_WIFI_ROLE_STA
+        depends on ESP_AVB && !ESP_AVB_ROLE_BRIDGE
+
+    config ESP_AVB_ROLE_ENDPOINT_WIRED
+        bool
+        default y if ESP_PTP_PORT0_TYPE_PRIMARY && ESP_PTP_PORT0_MEDIUM_ETHERNET
+        depends on ESP_AVB && !ESP_AVB_ROLE_BRIDGE && !ESP_AVB_ROLE_ENDPOINT_WIRELESS
 
     config ESP_AVB_FTM_IE_HOOK
         bool "Use FTM-frame Vendor IE for FollowUpInformation transport"

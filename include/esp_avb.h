@@ -108,6 +108,7 @@ typedef struct {
 typedef struct {
   bool talker;                               // enable talker
   bool listener;                             // enable listener
+  bool codec_disabled;                       // skip I2S+codec init (no audio hardware, e.g. c6 Wi-Fi endpoint)
   bool atdecc_control;                       // allow remote control via ATDECC
   bool milan_compliant;                      // enable Milan-specific behavior
   bool avb_lite_compliant;                  // allow AVB Lite mode with standard PTP
@@ -121,6 +122,7 @@ typedef struct {
   const char *firmware_version;              // firmware version
   const char *serial_number;                 // serial number
   char *eth_interface;                       // ethernet interface name
+  char *wifi_interface;                      // wifi netif if_key (bridge port[1]); NULL for endpoints
   uint8_t i2s_port;                          // i2s port number
   avb_codec_pins_s codec_pins;               // i2s/i2c/PA pin assignments
   esp_eth_handle_t *eth_handle;              // ethernet handle

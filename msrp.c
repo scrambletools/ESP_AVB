@@ -450,6 +450,67 @@ int avb_process_msrp_talker(avb_state_s *state, msrp_msgbuf_s *msg_data,
   eth_addr_t talker_addr;
   memcpy(&talker_addr, msg.talker.info.stream_id, ETH_ADDR_LEN);
 
+#ifdef CONFIG_ESP_AVB_ROLE_BRIDGE
+  /* Bridge admission control. A TALKER_ADVERTISE arriving on one port
+   * would be re-declared by the bridge MAP on the other port; before
+   * propagating, check that the egress port has the budget for it. If
+   * not, the bridge re-declares as TALKER_FAILED with failure_code =
+   * insufficient_bandwidth_for_traffic_class (IEEE 802.1Q-2018
+   * §35.2.2.8.4 and Table 35-7).
+   *
+   * is_failed=true means the upstream side already gave up; nothing
+   * to admit.
+   *
+   * Phase 5d: we don't yet know the ingress port (the L2 forwarder
+   * wires that in Phase 5b). Until then assume worst-case egress —
+   * the Wi-Fi port (port 1 when NUM_PORTS=2). */
+  if (!is_failed && CONFIG_ESP_AVB_NUM_PORTS > 1) {
+    avb_sr_class_e cls =
+        (msg.talker.info.priority == 3) ? AVB_SR_CLASS_A : AVB_SR_CLASS_B;
+    uint16_t mfs =
+        (uint16_t)octets_to_uint(msg.talker.info.tspec_max_frame_size, 2);
+    uint16_t mfi = (uint16_t)octets_to_uint(
+        msg.talker.info.tspec_max_frame_interval, 2);
+    /* Observation interval per SR class:
+     *   Class A = 125 µs → 8000 intervals/s
+     *   Class B = 250 µs → 4000 intervals/s
+     * Bandwidth = max_frame_size × frames_per_interval × intervals/s × 8. */
+    uint32_t intervals_per_sec = (cls == AVB_SR_CLASS_A) ? 8000u : 4000u;
+    uint32_t request_bps =
+        (uint32_t)mfs * (uint32_t)mfi * intervals_per_sec * 8u;
+
+    int egress_port = 1; /* Phase 5b will replace with !ingress_port */
+    int adm = avb_srp_admission_try_admit(egress_port, cls, request_bps);
+    if (adm < 0) {
+      avbwarn("MSRP TALKER over budget on port %d class %s: %u bps; "
+              "re-declaring as TALKER_FAILED",
+              egress_port, (cls == AVB_SR_CLASS_A) ? "A" : "B",
+              (unsigned)request_bps);
+
+      /* Re-declare as TALKER_FAILED on the egress side. Build the
+       * full failed message directly so we can set failure_code =
+       * insufficient_bandwidth_for_traffic_class (the existing
+       * avb_send_msrp_talker hard-codes failure_code = 0). */
+      msrp_talker_message_u failed;
+      memset(&failed, 0, sizeof(failed));
+      failed.header.attr_type = msrp_attr_type_talker_failed;
+      failed.header.attr_len = 34;
+      int attr_list_len = 38;
+      int_to_octets(&attr_list_len, failed.header.attr_list_len, 2);
+      failed.header.vechead_num_vals = 1;
+      memcpy(&failed.talker_failed.info, &msg.talker.info,
+             sizeof(talker_adv_info_s));
+      memcpy(failed.talker_failed.failure_bridge_id,
+             state->port[0].internal_mac_addr, ETH_ADDR_LEN);
+      failed.talker_failed.failure_code =
+          insufficient_bandwidth_for_traffic_class;
+      failed.talker_failed.event_data[0] = int_to_3pe(mrp_attr_event_new, 0, 0);
+      avb_send_msrp_attr(state, &failed, attr_list_len, "Talker Failed");
+      return OK;
+    }
+  }
+#endif /* CONFIG_ESP_AVB_ROLE_BRIDGE */
+
   // If the talker is known then update talker info
   int index =
       avb_find_entity_by_addr(state, &talker_addr, avb_entity_type_talker);
@@ -808,6 +869,9 @@ int avb_srp_admission_try_admit(int port_index, avb_sr_class_e cls,
     return -2; /* -ENOSPC: would exceed 75 % cap */
   }
   e->admitted_bps += request_bps;
+  /* Push the new aggregate idle_slope into the FQTSS shaper so the
+   * credit refill rate matches the admitted bandwidth. */
+  avb_fqtss_set_idle_slope(port_index, cls, (int64_t)e->admitted_bps);
   return 0;
 }
 
@@ -821,6 +885,7 @@ void avb_srp_admission_release(int port_index, avb_sr_class_e cls,
   } else {
     e->admitted_bps = 0;
   }
+  avb_fqtss_set_idle_slope(port_index, cls, (int64_t)e->admitted_bps);
 }
 
 #endif /* CONFIG_ESP_AVB_ROLE_BRIDGE */

@@ -15,7 +15,10 @@
 
 #include "avb.h"
 #include "esp_timer.h"
+#include "soc/soc_caps.h"
+#if SOC_EMAC_SUPPORTED
 #include "soc/emac_dma_struct.h"
+#endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -174,13 +177,19 @@ static void avb_cpu_stats_tick(void) {
    * the MTL FIFO (before DMA). Both fields clear on read. If missed_fc
    * is non-zero we're losing packets at the NIC because emac_rx isn't
    * draining fast enough — the most likely explanation for PTP frames
-   * visible on the wire but never reaching avb_unified_rx_cb. */
+   * visible on the wire but never reaching avb_unified_rx_cb.
+   *
+   * Only meaningful on targets with on-chip EMAC (e.g. esp32p4). On
+   * Wi-Fi-only targets (esp32c6 endpoint, Phase 6b) the AVB ingress
+   * comes from esp_wifi instead and these registers don't exist. */
+#if SOC_EMAC_SUPPORTED
   uint32_t dma_miss = EMAC_DMA.dmamissedfr.val;
   avbinfo("  ====> EMAC DMA missed_fc=%u overflow_fc=%u bmfc_ovf=%u bfoc_ovf=%u",
           (unsigned)(dma_miss & 0xFFFF),
           (unsigned)((dma_miss >> 17) & 0x7FF),
           (unsigned)((dma_miss >> 16) & 1),
           (unsigned)((dma_miss >> 28) & 1));
+#endif
 
   /* Stream-in (listener) + stream-out (talker) + MCLK / PLL state —
    * centralized periodic diagnostics. Each print function is silent

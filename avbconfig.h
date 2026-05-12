@@ -95,6 +95,7 @@
    .firmware_version = "1.0.0",                                                \
    .serial_number = "12345678",                                                \
    .eth_interface = DEF_ETH_IF,                                                \
+   .wifi_interface = NULL,                                                     \
    .i2s_port = 0,                                                              \
    .codec_pins = {.mclk = 13,                                                  \
                   .bclk = 12,                                                  \

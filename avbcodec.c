@@ -14,6 +14,7 @@
 #include "es8388_codec.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
+#include "soc/soc_caps.h" /* SOC_CLK_APLL_SUPPORTED */
 
 #define I2C_NUM (0)
 #define AVB_MCLK_MULTIPLE                                                      \
@@ -143,8 +144,17 @@ esp_err_t avb_config_i2s(avb_state_s *state) {
   std_cfg.clk_cfg.mclk_multiple = AVB_MCLK_MULTIPLE;
   /* Use APLL as the clock source so the Milan media-clock PLL
    * (avb_mclk / avb_mclk_apll) can retune MCLK with sub-ppm precision
-   * without having to disable/reconfigure the I2S channel. */
+   * without having to disable/reconfigure the I2S channel.
+   *
+   * On SOCs without an APLL (e.g. esp32c6) fall back to XTAL — the
+   * Milan PLL's hardware-tune path is a no-op there (see avbpll.c's
+   * SOC_CLK_APLL_SUPPORTED gate); Phase 6b.2 will need a software-only
+   * clock-recovery alternative for that target. */
+#if SOC_CLK_APLL_SUPPORTED
   std_cfg.clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+#else
+  std_cfg.clk_cfg.clk_src = I2S_CLK_SRC_XTAL;
+#endif
   /* Big-endian in-memory sample layout: byte[0]=MSB, byte[2]=LSB. This
    * matches AVTP wire order so the stream-in handler can memcpy AAF
    * payloads straight to the jitter ring with no per-sample shuffle. */

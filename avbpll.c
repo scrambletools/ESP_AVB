@@ -44,7 +44,8 @@
 #include "avb.h"
 #include "esp_timer.h"
 #include "hal/clk_tree_ll.h" /* CLK_LL_APLL_MIN_HZ */
-#include "soc/rtc.h" /* rtc_clk_apll_coeff_calc / _set */
+#include "soc/rtc.h"      /* rtc_clk_apll_coeff_calc / _set */
+#include "soc/soc_caps.h" /* SOC_CLK_APLL_SUPPORTED */
 #include <inttypes.h>
 #include <stdatomic.h>
 
@@ -76,6 +77,7 @@ static struct {
 } s_hw;
 
 static int mclk_hw_init(uint32_t nominal_mclk_hz) {
+#if SOC_CLK_APLL_SUPPORTED
   if (nominal_mclk_hz == 0)
     return -1;
   /* Match the ESP-IDF I2S driver's divider selection so our retune
@@ -92,13 +94,27 @@ static int mclk_hw_init(uint32_t nominal_mclk_hz) {
                " Hz div=%" PRIu32 " apll_target=%" PRIu32 " Hz",
            nominal_mclk_hz, s_hw.mclk_div, s_hw.nominal_apll_hz);
   return 0;
+#else
+  /* No APLL on this SOC (e.g. esp32c6). Phase 6b.2 will need a
+   * software-only clock-recovery path on Wi-Fi-only targets. */
+  (void)nominal_mclk_hz;
+  s_hw.initialised = false;
+  return -1;
+#endif
 }
 
 /* Apply an absolute ppm offset (Q16) to the nominal MCLK.
  *   actual_mclk = nominal_mclk * (1 + ppm/1e6)
  * Positive → faster, negative → slower. Repeated calls replace the prior
- * tuning; they're not incremental. */
+ * tuning; they're not incremental.
+ *
+ * Hardware path uses the on-chip APLL coefficient registers via
+ * rtc_clk_apll_coeff_calc/_set. These are only available on SOCs with
+ * APLL (e.g. ESP32-P4); Wi-Fi-only targets like ESP32-C6 have no APLL.
+ * On those targets this is a stub that returns -1; Phase 6b.2 will
+ * supply a software clock-recovery alternative on the Wi-Fi path. */
 static int mclk_hw_tune_ppm_q16(int32_t ppm_q16) {
+#if SOC_CLK_APLL_SUPPORTED
   if (!s_hw.initialised)
     return -1;
   int64_t delta_hz =
@@ -120,6 +136,10 @@ static int mclk_hw_tune_ppm_q16(int32_t ppm_q16) {
   rtc_clk_apll_coeff_set(o_div, sdm0, sdm1, sdm2);
   s_hw.actual_apll_hz = real_hz;
   return 0;
+#else
+  (void)ppm_q16;
+  return -1;
+#endif
 }
 
 static void mclk_hw_deinit(void) {

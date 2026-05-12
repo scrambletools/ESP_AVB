@@ -50,7 +50,7 @@ static uint8_t avb_msrp_priority_for_stream(avb_state_s *state,
 typedef struct {
   volatile bool active;              /* true while stream_out_task running */
   volatile uint32_t pkt_count;       /* TX packets attempted */
-  volatile uint32_t send_fail_count; /* esp_eth_transmit failures */
+  volatile uint32_t send_fail_count; /* avb_net_transmit_raw failures */
   volatile uint32_t overrun_count;   /* send loop late beyond interval */
   volatile int64_t overrun_max_us;   /* worst overrun this session */
   volatile uint32_t i2s_zero_reads;  /* mic ring read returned 0 bytes */
@@ -1090,8 +1090,12 @@ static void avb_stream_out_task(void *task_param) {
                           params->channels);
     } /* end else (mic path) */
 
-    /* Transmit directly via EMAC — single copy into DMA ring */
-    if (esp_eth_transmit(params->eth_handle, tx_frame, frame_len) != ESP_OK) {
+    /* Transmit via avbnet's medium-abstracted raw send. On the EMAC
+     * port this is a single copy into the DMA ring; Phase 6b.2 will
+     * route wifi-medium ports to esp_wifi internal TX with the same
+     * caller signature. */
+    if (avb_net_transmit_raw(params->eth_handle, tx_frame, frame_len) !=
+        ESP_OK) {
       send_fail_count++;
     }
 
@@ -2159,7 +2163,7 @@ static void avb_crf_stream_out_task(void *task_param) {
       avtp[27 - i] = (uint8_t)(crf_ts_ns & 0xFF);
       crf_ts_ns >>= 8;
     }
-    esp_eth_transmit(params->eth_handle, frame, sizeof(frame));
+    avb_net_transmit_raw(params->eth_handle, frame, sizeof(frame));
   }
 
   avbinfo("CRF stream out %d stopped", params->stream_index);

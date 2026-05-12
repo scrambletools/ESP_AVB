@@ -65,6 +65,97 @@ void avb_bridge_stop(avb_state_s *state) {
   s_bridge_stop = true;
 }
 
+/* EtherType / VLAN-PCP based forwarding decision tree. Pure function;
+ * pure-software CBS shaping decisions live in avbfqtss.c, MSRP/MVRP
+ * attribute propagation lives in msrp.c — this just decides which
+ * subsystem owns the frame.
+ *
+ * Per IEEE 802.1Q-2022 / 802.1AS-2020:
+ *   PTP (0x88f7)    — link-local; each port runs its own time-aware
+ *                      bridge logic; the bridge does NOT forward.
+ *   MSRP (0x22ea),
+ *   MVRP (0x88f5)   — MRP attribute frames; the bridge MAP terminates
+ *                      and re-declares per port, never forwards raw.
+ *   AVTP control
+ *   (0x22f0)        — ADP / AECP / ACMP / MAAP. We forward to the
+ *                      other port best-effort (no FQTSS shaping —
+ *                      these are low-rate and untagged).
+ *   AVTP stream
+ *   (0x8100 VLAN)   — Class A (PCP 3) and Class B (PCP 2) audio /
+ *                      video stream data. Routed through FQTSS.
+ *                      Class A from Ethernet to Wi-Fi is dropped per
+ *                      the v1 plan (Wi-Fi admits Class B only).
+ *   Other           — IP, ARP, etc. — forwarded best-effort. */
+
+#define ETHERTYPE_PTP  0x88f7
+#define ETHERTYPE_AVTP 0x22f0
+#define ETHERTYPE_MSRP 0x22ea
+#define ETHERTYPE_MVRP 0x88f5
+#define ETHERTYPE_VLAN 0x8100
+
+avb_bridge_disposition_t avb_bridge_classify(int ingress_port,
+                                             uint16_t ethertype,
+                                             uint8_t vlan_pcp) {
+  avb_bridge_disposition_t d = {0};
+  /* Egress is always the OTHER port. Asserts NUM_PORTS == 2 in the
+   * bridge build; with NUM_PORTS=1 the bridge can't actually forward
+   * anything (Phase 5 carries NUM_PORTS=1 until the AP project
+   * bumps it). */
+  d.egress_port = (uint8_t)((ingress_port == 0) ? 1 : 0);
+
+  switch (ethertype) {
+  case ETHERTYPE_PTP:
+  case ETHERTYPE_MSRP:
+  case ETHERTYPE_MVRP:
+    /* Terminated locally by ptpd / msrp.c MRP MAP. The existing
+     * per-protocol handlers in avb_process_rx_message do the work; the
+     * bridge does NOT forward raw frames. */
+    d.verdict = AVB_BRIDGE_TERMINATE;
+    return d;
+
+  case ETHERTYPE_AVTP:
+    /* AVTP control (untagged) — ADP / AECP / ACMP / MAAP. Forward
+     * best-effort to the other port (no shaping — low-rate). The
+     * bridge endpoint also lets these reach its own protocol handler
+     * via the existing dispatch in avb_process_rx_message; the
+     * forwarder copies the frame onto the egress wire in parallel. */
+    d.verdict = AVB_BRIDGE_BRIDGE;
+    d.shaped = false;
+    return d;
+
+  case ETHERTYPE_VLAN:
+    /* VLAN-tagged AVTP stream data. PCP encodes the SR class:
+     *   PCP 3 → Class A, PCP 2 → Class B (matches our Kconfig
+     *   defaults ESP_AVB_VLAN_PRIO_CLASS_A / _CLASS_B). */
+    if (vlan_pcp == CONFIG_ESP_AVB_VLAN_PRIO_CLASS_A) {
+      d.sr_class = AVB_SR_CLASS_A;
+    } else if (vlan_pcp == CONFIG_ESP_AVB_VLAN_PRIO_CLASS_B) {
+      d.sr_class = AVB_SR_CLASS_B;
+    } else {
+      /* Unrecognized PCP on a VLAN frame — best-effort forward. */
+      d.verdict = AVB_BRIDGE_BRIDGE;
+      d.shaped = false;
+      return d;
+    }
+    /* Class A → Wi-Fi: dropped per v1 plan (Wi-Fi admits Class B
+     * only). egress_port == 1 means "Wi-Fi" here because the bridge
+     * is wired as port[0] = Ethernet, port[1] = Wi-Fi. */
+    if (d.sr_class == AVB_SR_CLASS_A && d.egress_port == 1) {
+      d.verdict = AVB_BRIDGE_DROP;
+      return d;
+    }
+    d.verdict = AVB_BRIDGE_BRIDGE;
+    d.shaped = true;
+    return d;
+
+  default:
+    /* Untagged non-AVB traffic (ARP, IP, etc.) — best-effort. */
+    d.verdict = AVB_BRIDGE_BRIDGE;
+    d.shaped = false;
+    return d;
+  }
+}
+
 /* ----------------------------------------------------------------------
  * Bridge-role stubs for endpoint-only ATDECC functions.
  *

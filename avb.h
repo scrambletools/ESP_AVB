@@ -2825,6 +2825,22 @@ int avb_net_send(avb_state_s *state, ethertype_t ethertype, void *msg,
                  uint16_t msg_len, struct timespec *t);
 int avb_net_recv_ctrl(avb_state_s *state, int *protocol_idx, void *msg,
                       uint16_t msg_len, eth_addr_t *src_addr, int timeout_ms);
+
+/* Fast-path raw frame TX for AVTP stream egress.
+ *
+ * The control-plane senders (avb_net_send / _send_to / _send_to_vlan)
+ * write to L2TAP file descriptors so the netif stack handles framing.
+ * The talker stream tasks bypass that and shoot the already-built
+ * Ethernet frame directly into the DMA ring — every microsecond
+ * counts on the audio path.
+ *
+ * Implementation is the medium-abstraction seam: today it wraps
+ * esp_eth_transmit on EMAC-backed ports; Phase 6b.2 will route to
+ * esp_wifi internal TX on wifi-backed ports. Callers stay unchanged
+ * across that transition. */
+esp_err_t avb_net_transmit_raw(esp_eth_handle_t eth_handle,
+                               const void *frame, size_t frame_len);
+
 void avb_net_set_stream_rx_handler(avb_stream_rx_handler_t handler, void *ctx);
 /* Number of incoming stream frames dropped because the AVB-IN queue
  * was full. Diagnostic counter; persistent across the session. */

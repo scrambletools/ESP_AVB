@@ -225,6 +225,40 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   state->port[0].as_capable = true;
   state->port[0].neighbor_gptp_capable = true;
 
+#if CONFIG_ESP_AVB_NUM_PORTS > 1
+  /* Port 1 — second medium for the bridge role. Configuration mirrors
+   * port[0] but driven by CONFIG_ESP_AVB_PORT1_*. Runtime state
+   * (internal_mac_addr, l2if[], last_transmitted_*) is populated by
+   * avb_net_init's per-port loop. */
+  state->port[1].enabled = true;
+#if defined(CONFIG_ESP_AVB_PORT1_MEDIUM_WIFI)
+  state->port[1].medium = avb_port_medium_wifi;
+#else
+  state->port[1].medium = avb_port_medium_ethernet;
+#endif
+#if defined(CONFIG_ESP_AVB_PORT1_TIME_SOURCE_BEACON_IE_WIFI)
+  state->port[1].time_source = avb_port_time_source_beacon_ie_wifi;
+#elif defined(CONFIG_ESP_AVB_PORT1_TIME_SOURCE_FTM_ONLY)
+  state->port[1].time_source = avb_port_time_source_ftm_only;
+#else
+  state->port[1].time_source = avb_port_time_source_gptp_wired;
+#endif
+  /* The if_key for the Wi-Fi AP netif. The bridge application sets it
+   * to "WIFI_0" via the inherent config when creating
+   * esp_netif_create_wifi(WIFI_IF_AP, ...). */
+  if (config->wifi_interface) {
+    strncpy(state->port[1].eth_interface, config->wifi_interface,
+            sizeof(state->port[1].eth_interface) - 1);
+    state->port[1].eth_interface
+        [sizeof(state->port[1].eth_interface) - 1] = '\0';
+  }
+  /* Wi-Fi port asCapable / neighbor_gptp_capable will be updated by
+   * the per-port asCapable logic (clause 12.4) in Phase 6/7; default
+   * false until the wireless endpoint negotiates. */
+  state->port[1].as_capable = false;
+  state->port[1].neighbor_gptp_capable = false;
+#endif /* CONFIG_ESP_AVB_NUM_PORTS > 1 */
+
 #if defined(CONFIG_ESP_AVB_ROLE_BRIDGE)
   /* Bridge has no codec / talker / listener. Skip the entire codec
    * caps + sample-rate / bits-per-sample intersection block. */
@@ -491,12 +525,18 @@ static int avb_initialize_state(avb_state_s *state, avb_config_s *config) {
   state->logo_start = (uint8_t *)logo_png_start;
   state->logo_length = logo_png_end - logo_png_start;
 
-  // Get latest PTP status
-  struct ptpd_status_s ptp_status;
-  // if valid PTP status
-  if (ptpd_status(0, &ptp_status) == 0) {
-    state->ptp_status = ptp_status;
-    avb_update_avb_lite_from_ptp(state);
+  // Get latest PTP status. Skip on wifi-medium ports where ptpd hasn't
+  // been started yet (Phase 6b — wifi endpoint relies on beacon-IE
+  // FollowUpInformation, not the wired ptpd protocol loop). The
+  // ptpd_status call would otherwise crash on s_state==NULL even with
+  // ptpd_status's own NULL guard — observed under -O2 the guard branch
+  // didn't reliably bypass the s_state-> stores on at least one build.
+  if (state->port[0].medium == avb_port_medium_ethernet) {
+    struct ptpd_status_s ptp_status;
+    if (ptpd_status(0, &ptp_status) == 0) {
+      state->ptp_status = ptp_status;
+      avb_update_avb_lite_from_ptp(state);
+    }
   }
 
   // Initialize MAAP for output stream multicast address acquisition
@@ -527,11 +567,15 @@ static int avb_destroy_state(avb_state_s *state) {
   return OK;
 }
 
-/* Get latest PTP status */
+/* Get latest PTP status. Same gating as the avb_initialize_state
+ * call site: skip on wifi-medium ports (Phase 6b — ptpd isn't
+ * started there yet; the wifi endpoint syncs via beacon-IE
+ * FollowUpInformation, not the on-wire PTP loop). */
 static void avb_update_ptp_status(avb_state_s *state) {
-  // if valid PTP status
+  if (state->port[0].medium != avb_port_medium_ethernet) {
+    return;
+  }
   struct ptpd_status_s ptp_status;
-  // if valid PTP status
   if (ptpd_status(0, &ptp_status) == 0) {
     memcpy(&state->ptp_status, &ptp_status, sizeof(struct ptpd_status_s));
     avb_update_avb_lite_from_ptp(state);
@@ -887,7 +931,8 @@ static void avb_task(void *task_param) {
 
   state->codec_enabled = false;
 
-  if (state->config.talker || state->config.listener) {
+  if ((state->config.talker || state->config.listener) &&
+      !state->config.codec_disabled) {
 
     /* Initialize i2s interface to codec */
     if (avb_config_i2s(state) != ESP_OK) {
@@ -902,6 +947,8 @@ static void avb_task(void *task_param) {
     } else {
       state->codec_enabled = true;
     }
+  } else if (state->config.codec_disabled) {
+    avbinfo("Codec disabled by config — skipping I2S + codec init");
   }
 
   // Load persistent data from NVS — must be after codec init so
